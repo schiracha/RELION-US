@@ -1,0 +1,4 @@
+pandas>=2.0
+starfile>=0.5
+streamlit>=1.30
+pytest>=7.0

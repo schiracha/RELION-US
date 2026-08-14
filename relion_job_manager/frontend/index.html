@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RELION Job Manager</title>
+  <link rel="stylesheet" href="vendor/winbox.min.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="topbar">
+    <button id="toggleSidebarBtn" title="Hide/show job list">☰ Jobs</button>
+    <span id="appTitle">RELION Job Manager</span>
+    <button id="changeProjectBtn" title="Switch to a different RELION project directory">📁 Change Project</button>
+    <span id="projectDirLabel"></span>
+    <div id="zoomControl">
+      <label for="zoomSlider">Scale</label>
+      <input type="range" id="zoomSlider" min="60" max="160" value="100" step="5" />
+      <span id="zoomValue">100%</span>
+    </div>
+  </div>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div id="jobSearchWrap">
+        <input type="text" id="jobSearch" placeholder="Filter jobs…" />
+      </div>
+      <div id="jobCategories"></div>
+    </aside>
+    <main id="mainArea">
+      <div id="emptyState">
+        <p>Select a job type from the list to open it in its own window.</p>
+        <p class="hint">Multiple jobs can be open at once, each in its own draggable/resizable popup — click a running job's title bar to bring it forward.</p>
+      </div>
+      <div id="runningJobsBar"></div>
+    </main>
+  </div>
+
+  <div id="projectModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Change Project</h3>
+      <p class="modal-hint">Type a path directly, or browse below. This lists folders on the machine running the backend (not your browser's machine) — that matters if you're connected to a remote host like a Rivanna/Afton login node.</p>
+      <div class="modal-row">
+        <input type="text" id="projectPathInput" placeholder="/path/to/relion/project" />
+        <button id="projectPathGoBtn" class="btn">Go</button>
+      </div>
+      <div id="projectBrowser" class="project-browser"></div>
+      <div class="modal-actions">
+        <button id="projectSwitchBtn" class="btn primary">Switch to this folder</button>
+        <button id="projectModalCancelBtn" class="btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="notAProjectOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Not a RELION project</h3>
+      <p>This doesn't look like a Relion Project. Would you like to start a new project, or select a different folder?</p>
+      <div class="modal-actions">
+        <button id="startNewProjectBtn" class="btn primary">Start new project here</button>
+        <button id="pickDifferentFolderBtn" class="btn">Select a different folder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vendored locally (frontend/vendor/), not loaded from a CDN: Rivanna/Afton
+       login nodes and many workstations have no outbound internet access,
+       and this app needs to work there. See frontend/vendor/WINBOX_LICENSE.txt
+       (Apache-2.0) and https://github.com/nextapps-de/winbox. -->
+  <script src="vendor/winbox.bundle.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
