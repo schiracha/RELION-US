@@ -4,8 +4,8 @@ Unit tests for converters/imod_bridge.py.
 .xf / .tlt tests run everywhere (pure Python, plain text formats).
 .mod tests are skipped automatically if IMOD's point2model/model2point
 aren't on PATH (they won't be in this sandbox — that's expected; they will
-be on Rivanna/Afton after `module load imod`, or on a workstation with IMOD
-installed).
+be available after `module load imod` on an HPC cluster, or on a
+workstation with IMOD installed).
 """
 import shutil
 import sys

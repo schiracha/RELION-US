@@ -37,7 +37,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from job_catalog import CATEGORIES, CUSTOM_JOBS, JOB_CATALOG
+from job_catalog import CATEGORIES, CUSTOM_JOBS, JOB_CATALOG, pipeline_type
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -152,6 +152,7 @@ def build_job_definition(internal_name: str) -> dict:
         "draft_command": draft_command,
         "unmapped_fields": unmapped,
         "is_custom": False,
+        "pipeline_type": pipeline_type(internal_name),
     }
 
 
@@ -168,6 +169,7 @@ def list_catalog() -> list[dict]:
                 "category": category,
                 "description": description,
                 "is_custom": False,
+                "pipeline_type": pipeline_type(internal_name),
             }
         )
     for internal_name, meta in CUSTOM_JOBS.items():
@@ -179,6 +181,7 @@ def list_catalog() -> list[dict]:
                 "category": meta["category"],
                 "description": meta["description"],
                 "is_custom": True,
+                "pipeline_type": pipeline_type(internal_name),
             }
         )
     return out

@@ -148,3 +148,72 @@ def test_init_new_project_wraps_permission_error(tmp_path, monkeypatch):
     with pytest.raises(project_manager.PermissionDeniedError) as excinfo:
         project_manager.init_new_project(tmp_path / "no_access_project")
     assert str(excinfo.value) == project_manager.PERMISSION_ERROR_MESSAGE
+
+
+# --- detect_pipeline_hint / SPA-Tomo-All toggle auto-switch -----------------
+# Builds a real default_pipeline.star with `starfile` (same tool the app
+# itself uses -- see converters/star_io.py) rather than hand-typing STAR
+# text, so these tests exercise the actual parse path.
+
+def _write_fake_pipeline_star(project_dir: Path, type_labels: list[str]) -> None:
+    import pandas as pd
+    import starfile
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    general = pd.DataFrame({"rlnPipeLineJobCounter": [len(type_labels)]})
+    processes = pd.DataFrame(
+        {
+            "rlnPipeLineProcessName": [f"Job/job{i:03d}/" for i in range(len(type_labels))],
+            "rlnPipeLineProcessAlias": ["None"] * len(type_labels),
+            "rlnPipeLineProcessTypeLabel": type_labels,
+            "rlnPipeLineProcessStatusLabel": ["Succeeded"] * len(type_labels),
+        }
+    )
+    starfile.write(
+        {"pipeline_general": general, "pipeline_processes": processes},
+        project_dir / project_manager.RELION_PIPELINE_STAR,
+        overwrite=True,
+    )
+
+
+def test_detect_pipeline_hint_unknown_for_brand_new_project(tmp_path):
+    d = tmp_path / "new_project"
+    project_manager.init_new_project(d)  # no default_pipeline.star written
+    assert project_manager.detect_pipeline_hint(d) == "unknown"
+
+
+def test_detect_pipeline_hint_unknown_for_nonexistent_dir(tmp_path):
+    assert project_manager.detect_pipeline_hint(tmp_path / "does_not_exist") == "unknown"
+
+
+def test_detect_pipeline_hint_spa_only(tmp_path):
+    d = tmp_path / "spa_project"
+    # relion.motioncorr / relion.ctffind are 'shared' (see job_catalog.py),
+    # relion.extract is SPA-only -- only the SPA-only label should tip it.
+    _write_fake_pipeline_star(d, ["relion.motioncorr", "relion.ctffind", "relion.extract"])
+    assert project_manager.detect_pipeline_hint(d) == "spa"
+
+
+def test_detect_pipeline_hint_tomo_only(tmp_path):
+    d = tmp_path / "tomo_project"
+    _write_fake_pipeline_star(d, ["relion.importtomo", "relion.motioncorr", "relion.aligntiltseries"])
+    assert project_manager.detect_pipeline_hint(d) == "tomo"
+
+
+def test_detect_pipeline_hint_mixed_when_both_present(tmp_path):
+    d = tmp_path / "mixed_project"
+    _write_fake_pipeline_star(d, ["relion.extract", "relion.importtomo"])
+    assert project_manager.detect_pipeline_hint(d) == "mixed"
+
+
+def test_detect_pipeline_hint_unknown_when_only_shared_labels_present(tmp_path):
+    d = tmp_path / "shared_only_project"
+    _write_fake_pipeline_star(d, ["relion.motioncorr", "relion.ctffind", "relion.class2d"])
+    assert project_manager.detect_pipeline_hint(d) == "unknown"
+
+
+def test_detect_pipeline_hint_unknown_on_corrupt_pipeline_star(tmp_path):
+    d = tmp_path / "corrupt_project"
+    d.mkdir()
+    (d / project_manager.RELION_PIPELINE_STAR).write_text("this is not valid STAR\n")
+    assert project_manager.detect_pipeline_hint(d) == "unknown"

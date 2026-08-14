@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import job_registry
-from job_catalog import CUSTOM_JOBS, JOB_CATALOG
+from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY, pipeline_type
 
 CPP_ARTIFACT_RE = re.compile(r"std::|\(\(|\)\)")
 
@@ -100,3 +100,50 @@ def test_catalog_lists_all_relion_and_custom_jobs():
     assert names == set(JOB_CATALOG.keys()) | set(CUSTOM_JOBS.keys())
     n_custom = sum(1 for j in catalog if j["is_custom"])
     assert n_custom == len(CUSTOM_JOBS)
+
+
+# --- SPA / Tomo / All jobs-list toggle --------------------------------------
+
+def test_catalog_entries_carry_a_pipeline_type():
+    """Every job the sidebar can render must be classifiable, or the
+    SPA/Tomo/All toggle would silently drop it from every filtered view."""
+    for job in job_registry.list_catalog():
+        assert job["pipeline_type"] in ("spa", "tomo", "shared"), job["internal_name"]
+
+
+def test_tomo_prefixed_internal_names_are_never_classified_spa():
+    """internal_name's own 'Tomo' prefix is RELION's own naming convention
+    (pipeline_jobs.h) for tomography-specific jobs -- a job named TomoXxx
+    being reachable under the SPA-only view would be a real usability bug,
+    not just an inconsistency."""
+    for internal_name in JOB_CATALOG:
+        if internal_name.startswith("Tomo"):
+            assert pipeline_type(internal_name) != "spa", internal_name
+
+
+def test_spa_and_tomo_toggle_never_hides_all_jobs():
+    """Regression guard for the hard requirement behind this feature ('I
+    want all jobs available no matter what type of pipeline'): the SPA view
+    and the Tomo view must each still show at least the shared jobs, and
+    between them every job in the catalog must be reachable without
+    switching to 'All'."""
+    all_names = set(JOB_CATALOG) | set(CUSTOM_JOBS)
+    visible_in_spa = {n for n in all_names if pipeline_type(n) in ("spa", "shared")}
+    visible_in_tomo = {n for n in all_names if pipeline_type(n) in ("tomo", "shared")}
+    assert visible_in_spa  # SPA view is never empty
+    assert visible_in_tomo  # Tomo view is never empty
+    assert visible_in_spa | visible_in_tomo == all_names
+
+
+def test_pipeline_classification_sets_are_disjoint_and_known():
+    all_names = set(JOB_CATALOG) | set(CUSTOM_JOBS)
+    assert PIPELINE_SPA_ONLY <= all_names
+    assert PIPELINE_TOMO_ONLY <= all_names
+    assert PIPELINE_SPA_ONLY.isdisjoint(PIPELINE_TOMO_ONLY)
+
+
+def test_pipeline_type_unknown_name_defaults_to_shared():
+    """Anything not explicitly classified falls back to 'shared' (visible in
+    both filtered views) rather than disappearing -- the safer failure mode
+    for a display-only convenience feature."""
+    assert pipeline_type("SomeFutureJobTypeNotYetClassified") == "shared"

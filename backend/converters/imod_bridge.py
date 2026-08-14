@@ -116,7 +116,7 @@ def _require_binary(name: str) -> str:
         raise RuntimeError(
             f"'{name}' not found on PATH. This function shells out to IMOD's "
             f"own {name} rather than reimplementing the .mod format — load "
-            f"the IMOD module (e.g. `module load imod` on Rivanna/Afton) or "
+            f"the IMOD module (e.g. `module load imod` on an HPC cluster) or "
             f"activate your local IMOD install first."
         )
     return resolved

@@ -31,7 +31,12 @@ Endpoints:
                                               stream for one run
   GET  /api/project                       -> current project dir + whether
                                               it's a recognized RELION
-                                              project + its run history
+                                              project + its run history +
+                                              a best-effort SPA/Tomo/mixed/
+                                              unknown pipeline_hint (see
+                                              project_manager.detect_pipeline
+                                              _hint) for auto-selecting the
+                                              Jobs-list toggle
   POST /api/project/browse                -> server-side folder listing,
                                               for the "select folder" UI
                                               (the backend may be on a
@@ -189,6 +194,13 @@ def get_project():
         "path": str(run_manager.project_dir),
         "is_relion_project": project_manager.is_relion_project(run_manager.project_dir),
         "history": run_manager.list_runs(),
+        # 'tomo' | 'spa' | 'mixed' | 'unknown' — best-effort guess from which
+        # job types this project has actually run (there's no single SPA/
+        # Tomo flag in RELION's own STAR files; see
+        # project_manager.detect_pipeline_hint()). The frontend uses this to
+        # optionally auto-select the Jobs-list toggle; it never gates which
+        # jobs are runnable.
+        "pipeline_hint": project_manager.detect_pipeline_hint(run_manager.project_dir),
     }
 
 

@@ -40,6 +40,10 @@ async function loadCatalog() {
       const item = document.createElement("div");
       item.className = "job-item" + (job.is_custom ? " custom" : "");
       item.dataset.search = (job.display_name + " " + job.description).toLowerCase();
+      // 'spa' | 'tomo' | 'shared' — see backend/job_catalog.py's
+      // pipeline_type() for how this is assigned. Used by applyJobFilters()
+      // below for the SPA/Tomo/All toggle; never affects clickability.
+      item.dataset.pipeline = job.pipeline_type || "shared";
       item.innerHTML = `<span class="job-name">${escapeHtml(job.display_name)}</span>
                          <span class="job-desc">${escapeHtml(job.description)}</span>`;
       item.addEventListener("click", () => openJobPopup(job.internal_name, job.display_name, job.is_custom));
@@ -47,6 +51,8 @@ async function loadCatalog() {
     }
     container.appendChild(block);
   }
+
+  applyJobFilters();
 }
 
 function escapeHtml(s) {
@@ -55,10 +61,32 @@ function escapeHtml(s) {
   }[c]));
 }
 
-document.getElementById("jobSearch").addEventListener("input", (e) => {
-  const q = e.target.value.trim().toLowerCase();
+// --- SPA / Tomo / All toggle ----------------------------------------------
+// Pure display filter — it never restricts which jobs can be opened. Every
+// job stays one search away no matter what's selected: a non-empty search
+// bypasses the pipeline filter entirely (see matchesPipeline below), so
+// there's always a way to reach every job type, exactly as requested.
+
+const PIPELINE_STORAGE_KEY = "relion_us_pipeline_filter";
+let pipelineFilter = "all";
+try {
+  const saved = localStorage.getItem(PIPELINE_STORAGE_KEY);
+  if (saved === "all" || saved === "spa" || saved === "tomo") pipelineFilter = saved;
+} catch (e) {
+  // Storage unavailable (private browsing, locked-down profile, etc.) —
+  // just fall back to "all" for this session, nothing to recover from.
+}
+
+function applyJobFilters() {
+  const q = document.getElementById("jobSearch").value.trim().toLowerCase();
   document.querySelectorAll(".job-item").forEach((item) => {
-    item.style.display = !q || item.dataset.search.includes(q) ? "" : "none";
+    const matchesSearch = !q || item.dataset.search.includes(q);
+    const matchesPipeline =
+      !!q || // a search in progress always searches the full catalog
+      pipelineFilter === "all" ||
+      item.dataset.pipeline === "shared" ||
+      item.dataset.pipeline === pipelineFilter;
+    item.style.display = matchesSearch && matchesPipeline ? "" : "none";
   });
   document.querySelectorAll(".category-block").forEach((block) => {
     const anyVisible = Array.from(block.querySelectorAll(".job-item")).some(
@@ -66,7 +94,27 @@ document.getElementById("jobSearch").addEventListener("input", (e) => {
     );
     block.style.display = anyVisible ? "" : "none";
   });
+}
+
+function setPipelineFilter(value) {
+  pipelineFilter = value;
+  try {
+    localStorage.setItem(PIPELINE_STORAGE_KEY, value);
+  } catch (e) {
+    // Non-fatal — the toggle just won't be remembered across reloads.
+  }
+  document.querySelectorAll(".pipeline-toggle-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.pipeline === value);
+  });
+  applyJobFilters();
+}
+
+document.querySelectorAll(".pipeline-toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", () => setPipelineFilter(btn.dataset.pipeline));
 });
+setPipelineFilter(pipelineFilter); // reflect initial/restored state on the buttons
+
+document.getElementById("jobSearch").addEventListener("input", applyJobFilters);
 
 // --- Topbar controls -------------------------------------------------------
 
@@ -408,6 +456,13 @@ async function refreshProjectLabel() {
     const proj = await api("/api/project");
     projectDirLabel.textContent = proj.path;
     projectDirLabel.title = proj.path;
+    // Optional auto-switch: only act on an unambiguous hint ('tomo' or
+    // 'spa'). 'mixed' (project has run both) and 'unknown' (new project, or
+    // no default_pipeline.star to read yet) leave the toggle exactly where
+    // it was — manual switching is the correct fallback there, per request.
+    if (proj.pipeline_hint === "tomo" || proj.pipeline_hint === "spa") {
+      setPipelineFilter(proj.pipeline_hint);
+    }
   } catch (err) {
     projectDirLabel.textContent = "(unknown project)";
   }

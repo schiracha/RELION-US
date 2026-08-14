@@ -2,6 +2,10 @@
 # run.sh — launch the RELION-US backend (it also serves the frontend, so
 # this is the only process you need to start).
 #
+# This assumes the Python environment with backend/requirements.txt
+# installed is already active (see README.md for how to build one — this
+# script doesn't install anything itself).
+#
 # Usage:
 #   ./run.sh                        # binds 0.0.0.0:8420
 #   ./run.sh --port 8888
@@ -13,10 +17,9 @@
 # default project folder, and you switch to the real one from the
 # "Change Project" button in the top bar once it's running.
 #
-# On Rivanna/Afton: launch this on a login node (or an interactive job),
-# then either port-forward over SSH from your laptop
-# (ssh -L 8420:localhost:8420 <node>) or connect directly if your network
-# allows it.
+# On a remote server or HPC login node: launch this there, then either
+# port-forward over SSH from your laptop (ssh -L 8420:localhost:8420 <host>)
+# or connect directly if your network allows it.
 
 set -euo pipefail
 

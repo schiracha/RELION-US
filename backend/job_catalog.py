@@ -140,3 +140,82 @@ CUSTOM_JOBS = {
         "description": "Convert DeepETPicker .coords picks into a RELION particles.star",
     },
 }
+
+# --------------------------------------------------------------------------
+# SPA vs. tomography pipeline classification — for the Jobs-list SPA/Tomo/All
+# toggle. This is a *display filter only*: it never restricts which jobs can
+# be opened or run (every job stays reachable via search, or the "All" view,
+# no matter what's selected — see frontend/app.js's applyJobFilters(), which
+# makes a non-empty search override this filter entirely).
+#
+# Are SPA/tomography flags available in the project's own STAR files? No —
+# checked directly against RELION's own source (github.com/3dem/relion,
+# checkout used to build this app, src/pipeliner.cpp PipeLine::write(),
+# ~lines 2192-2205): the `pipeline_general` block of default_pipeline.star
+# holds only rlnPipeLineJobCounter, nothing describing project "type". The
+# closest real signal is per-job: each entry in the `pipeline_processes`
+# block carries rlnPipeLineProcessTypeLabel, which is the same string as
+# this table's label_new column. See project_manager.detect_pipeline_hint()
+# for how that per-job signal is used for the optional auto-switch.
+#
+# So classification below is a per-job-type heuristic, grounded in what
+# actually is verifiable from RELION's source rather than guessed:
+#
+#   1. Every internal_name RELION itself prefixes with "Tomo" in
+#      pipeline_jobs.h is tomography-specific by construction.
+#   2. Where a Tomo-prefixed job is the direct sibling of a non-Tomo job
+#      doing the analogous step (see each pair's own description text
+#      above: Ctfrefine/TomoCtfRefine, Motionrefine/TomoAlign,
+#      Autopick+Manualpick/TomoPickTomograms, Extract/TomoSubtomo), the
+#      non-Tomo original is single-particle-only — RELION built a whole
+#      separate Tomo job rather than reusing it.
+#
+# Everything else (Import, Motioncorr, Ctffind, and the classification/
+# refinement/post-processing jobs from Select through External) is treated
+# as shared: RELION-5's tomography pipeline explicitly funnels pseudo
+# -subtomograms through the *same* Class2D/Class3D/Inimodel/Autorefine/
+# Postprocess/Localres/Maskcreate/etc. jobs SPA particles use — that's the
+# documented purpose of "pseudo-subtomograms" (Burt et al. 2024, FEBS Open
+# Bio 14(11):1788-1804, PMID 39147729: making tomography particles look
+# like ordinary particles.star rows so the same downstream jobs work
+# unmodified) — and Motioncorr/Ctffind process movies/tilt-images the same
+# way regardless of which pipeline consumes their output afterward.
+#
+# The three custom bridges are tomography-only in *this app's* scope, per
+# each bridge module's own docstring: imod_bridge.py's picks-on-tomograms
+# scope, warp_bridge.py's explicit "RELION-5 tomography STAR files" scope,
+# and DeepETPicker's own title, "3D particle picking for cryo-electron
+# tomography" (Liu et al. 2024, Nat Commun 15:2090, PMID 38453943).
+#
+# If this grouping doesn't match how you actually use a given job, it's a
+# plain set below — edit it directly; nothing else in the app depends on
+# the specific assignment beyond which button shows that job by default.
+PIPELINE_SPA_ONLY = {
+    "Manualpick", "Autopick", "Extract", "Ctfrefine", "Motionrefine",
+}
+PIPELINE_TOMO_ONLY = {
+    "TomoImport", "TomoCtfRefine", "TomoPickTomograms", "TomoAlignTiltSeries",
+    "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
+    "TomoSubtomo", "TomoAlign", "TomoReconPart",
+    "ImodImport", "WarpImport", "DeepETPickerImport",
+}
+
+
+def pipeline_type(internal_name: str) -> str:
+    """'spa' | 'tomo' | 'shared' — see PIPELINE_SPA_ONLY / PIPELINE_TOMO_ONLY
+    above for the classification and its rationale. Jobs not in either set
+    are 'shared' (used by both pipelines, or not pipeline-specific)."""
+    if internal_name in PIPELINE_SPA_ONLY:
+        return "spa"
+    if internal_name in PIPELINE_TOMO_ONLY:
+        return "tomo"
+    return "shared"
+
+
+# Guards against a typo silently dropping a job out of every filtered view,
+# or a job appearing in both sets (which pipeline_type() would resolve
+# arbitrarily via the SPA-first check above — better to fail loudly).
+_ALL_INTERNAL_NAMES = set(JOB_CATALOG) | set(CUSTOM_JOBS)
+assert PIPELINE_SPA_ONLY <= _ALL_INTERNAL_NAMES, "PIPELINE_SPA_ONLY has an unknown job name"
+assert PIPELINE_TOMO_ONLY <= _ALL_INTERNAL_NAMES, "PIPELINE_TOMO_ONLY has an unknown job name"
+assert PIPELINE_SPA_ONLY.isdisjoint(PIPELINE_TOMO_ONLY), "a job can't be both SPA-only and Tomo-only"

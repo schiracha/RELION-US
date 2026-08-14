@@ -22,6 +22,11 @@
 
   <div id="layout">
     <aside id="sidebar">
+      <div id="pipelineToggle" class="pipeline-toggle" role="group" aria-label="Filter jobs by pipeline type">
+        <button type="button" class="pipeline-toggle-btn" data-pipeline="all" title="Show every job type">All</button>
+        <button type="button" class="pipeline-toggle-btn" data-pipeline="spa" title="Show single-particle jobs + jobs shared with tomography">SPA</button>
+        <button type="button" class="pipeline-toggle-btn" data-pipeline="tomo" title="Show tomography jobs + jobs shared with SPA">Tomo</button>
+      </div>
       <div id="jobSearchWrap">
         <input type="text" id="jobSearch" placeholder="Filter jobs…" />
       </div>
@@ -39,7 +44,7 @@
   <div id="projectModalOverlay" class="modal-overlay hidden">
     <div class="modal">
       <h3>Change Project</h3>
-      <p class="modal-hint">Type a path directly, or browse below. This lists folders on the machine running the backend (not your browser's machine) — that matters if you're connected to a remote host like a Rivanna/Afton login node.</p>
+      <p class="modal-hint">Type a path directly, or browse below. This lists folders on the machine running the backend (not your browser's machine) — that matters if you're connected to a remote host like an HPC cluster login node.</p>
       <div class="modal-row">
         <input type="text" id="projectPathInput" placeholder="/path/to/relion/project" />
         <button id="projectPathGoBtn" class="btn">Go</button>
@@ -69,8 +74,8 @@
     </div>
   </div>
 
-  <!-- Vendored locally (frontend/vendor/), not loaded from a CDN: Rivanna/Afton
-       login nodes and many workstations have no outbound internet access,
+  <!-- Vendored locally (frontend/vendor/), not loaded from a CDN: many HPC
+       cluster login nodes and workstations have no outbound internet access,
        and this app needs to work there. See frontend/vendor/WINBOX_LICENSE.txt
        (Apache-2.0) and https://github.com/nextapps-de/winbox. -->
   <script src="vendor/winbox.bundle.min.js"></script>

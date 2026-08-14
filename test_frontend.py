@@ -52,6 +52,52 @@ with sync_playwright() as p:
     page.locator("#toggleSidebarBtn").click()
     hidden = page.locator("#sidebar").evaluate("el => el.classList.contains('hidden')")
     print("Sidebar hidden after toggle:", hidden)
+    page.locator("#toggleSidebarBtn").click()  # show it again for the checks below
+
+    # --- SPA / Tomo / All jobs-list toggle ---------------------------------
+    # Pure display filter: must never make a job unreachable. Confirm the
+    # SPA view hides a Tomo-only job, the Tomo view hides an SPA-only job,
+    # "All" shows everything again, and a search always finds a job even
+    # while the opposite filter is selected (the reachability guarantee).
+    n_all = page.locator(".job-item:visible").count()
+    print("Job items visible on 'All':", n_all)
+
+    page.locator('.pipeline-toggle-btn[data-pipeline="spa"]').click()
+    n_spa = page.locator(".job-item:visible").count()
+    spa_hides_tomo_import = page.locator(
+        '.job-item:visible:has-text("Import Tomo Tilt Series")'
+    ).count() == 0
+    print(f"Job items visible on 'SPA': {n_spa} (TomoImport hidden: {spa_hides_tomo_import})")
+
+    page.locator('.pipeline-toggle-btn[data-pipeline="tomo"]').click()
+    n_tomo = page.locator(".job-item:visible").count()
+    tomo_hides_autopick = page.locator(
+        '.job-item:visible:has-text("Auto-picking")'
+    ).count() == 0
+    print(f"Job items visible on 'Tomo': {n_tomo} (Autopick hidden: {tomo_hides_autopick})")
+
+    # Reachability guarantee: still on the "Tomo" filter, searching for an
+    # SPA-only job must surface it anyway -- nothing is ever truly hidden.
+    page.locator("#jobSearch").fill("Auto-picking")
+    n_search_hit = page.locator(".job-item:visible:has-text('Auto-picking')").count()
+    print(f"'Auto-picking' found via search while on 'Tomo' filter: {n_search_hit == 1}")
+    page.locator("#jobSearch").fill("")
+
+    page.locator('.pipeline-toggle-btn[data-pipeline="all"]').click()
+    n_all_again = page.locator(".job-item:visible").count()
+    print("Job items visible after switching back to 'All':", n_all_again)
+
+    toggle_checks_ok = (
+        0 < n_spa < n_all
+        and 0 < n_tomo < n_all
+        and spa_hides_tomo_import
+        and tomo_hides_autopick
+        and n_search_hit == 1
+        and n_all_again == n_all
+    )
+    print("SPA/Tomo/All toggle checks passed:", toggle_checks_ok)
+    if not toggle_checks_ok:
+        errors.append("SPA/Tomo/All toggle behaved unexpectedly -- see counts above")
 
     page.screenshot(path="/tmp/relion_us_screenshot.png", full_page=False)
     browser.close()

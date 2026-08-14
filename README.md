@@ -24,26 +24,48 @@ draft command is built" below) — always check it, and the job's real
 RELION C++ source is one tab away for cross-referencing.
 
 It's also built to be portable and multi-machine-friendly: it's a normal
-web page. Run the backend on your workstation or a Rivanna/Afton login
-node, and open the page from any browser on the network — no Qt, no X11
-forwarding, no display server. See `docs/ARCHITECTURE.md` for the full
+web page. Run the backend on your workstation or a remote HPC cluster
+login node, and open the page from any browser on the network — no Qt, no
+X11 forwarding, no display server. See `docs/ARCHITECTURE.md` for the full
 design rationale, including why this is a separate layer rather than a
 modified RELION GUI, and confirmation that RELION-US never runs RELION's
 own compiled GUI binary at runtime (only RELION's command-line programs).
 
 ## Installing and running it
 
+There's no install script — build the environment yourself with whatever
+Python tooling you already use, so this stays portable across Linux
+distributions rather than assuming one package manager or layout. Any
+approach that gets `backend/requirements.txt` installed into a Python 3.10+
+environment works; a plain venv is the least assumption-laden option and
+works the same way on every distro:
+
 ```bash
-./install.sh          # creates ./venv and installs backend/requirements.txt
-source venv/bin/activate
+python3 -m venv relnu
+source relnu/bin/activate
+pip install -r backend/requirements.txt
+```
+
+If your distro's `python3 -m venv` fails because the `venv` module isn't
+installed (common on minimal installs), install it from your distro's
+package manager first — e.g. `sudo apt install python3-venv` on Debian/
+Ubuntu, `sudo dnf install python3` on Fedora (venv is included), pacman's
+`python` package on Arch, or the equivalent for your system — then retry.
+`conda`/`mamba` environments work just as well if you prefer them:
+`conda create -n relion_us python=3.11 && conda activate relion_us && pip
+install -r backend/requirements.txt`.
+
+Once the environment is set up and active, launch it with:
+
+```bash
 ./run.sh               # binds 0.0.0.0:8420 by default
 ```
 
 Then open `http://<that machine's address>:8420/` in a browser — including
-from a different machine, since it binds `0.0.0.0`. On Rivanna/Afton,
-launch it on a login node (or an interactive job) and either port-forward
-over SSH (`ssh -L 8420:localhost:8420 <node>`) or connect directly if your
-network allows it. `./run.sh --help` shows the `--host`/`--port` options.
+from a different machine, since it binds `0.0.0.0`. On a remote server or
+HPC cluster login node, launch it there and either port-forward over SSH
+(`ssh -L 8420:localhost:8420 <host>`) or connect directly if your network
+allows it. `./run.sh --help` shows the `--host`/`--port` options.
 
 **You don't have to run it from inside a project directory.** If you `cd`
 into an existing RELION project before running `./run.sh`, it's picked up
@@ -53,7 +75,7 @@ at any time — see "Using it" below.
 
 No CDN dependency: WinBox.js (the popup-window library) is vendored under
 `frontend/vendor/` (Apache-2.0, see `WINBOX_LICENSE.txt`), specifically
-because Rivanna/Afton login nodes and many workstations have no outbound
+because many HPC cluster login nodes and workstations have no outbound
 internet access.
 
 ## Using it
@@ -63,7 +85,7 @@ internet access.
   path directly and hit Go/Enter, or click into subfolders in the browser
   below it — that browser lists folders on the *machine running the
   backend*, not your browser's machine, which matters when the backend is
-  on a remote host like a Rivanna/Afton login node. If the folder you pick
+  on a remote host like an HPC cluster login node. If the folder you pick
   doesn't look like a RELION project (no `default_pipeline.star` and not
   previously opened here), you're prompted to either start a new project
   there or pick a different folder — starting a new project never writes
@@ -146,20 +168,20 @@ trusting the output:
   directly for a one-off conversion; this module is for wiring `.coords`
   -> particles.star into RELION-US's Jobs list/live-output flow.
 
-## SLURM templates (Rivanna/Afton)
+## SLURM templates (any cluster)
 
 `slurm/template_relion_job.sbatch`, `slurm/template_python_job.sbatch`, and
 `slurm/submit.py` are a standalone command-line path for running a RELION
 job or a converter as a proper batch job — **not yet wired into the job
 popups themselves** (v1 scope: direct subprocess execution only, an
 explicit choice, see `docs/ARCHITECTURE.md`'s Open follow-ups for what
-adding a "Run on cluster" button would look like). Partition names
-(`standard`/`parallel`/`largemem`/`gpu`/`dev`) and the `lmod` module system
-are confirmed against UVA Research Computing's Rivanna/Afton FAQ as of
-2026-08-14; your allocation account name and the exact RELION/IMOD module
-version strings are placeholders — fill in `ACCOUNT_NAME` and run
-`module spider relion` / `module spider imod` on a login node for the
-exact string for your install.
+adding a "Run on cluster" button would look like). These templates are
+intentionally generic, not written for any specific site: partition names,
+account/allocation syntax, and module names all vary between clusters, so
+`ACCOUNT_NAME`/`PARTITION_NAME` are placeholders you fill in for your own
+system — run `sinfo` for partition names and `module spider relion` /
+`module spider imod` (or check however your cluster exposes software) for
+the exact module strings on your install.
 
 ## Provenance and re-running the extraction
 

@@ -27,7 +27,7 @@ scheduler over STAR files and `relion_*` command-line programs), and drives
 gets a friendlier, more visual, portable front end without touching
 upstream code, zero merge conflicts with upstream RELION releases, and
 something that runs identically on a laptop and, launched as a job, on
-Rivanna/Afton.
+any SLURM cluster.
 
 **Concretely, at runtime**: RELION-US never runs RELION's own GUI binary.
 `backend/data/extract_job_definitions.py` reads RELION's GUI source
@@ -83,10 +83,11 @@ relion_us/
 │                              #   (vendored, not CDN-loaded) for popup windows
 ├── data/
 │   └── extract_job_definitions.py  # parses real RELION source -> job_definitions_raw.json
-├── slurm/                    # sbatch templates + submit.py (Rivanna/Afton);
+├── slurm/                    # generic sbatch templates + submit.py, any SLURM cluster;
 │                              #   not yet wired into the job popups, see below
 ├── docs/                     # this file
-├── install.sh, run.sh        # setup + launch helpers
+├── run.sh                    # launch helper (no install script -- see README.md
+│                              #   for building the Python environment yourself)
 └── test_frontend.py, test_frontend_project.py  # Playwright browser smoke tests
 ```
 
@@ -131,19 +132,83 @@ project" prompt are all handled by `backend/project_manager.py` and the
 `/api/project/*` endpoints in `main.py`; see that module's docstring for
 the full design reasoning.
 
-### Division of labor: local vs. Rivanna/Afton
+### SPA / Tomo / All jobs-list toggle
 
-Per your SLURM policy: anything that's a trivial local file operation
-(launching the app, a small STAR edit) can run directly. Anything that
-pulls from the web, takes more than a few seconds, or runs iteratively —
-essentially all `relion_*` processing jobs, and the converters when run
-over a full dataset rather than a handful of test files — should go
-through SLURM. **As of this version, that's not yet wired into the job
-popups themselves** (an explicit v1 scope decision: direct subprocess
-execution only, no SLURM integration yet) — `slurm/submit.py` and the two
-`.sbatch` templates are available as a standalone command-line path for
-running a job as a proper batch job in the meantime, and are the natural
-starting point for adding a "Run on cluster" option to the popups later.
+The Jobs sidebar has a three-way toggle above the search box to declutter
+the list — "SPA", "Tomo", "All" — for users who only work in one pipeline
+day to day. **It is a display filter only.** It never restricts which jobs
+can be opened or run: a non-empty search always searches the full 35-job
+catalog regardless of the toggle (see `applyJobFilters()` in
+`frontend/app.js`), so every job stays one search away no matter what's
+selected. "All" is the honest default for anyone who wants it.
+
+**Are SPA/tomography flags available in the project's own STAR files? No.**
+Checked directly against RELION's own source
+(`src/pipeliner.cpp`'s `PipeLine::write()`, ~lines 2192-2205 in the
+checkout this app is built against): the `pipeline_general` block of
+`default_pipeline.star` holds only `rlnPipeLineJobCounter` — nothing that
+labels the project as SPA or tomography. The closest real signal is
+per-job: each row of the `pipeline_processes` block carries
+`rlnPipeLineProcessTypeLabel`, the same string as `job_catalog.py`'s
+`label_new` column for that job type.
+
+So the toggle's classification (`backend/job_catalog.py`:
+`PIPELINE_SPA_ONLY` / `PIPELINE_TOMO_ONLY` / `pipeline_type()`) is a
+per-job-type heuristic grounded in what's actually verifiable from RELION's
+source, not a project-level flag:
+
+1. Every `internal_name` RELION itself prefixes with `Tomo` in
+   `pipeline_jobs.h` is tomography-specific by construction (10 jobs).
+2. Where a `Tomo`-prefixed job is the direct sibling of a non-`Tomo` job
+   doing the analogous step — `Ctfrefine`/`TomoCtfRefine`,
+   `Motionrefine`/`TomoAlign`, `Autopick`+`Manualpick`/`TomoPickTomograms`,
+   `Extract`/`TomoSubtomo` — the non-`Tomo` original is classified
+   SPA-only (5 jobs): RELION built a whole separate `Tomo` job rather than
+   reusing it.
+3. The 3 custom bridges (ImodImport, WarpImport, DeepETPickerImport) are
+   tomography-only in this app's scope, per each bridge's own docstring.
+4. Everything else (17 jobs — `Import`, `Motioncorr`, `Ctffind`, and the
+   classification/refinement/post-processing jobs from `Select` through
+   `External`) is `shared` and visible in both the SPA and Tomo views:
+   RELION-5's tomography pipeline explicitly funnels pseudo-subtomograms
+   through the *same* `Class2D`/`Class3D`/`Inimodel`/`Autorefine`/
+   `Postprocess`/`Localres`/`Maskcreate`/etc. jobs SPA particles use — the
+   documented purpose of "pseudo-subtomograms" (Burt et al. 2024, PMID
+   39147729) is making tomography particles look like ordinary
+   `particles.star` rows so those downstream jobs work unmodified.
+
+**Auto-switching based on the loaded project** — the "nice to have" from
+the original request — works when there's a signal to use:
+`project_manager.detect_pipeline_hint()` reads `default_pipeline.star`'s
+`pipeline_processes` block (via the same `starfile` wrapper `star_io.py`
+already uses) and checks which known SPA-only/Tomo-only
+`rlnPipeLineProcessTypeLabel` values that project has actually run,
+returning `'spa'`, `'tomo'`, `'mixed'`, or `'unknown'`. `GET /api/project`
+exposes this as `pipeline_hint`; the frontend auto-applies it on project
+load/switch only when it's unambiguous (`'spa'` or `'tomo'`) — a brand-new
+project (`'unknown'`, no `default_pipeline.star` yet) or one that's run
+both types (`'mixed'`) leaves the toggle wherever it was, which is exactly
+the "if not that's fine, a manual switch is good" fallback that was asked
+for. The user's last manual choice also persists across reloads via
+`localStorage` (falls back to `'all'` silently if storage is unavailable).
+
+### Division of labor: local vs. a SLURM cluster
+
+A common policy on shared HPC systems: trivial local file operations
+(launching the app, a small STAR edit) run directly on a login node or
+workstation, while anything that pulls from the web, takes more than a few
+seconds, or runs iteratively — essentially all `relion_*` processing jobs,
+and the converters when run over a full dataset rather than a handful of
+test files — goes through the SLURM queue instead. **As of this version,
+that's not yet wired into the job popups themselves** (an explicit v1
+scope decision: direct subprocess execution only, no SLURM integration
+yet) — `slurm/submit.py` and the two `.sbatch` templates are available as
+a standalone command-line path for running a job as a proper batch job in
+the meantime, and are the natural starting point for adding a "Run on
+cluster" option to the popups later. The templates are generic (no
+site-specific partition/module names — see "SLURM templates" in
+`README.md`), so they work on any SLURM cluster, not just one particular
+site's.
 
 ## Format-bridging honesty note
 

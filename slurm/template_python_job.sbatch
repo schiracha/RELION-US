@@ -1,23 +1,23 @@
 #!/bin/bash
 #
-# Template SBATCH script for a Python conversion/processing step (e.g. one
+# Generic SBATCH template for a Python conversion/processing step (e.g. one
 # of RELION-US's backend/converters/ modules run over a full dataset, or
-# anything that pulls from the web or runs iteratively) — per your rule
-# that only very simple, quick, non-iterative bash belongs outside the
-# SLURM queue.
+# anything that pulls from the web or runs iteratively rather than a quick
+# local operation).
 #
-# See template_relion_job.sbatch for notes on confirmed Rivanna/Afton
-# partition names and the lmod module system.
+# See template_relion_job.sbatch for a note on module systems. Partition
+# and account/allocation syntax vary between clusters -- check your own
+# site's documentation and adjust the placeholders below.
 #
 # NOTE: as of this version, RELION-US's job popups execute their command
 # directly via subprocess, not through this template (SLURM submission
 # from inside the GUI is a planned follow-up, see docs/ARCHITECTURE.md).
-# This template and submit.py are for running RELION-US's converters (or
-# any RELION job) as a standalone batch job in the meantime.
+# This template and submit.py are for running a RELION-US converter, or
+# any RELION job, as a standalone batch job in the meantime.
 
 #SBATCH --job-name=relion_us_py_job
 #SBATCH --account=ACCOUNT_NAME
-#SBATCH --partition=standard
+#SBATCH --partition=PARTITION_NAME
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -28,15 +28,16 @@
 
 set -euo pipefail
 
-module purge
-module load anaconda   # confirm exact module name with: module spider anaconda
+module purge 2>/dev/null || true
+module load python 2>/dev/null || module load anaconda 2>/dev/null || true   # adjust to your cluster's module name
 # module load imod     # uncomment if the script calls backend/converters/imod_bridge.py
 
-# Activate (or create once, then reuse) a conda/venv environment with
-# RELION-US's dependencies (see ../install.sh / ../backend/requirements.txt):
-# conda activate relion_us
-# -- or, if you set up the venv via install.sh instead of conda:
+# Activate whichever Python environment has RELION-US's backend
+# dependencies installed (see ../README.md for how to build one --
+# a venv or a conda env both work fine):
 # source /path/to/relion_us/venv/bin/activate
+# -- or --
+# conda activate relion_us
 
 cd "${SLURM_SUBMIT_DIR}"
 

@@ -4,9 +4,11 @@ submit.py — fill in an sbatch template and submit it.
 Standalone for now: RELION-US's job popups run their command directly via
 subprocess (v1 scope, by explicit choice — see docs/ARCHITECTURE.md's Open
 follow-ups). This script is the command-line path for running a RELION-US
-converter, or any RELION job, as a proper batch job on Rivanna/Afton in the
-meantime; wiring a "Run on cluster" option into the job popups themselves
-(sharing this same code path) is the natural next step if you want it.
+converter, or any RELION job, as a proper SLURM batch job in the meantime;
+wiring a "Run on cluster" option into the job popups themselves (sharing
+this same code path) is the natural next step if you want it. Works with
+any SLURM cluster — nothing here is site-specific; adjust the sbatch
+templates' partition/account placeholders for your own cluster.
 
 This intentionally does simple string substitution rather than a templating
 engine — the sbatch files are short and readable as plain text, and you can
@@ -44,7 +46,7 @@ def fill_template(template_path: Path, account: str, job_name: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True, type=Path, help="Path to an .sbatch template")
-    parser.add_argument("--account", required=True, help="Your Rivanna/Afton allocation account")
+    parser.add_argument("--account", required=True, help="Your SLURM allocation/account name for this cluster")
     parser.add_argument("--job-name", default="relion_us_job")
     parser.add_argument(
         "--extra-args",
@@ -68,8 +70,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sbatch_bin = shutil.which("sbatch")
     if sbatch_bin is None:
-        print("`sbatch` not found on PATH (expected on a laptop or this sandbox — "
-              "it will be present on a Rivanna/Afton login node). "
+        print("`sbatch` not found on PATH (expected on a laptop or workstation -- "
+              "it will be present on a SLURM cluster's login node). "
               "Review the script above, then submit it yourself once it's on the "
               "cluster, or copy it there and run `sbatch` there.")
         return 0
