@@ -18,7 +18,7 @@
 #
 # Fill in the placeholders (ALL_CAPS) below, then: sbatch this_script.sbatch
 
-#SBATCH --job-name=relion_us_job
+#SBATCH --job-name=relion_tomo_job
 #SBATCH --account=ACCOUNT_NAME              # your allocation, e.g. -A mygroup
 #SBATCH --partition=gpu                     # standard | parallel | largemem | gpu | dev
 #SBATCH --gres=gpu:1                        # remove this line for CPU-only jobs

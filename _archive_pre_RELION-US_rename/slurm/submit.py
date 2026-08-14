@@ -1,12 +1,7 @@
 """
-submit.py — fill in an sbatch template and submit it.
-
-Standalone for now: RELION-US's job popups run their command directly via
-subprocess (v1 scope, by explicit choice — see docs/ARCHITECTURE.md's Open
-follow-ups). This script is the command-line path for running a RELION-US
-converter, or any RELION job, as a proper batch job on Rivanna/Afton in the
-meantime; wiring a "Run on cluster" option into the job popups themselves
-(sharing this same code path) is the natural next step if you want it.
+submit.py — fill in an sbatch template and submit it, so the GUI's
+"Run on cluster" button and a manual command-line submission share one code
+path (see docs/ARCHITECTURE.md).
 
 This intentionally does simple string substitution rather than a templating
 engine — the sbatch files are short and readable as plain text, and you can
@@ -18,7 +13,7 @@ Usage:
         --template slurm/template_python_job.sbatch \\
         --account mygroup \\
         --job-name deepet_convert \\
-        --extra-args "backend/converters/deepetpicker_bridge.py --coords-dir /scratch/.../coords" \\
+        --extra-args "converters/deepetpicker_bridge.py --coords-dir /scratch/.../coords" \\
         --dry-run   # omit --dry-run to actually call sbatch
 
 On a machine without `sbatch` on PATH (e.g. your local laptop, or this
@@ -45,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True, type=Path, help="Path to an .sbatch template")
     parser.add_argument("--account", required=True, help="Your Rivanna/Afton allocation account")
-    parser.add_argument("--job-name", default="relion_us_job")
+    parser.add_argument("--job-name", default="tomo_bridge_job")
     parser.add_argument(
         "--extra-args",
         default="",
