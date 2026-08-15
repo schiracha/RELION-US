@@ -23,14 +23,19 @@ way RELION's own GUI expects.
 ## Why this exists
 
 RELION's own GUI is a compiled Qt5/C++ application. Its command-assembly
-logic sometimes duplicates flags or inserts options you can't see or
-override from the "additional arguments" box — there's no way to see or
-edit the exact string it's about to run. RELION-US never does that:
+logic sometimes duplicates flags or inserts options you can only override
+by running from the terminal. RELION-US allows you to edit the command and
 whatever is in the command textbox when you click Run is executed exactly
 as written, via the shell, nothing added or removed. The draft command
-that pre-fills that box is a best-effort starting point (see "How the
+that pre-fills is based on the standard inputs suggested (see "How the
 draft command is built" below) — always check it, and the job's real
-RELION C++ source is one tab away for cross-referencing.
+RELION C++ source is one tab away for cross-referencing. Its also built to 
+work between projects in separate project directories without closing down.
+You can change workign directories on the fly and the application will 
+reparse the environment.  You need to be vigilant about your own resources
+and what you are working on. This is a pre-beta software, so use at your 
+own risk, float your own fixes and lets build a user interface by users 
+for users.
 
 It's also built to be portable and multi-machine-friendly: it's a normal
 web page. Run the backend on your workstation or a remote HPC cluster
