@@ -74,6 +74,8 @@ relion_us/
 │   ├── custom_jobs.py       # wires the 4 converters in as Job types
 │   ├── viz.py               # tomogram/pick VIEWER (not a job): mrcfile mmap ->
 │   │                        #   PNG slices + pick JSON (see "Visualizer" below)
+│   ├── progress.py          # live per-iteration charts + class thumbnails for
+│   │                        #   iterative jobs (see "Live job progress" below)
 │   ├── converters/          # pure-Python + subprocess format bridges
 │   │   ├── star_io.py           # thin wrapper over `starfile`, RELION-5 tomo aware
 │   │   ├── coord_transform.py   # shared axis swap/mirror for coordinate importers
@@ -505,6 +507,83 @@ were silent-wrong-data bugs rather than style issues:
 
 Backend tests: **204 passed, 1 skipped** (up from 183). Both Playwright suites
 pass with zero console errors.
+
+## Live job progress (iterative jobs)
+
+Classification and refinement jobs run for many iterations and RELION writes a
+small status file after each one, so the Progress tab in those job popups shows
+what's happening rather than only a wall of log text.
+
+**Source of truth.** Everything comes from files RELION writes itself, verified
+against `src/ml_optimiser.cpp` (`MlOptimiser::write()`) and `src/ml_model.cpp`
+(RELION cloned 2026-08-14):
+
+```
+run_it###_model.star          (run_it###_half1_model.star for split half-sets)
+run_it###_classes.mrcs        2D: all classes in one stack
+run_it###_class###.mrc        3D: one volume per class
+```
+
+The `model.star` is a few KB and carries exactly what's worth watching —
+`model_general`: `rlnCurrentResolution` (note: **1/Å**, converted to Å here so
+one unit is used throughout), `rlnNrClasses`, `rlnReferenceDimensionality`;
+`model_classes`: `rlnReferenceImage`, `rlnClassDistribution`,
+`rlnEstimatedResolution` (Å), `rlnAccuracyRotations/TranslationsAngst`. Every
+label name was read out of RELION's `src/metadata_label.h`, not assumed. Only
+`half1` is read for a split-half refinement — the two halves track each other,
+and reading both would double-count every iteration.
+
+**Which jobs.** `progress.PROGRESS_JOBS` = Class2D, Class3D, Autorefine
+(Refine3D), Inimodel, MultiBody, TomoReconPart. Deliberately not everything: an
+Import or MaskCreate has nothing to plot, and the tab hides itself for them. The
+frontend keeps a matching set for tab visibility, but the backend is
+authoritative — it returns `supported: false` and the tab disappears if the two
+ever drift.
+
+**Cost.** This was built to the constraint "don't take up too much memory or
+storage":
+
+- **Nothing is written to disk.** Charts parse the small per-iteration
+  `model.star`; thumbnails are rendered on demand from the MRCs RELION already
+  wrote, and are never cached server-side. The feature adds zero storage.
+- Thumbnails are downsampled to 128 px and 8-bit greyscale; a 3D class shows one
+  central slice, not a rendering.
+- Parsed iterations are memoised on `(path, mtime, size)`, so re-polling a run
+  whose earlier iterations haven't changed costs a `stat()` rather than a
+  reparse. RELION never rewrites a finished iteration, so that key is safe.
+- A single poll is capped at the most recent 200 iterations.
+- Polling runs every 4 s and **only while the job is actually running**.
+
+**User controls** (per job, in the Progress tab):
+
+- **Live progress** — on by default for supported jobs; unticking stops polling
+  entirely.
+- **Images every N iterations** — thumbnails refresh only on iterations that are
+  a multiple of N (1 = every). Charts still update every iteration, since they're
+  nearly free.
+- **Keep all** — off by default. On, earlier iterations' thumbnails are kept so
+  you can compare how classes evolved; off, only the newest set is held, so
+  memory is constant no matter how long the run is.
+
+**Charts** are hand-rolled inline SVG — no charting library, keeping the frontend
+dependency-free and offline-capable (HPC login nodes often have no outbound
+internet). Two forms only: a line chart of resolution against iteration (two
+series, one shared Å axis — never a second y-scale) and a bar chart of particles
+per class. Series colours come from a validated light/dark-paired palette and are
+read from CSS variables, so both charts follow the theme switch and are repainted
+on it.
+
+## Dark / light theme
+
+The stylesheet was already written entirely against CSS custom properties, so the
+light theme is a straight variable swap under `:root[data-theme="light"]` — no
+per-component light-mode branches. Dark remains the default; a remembered choice
+wins, and with nothing stored the app stays dark rather than following the OS
+(this app's designed default). The switch lives in the top bar and persists to
+`localStorage`. The few hardcoded terminal-ish surfaces (command box, live output)
+became variables (`--console-bg`, `--console-bg-deep`, `--console-text`) so they
+restyle too. Chart series colours are separate, mode-specific values validated
+against each surface rather than an automatic flip.
 
 ## References
 

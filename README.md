@@ -12,9 +12,10 @@ bottom — and, critically, **an editable command box you approve before
 anything runs.**
 
 The main panel is a **Command Center** showing every job you've run (a
-sortable table or a timeline that links each job to its inputs), and the
-top bar has a **🔍 Visualize** button that opens a tomogram / particle-pick
-viewer. Jobs run **from the project directory**, exactly like RELION, so
+sortable table or a timeline that links each job to its inputs); iterative
+jobs get a **live Progress tab** with charts and class images; and the top
+bar has a **🔍 Visualize** button that opens a tomogram / particle-pick
+viewer plus a **dark/light theme** switch. Jobs run **from the project directory**, exactly like RELION, so
 project-root-relative paths behave the way RELION's own GUI expects.
 
 ## Why this exists
@@ -114,6 +115,10 @@ internet access.
 - **Advanced tab**: every other real RELION tab for that job (e.g. Class3D
   has Reference / CTF / Optimisation / Sampling / Helix / Compute),
   preserved as named groups.
+- **Progress tab** (iterative jobs only): live charts of resolution and class
+  distribution plus class images, with per-job controls for how often images
+  refresh and whether earlier iterations are kept — see "Live progress for
+  iterative jobs" below.
 - **Errors tab**: fills in live if the run writes to stderr; the tab badge
   shows a running error count.
 - **RELION Source tab**: the *actual*, unmodified C++ `getCommands<Job>Job()`
@@ -125,6 +130,8 @@ internet access.
 - **Run**: executes exactly the string in the command box (RELION jobs) or
   calls the converter directly (custom import jobs), streams output live
   via a websocket, and keeps the full transcript if you close and reopen.
+- **Theme switch** (top bar): dark (the default) or light; your choice is
+  remembered.
 - **Scale slider** (top right): zooms the whole UI — useful on a small
   laptop screen or a large shared display.
 
@@ -238,6 +245,49 @@ The volume is never loaded whole: the backend memory-maps the MRC and
 returns one slice at a time as a PNG, so scrubbing stays fast on large
 tomograms. This needs `mrcfile` and `pillow` (both in
 `backend/requirements.txt`).
+
+## Live progress for iterative jobs
+
+Classification and refinement runs take a long time and report every few
+iterations, so those jobs get a **Progress** tab next to Outputs/Errors —
+charts instead of squinting at log text. It covers **Class2D, Class3D,
+Refine3D, 3D initial model, MultiBody, and tomo Reconstruct Particle**;
+jobs with nothing to plot (Import, MaskCreate, the converters) simply don't
+show the tab.
+
+What you get, updated while the job runs:
+
+- **Resolution by iteration** — a line for the current resolution and one for
+  the best class, both in Å on one axis, with the latest value labelled.
+- **Particles per class** — a bar per class for the newest iteration.
+- **Class images** — 2D class averages, or the central slice of each 3D class
+  volume, captioned with class number, share of particles, and resolution.
+
+It reads the files RELION already writes each iteration
+(`run_it###_model.star`, `run_it###_classes.mrcs` / `run_it###_class###.mrc`),
+so there's nothing to configure and nothing extra on disk.
+
+**Keeping it cheap.** Every control is per job, in the tab itself:
+
+- **Live progress** (on by default) — untick it and the job stops being polled
+  at all.
+- **Images every N iterations** — class images only refresh on multiples of N
+  (1 = every iteration). The charts still update every iteration; they're
+  nearly free.
+- **Keep all** (off by default) — on, earlier iterations' images are kept so
+  you can compare how classes evolved. Off, only the newest set is held, so
+  memory stays flat however long the run goes.
+
+Under the hood nothing is cached to disk, thumbnails are 128 px greyscale
+rendered on demand, and polling only happens while the job is actually
+running.
+
+## Dark and light themes
+
+The top bar has a theme switch. **Dark is the default**; pick light and it's
+remembered. The charts use separate, mode-specific colours validated against
+each background rather than a naive inversion, so they stay legible either
+way.
 
 ## SLURM templates (any cluster)
 

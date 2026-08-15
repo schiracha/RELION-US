@@ -371,11 +371,13 @@ async function openJobPopup(internalName, displayName, existingRun) {
     <div class="job-standard-form" data-role="standard-form"></div>
     <div class="tab-bar" data-role="tab-bar">
       <button class="tab-btn active" data-tab="advanced">Advanced</button>
+      <button class="tab-btn" data-tab="progress" hidden>Progress</button>
       <button class="tab-btn" data-tab="outputs" hidden>Outputs</button>
       <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
     <div class="tab-content active" data-tab-content="advanced"></div>
+    <div class="tab-content" data-tab-content="progress"></div>
     <div class="tab-content" data-tab-content="outputs"></div>
     <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
     ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
@@ -455,6 +457,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       btn.classList.add("active");
       body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
       if (btn.dataset.tab === "outputs") loadOutputsTab();
+      if (btn.dataset.tab === "progress") refreshProgress();
     });
   });
 
@@ -525,6 +528,18 @@ async function openJobPopup(internalName, displayName, existingRun) {
   const deleteBtn = toolbar.querySelector('[data-action="delete"]');
   const noteBtn = toolbar.querySelector('[data-action="note"]');
   const outputsTabBtn = body.querySelector('[data-tab="outputs"]');
+  const progressContent = body.querySelector('[data-tab-content="progress"]');
+  const progressTabBtn = body.querySelector('[data-tab="progress"]');
+  let progressTimer = null;
+  let progressState = {
+    enabled: true,          // "Live progress" — on by default for supported jobs
+    everyN: 1,              // refresh thumbnails every N iterations (1 = every)
+    keepAll: false,         // keep earlier iterations' thumbnails (off by default)
+    lastThumbIteration: null,
+    history: [],            // [{iteration, classes}] when keepAll is on
+    data: null,
+  };
+
 
   function refreshNoteRow() {
     const note = (currentRun && currentRun.note) || "";
@@ -546,6 +561,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
     markFailedBtn.hidden = !hasRun || status === "running" || status === "failed";
     deleteBtn.hidden = !hasRun || status === "running";
     outputsTabBtn.hidden = !hasRun;
+    refreshProgressTabVisibility();
     refreshNoteRow();
   }
   refreshToolbarState();
@@ -697,6 +713,164 @@ async function openJobPopup(internalName, displayName, existingRun) {
     });
   }
 
+  // ---- Progress tab (iterative jobs only) --------------------------------
+  // Charts + class thumbnails from the run_it###_model.star files RELION
+  // writes each iteration. Nothing is stored server-side; thumbnails are
+  // rendered on demand from the MRCs RELION already wrote. Per the user's
+  // request this is per-job togglable, with a user-defined thumbnail interval
+  // and an off-by-default "keep all iterations".
+  const PROGRESS_POLL_MS = 4000;
+
+  function progressSupported() {
+    return currentRun && PROGRESS_JOB_TYPES.has(internalName);
+  }
+
+  function renderProgressShell() {
+    progressContent.innerHTML = `
+      <div class="progress-controls">
+        <label class="progress-check" title="Turn off to stop polling this job entirely — no charts, no thumbnails, no extra work.">
+          <input type="checkbox" data-role="prog-enabled" ${progressState.enabled ? "checked" : ""} /> Live progress
+        </label>
+        <label class="progress-num" title="Only refresh class images every N iterations. 1 = every iteration.">
+          Images every
+          <input type="number" data-role="prog-every" min="1" max="99" value="${progressState.everyN}" /> it
+        </label>
+        <label class="progress-check" title="Keep earlier iterations' images so you can compare. Off by default to bound memory.">
+          <input type="checkbox" data-role="prog-keepall" ${progressState.keepAll ? "checked" : ""} /> Keep all
+        </label>
+        <span class="progress-status" data-role="prog-status"></span>
+      </div>
+      <div data-role="prog-body"></div>
+    `;
+    progressContent.querySelector('[data-role="prog-enabled"]').addEventListener("change", (e) => {
+      progressState.enabled = e.target.checked;
+      if (progressState.enabled) refreshProgress();
+      else { stopProgressPolling(); renderProgressBody(); }
+    });
+    progressContent.querySelector('[data-role="prog-every"]').addEventListener("change", (e) => {
+      progressState.everyN = Math.max(1, parseInt(e.target.value, 10) || 1);
+      e.target.value = progressState.everyN;
+    });
+    progressContent.querySelector('[data-role="prog-keepall"]').addEventListener("change", (e) => {
+      progressState.keepAll = e.target.checked;
+      if (!progressState.keepAll) progressState.history = [];
+      renderProgressBody();
+    });
+  }
+
+  function renderProgressBody() {
+    const host = progressContent.querySelector('[data-role="prog-body"]');
+    const statusEl = progressContent.querySelector('[data-role="prog-status"]');
+    if (!host) return;
+    if (!progressState.enabled) {
+      host.innerHTML = '<div class="progress-empty">Live progress is off for this job.</div>';
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    const d = progressState.data;
+    if (!d || !d.available) {
+      host.innerHTML = '<div class="progress-empty">Waiting for the first iteration…</div>';
+      return;
+    }
+    if (statusEl) {
+      statusEl.textContent = `iteration ${d.latest.iteration}` +
+        (d.dimensionality ? ` · ${d.dimensionality}D` : "") +
+        (d.nr_classes ? ` · ${d.nr_classes} class${d.nr_classes === 1 ? "" : "es"}` : "");
+    }
+
+    host.innerHTML = `
+      <div class="progress-section"><h4>Resolution by iteration</h4><div data-role="chart-res"></div></div>
+      <div class="progress-section"><h4>Particles per class (iteration ${d.latest.iteration})</h4><div data-role="chart-dist"></div></div>
+      <div class="progress-section"><h4 data-role="thumbs-title"></h4><div data-role="thumbs"></div></div>
+    `;
+    drawResolutionChart(host.querySelector('[data-role="chart-res"]'), d.iterations);
+    drawClassDistributionChart(host.querySelector('[data-role="chart-dist"]'), d.latest.classes);
+    renderThumbnails(host);
+  }
+
+  function thumbGridHtml(iteration, classes) {
+    return `<div class="thumb-grid">` + classes.map((k) => `
+      <figure class="thumb">
+        <img loading="lazy" alt="Class ${k.index}, iteration ${iteration}"
+             src="/api/runs/${encodeURIComponent(currentRun.run_id)}/progress/thumbnail?reference=${encodeURIComponent(k.reference)}" />
+        <figcaption>#${k.index} · ${(k.distribution * 100).toFixed(0)}%${
+          k.resolution_A != null ? ` · ${k.resolution_A.toFixed(1)} Å` : ""}</figcaption>
+      </figure>`).join("") + `</div>`;
+  }
+
+  function renderThumbnails(host) {
+    const d = progressState.data;
+    const wrap = host.querySelector('[data-role="thumbs"]');
+    const title = host.querySelector('[data-role="thumbs-title"]');
+    if (!wrap || !d) return;
+    const it = d.latest.iteration;
+    // Honour "images every N iterations": show the newest iteration that is a
+    // multiple of N (iteration 1 always counts, so something appears early).
+    const showIt = (it % progressState.everyN === 0 || it === 1)
+      ? it
+      : (progressState.lastThumbIteration ?? null);
+    if (showIt === it) {
+      progressState.lastThumbIteration = it;
+      if (progressState.keepAll && !progressState.history.some((h) => h.iteration === it)) {
+        progressState.history.push({ iteration: it, classes: d.latest.classes });
+      }
+    }
+    const is3D = d.dimensionality === 3;
+    title.textContent = is3D ? "Class volumes (central slice)" : "Class averages";
+    if (showIt == null) {
+      wrap.innerHTML = `<div class="progress-empty">No image update yet — showing every ${progressState.everyN} iterations.</div>`;
+      return;
+    }
+    if (progressState.keepAll && progressState.history.length) {
+      wrap.innerHTML = progressState.history
+        .slice()
+        .reverse()
+        .map((h) => `<div class="thumb-iter"><span class="thumb-iter-label">iteration ${h.iteration}</span>${thumbGridHtml(h.iteration, h.classes)}</div>`)
+        .join("");
+    } else {
+      wrap.innerHTML = thumbGridHtml(showIt, d.latest.classes);
+    }
+  }
+
+  function stopProgressPolling() {
+    if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+  }
+
+  async function refreshProgress() {
+    stopProgressPolling();
+    if (!progressSupported() || !progressState.enabled) { renderProgressBody(); return; }
+    try {
+      const d = await api(`/api/runs/${currentRun.run_id}/progress`);
+      progressState.data = d;
+      if (d.supported === false) {
+        progressTabBtn.hidden = true;
+        return;
+      }
+      renderProgressBody();
+    } catch (err) {
+      const host = progressContent.querySelector('[data-role="prog-body"]');
+      if (host) host.innerHTML = `<div class="progress-empty">Could not read progress: ${escapeHtml(err.message)}</div>`;
+    }
+    // Keep polling only while the job is actually running.
+    if (currentRun && currentRun.status === "running" && progressState.enabled) {
+      progressTimer = setTimeout(refreshProgress, PROGRESS_POLL_MS);
+    }
+  }
+
+  function refreshProgressTabVisibility() {
+    const supported = progressSupported();
+    progressTabBtn.hidden = !supported;
+    if (supported && !progressContent.dataset.built) {
+      progressContent.dataset.built = "1";
+      renderProgressShell();
+      refreshProgress();
+    }
+  }
+
+  // Charts are drawn with resolved theme colours, so repaint them on a switch.
+  const onThemeChange = () => { if (progressContent.dataset.built) renderProgressBody(); };
+  document.addEventListener("relion-us-theme-changed", onThemeChange);
+
   async function loadOutputsTab() {
     if (!currentRun) return;
     outputsContent.innerHTML = '<div class="outputs-empty">Loading…</div>';
@@ -845,7 +1019,12 @@ async function openJobPopup(internalName, displayName, existingRun) {
     y: "center",
     mount: body,
     class: ["no-full"],
-    onclose: () => { if (ws) try { ws.close(); } catch (e) { /* noop */ } return false; },
+    onclose: () => {
+      stopProgressPolling();
+      document.removeEventListener("relion-us-theme-changed", onThemeChange);
+      if (ws) try { ws.close(); } catch (e) { /* noop */ }
+      return false;
+    },
   });
 }
 
@@ -1525,6 +1704,240 @@ async function openVisualizer() {
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", openVisualizer);
+
+// Job types with a live Progress tab. Must match backend progress.PROGRESS_JOBS
+// (the backend is authoritative — it returns supported:false and the tab hides
+// itself if these ever drift).
+const PROGRESS_JOB_TYPES = new Set([
+  "Class2D", "Class3D", "Autorefine", "Inimodel", "MultiBody", "TomoReconPart",
+]);
+
+// ==========================================================================
+// Small SVG charts for the job Progress tab.
+// Hand-rolled rather than pulling in a charting library: the whole frontend is
+// dependency-free and offline-capable (HPC login nodes often have no outbound
+// internet), and these are two simple forms. Colours are read from the CSS
+// theme variables so both charts follow the dark/light switch, and each is
+// redrawn on `relion-us-theme-changed`.
+// ==========================================================================
+
+function themeColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (cs.getPropertyValue(name) || fallback).trim();
+  return {
+    s1: v("--series-1", "#3987e5"),
+    s2: v("--series-2", "#d95926"),
+    text: v("--text", "#e6e9ee"),
+    dim: v("--text-dim", "#9aa4b2"),
+    grid: v("--grid", "#384049"),
+    surface: v("--panel", "#23272e"),
+  };
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(name, attrs = {}) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, val] of Object.entries(attrs)) el.setAttribute(k, String(val));
+  return el;
+}
+
+// Line chart: resolution (Å) against iteration. Two series max, one shared
+// y-axis (never a second scale — two measures of different scale would be two
+// charts). Lower Å is better, stated in the axis label rather than inverting
+// the axis, which reads as a trick.
+function drawResolutionChart(host, iterations) {
+  host.innerHTML = "";
+  const series = [
+    { key: "resolution_A", label: "Current", color: "s1" },
+    { key: "best_class_resolution_A", label: "Best class", color: "s2" },
+  ].filter((sr) => iterations.some((p) => p[sr.key] != null));
+  if (!series.length) {
+    host.innerHTML = '<div class="progress-empty">No resolution numbers reported yet.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 180, ML = 46, MR = 58, MT = 22, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const its = iterations.map((p) => p.iteration);
+  const xMin = Math.min(...its), xMax = Math.max(...its);
+  const vals = [];
+  series.forEach((sr) => iterations.forEach((p) => { if (p[sr.key] != null) vals.push(p[sr.key]); }));
+  let yMin = Math.min(...vals), yMax = Math.max(...vals);
+  if (yMax - yMin < 1e-9) { yMin -= 1; yMax += 1; }
+  const pad = (yMax - yMin) * 0.1;
+  yMin -= pad; yMax += pad;
+  const X = (i) => ML + (xMax === xMin ? plotW / 2 : ((i - xMin) / (xMax - xMin)) * plotW);
+  const Y = (v) => MT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Resolution by iteration (lower Å is better)";
+
+  // recessive gridlines + y labels
+  for (let t = 0; t <= 3; t++) {
+    const v = yMin + ((yMax - yMin) * t) / 3, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = v.toFixed(1);
+    svg.appendChild(lab);
+  }
+  const yTitle = svgEl("text", { x: 0, y: 9, fill: c.dim, "font-size": 9 });
+  yTitle.textContent = "Resolution, Å (lower = better)";
+  svg.appendChild(yTitle);
+
+  // x labels: first and last iteration only, to stay uncluttered
+  [xMin, xMax].forEach((i, idx) => {
+    const t = svgEl("text", { x: X(i), y: H - 8, "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9 });
+    t.textContent = `it ${i}`;
+    svg.appendChild(t);
+  });
+
+  series.forEach((sr) => {
+    const pts = iterations.filter((p) => p[sr.key] != null);
+    if (!pts.length) return;
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p.iteration).toFixed(1)},${Y(p[sr.key]).toFixed(1)}`).join(" ");
+    svg.appendChild(svgEl("path", {
+      d, fill: "none", stroke: c[sr.color], "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+    const last = pts[pts.length - 1];
+    // 2px surface ring so overlapping end markers stay separable
+    svg.appendChild(svgEl("circle", {
+      cx: X(last.iteration), cy: Y(last[sr.key]), r: 4,
+      fill: c[sr.color], stroke: c.surface, "stroke-width": 2,
+    }));
+    // direct label on the final point (≤4 series, so both get one)
+    const lab = svgEl("text", {
+      x: X(last.iteration) + 8, y: Y(last[sr.key]) + 3, fill: c.text, "font-size": 10,
+    });
+    lab.textContent = `${last[sr.key].toFixed(1)} Å`;
+    svg.appendChild(lab);
+  });
+
+  // hover: nearest iteration, crosshair + tooltip
+  const hoverLine = svgEl("line", { y1: MT, y2: MT + plotH, stroke: c.dim, "stroke-width": 1, opacity: 0 });
+  svg.appendChild(hoverLine);
+  const hit = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(hit);
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+  host.appendChild(svg);
+  host.appendChild(tip);
+  hit.addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let nearest = iterations[0];
+    iterations.forEach((p) => {
+      if (Math.abs(X(p.iteration) - px) < Math.abs(X(nearest.iteration) - px)) nearest = p;
+    });
+    hoverLine.setAttribute("x1", X(nearest.iteration));
+    hoverLine.setAttribute("x2", X(nearest.iteration));
+    hoverLine.setAttribute("opacity", "0.6");
+    tip.classList.remove("hidden");
+    tip.style.left = `${(X(nearest.iteration) / W) * 100}%`;
+    tip.innerHTML = `<b>Iteration ${nearest.iteration}</b>` +
+      series.map((sr) => nearest[sr.key] == null ? "" :
+        `<br><span class="tip-swatch" style="background:${c[sr.color]}"></span>${escapeHtml(sr.label)}: ${nearest[sr.key].toFixed(2)} Å`).join("");
+  });
+  hit.addEventListener("mouseleave", () => {
+    hoverLine.setAttribute("opacity", "0");
+    tip.classList.add("hidden");
+  });
+
+  if (series.length >= 2) {
+    const legend = document.createElement("div");
+    legend.className = "progress-legend";
+    legend.innerHTML = series.map((sr) =>
+      `<span><span class="tip-swatch" style="background:${c[sr.color]}"></span>${escapeHtml(sr.label)}</span>`).join("");
+    host.appendChild(legend);
+  }
+}
+
+// Bar chart: share of particles per class, latest iteration. One series, so no
+// legend — the heading names it.
+function drawClassDistributionChart(host, classes) {
+  host.innerHTML = "";
+  if (!classes.length) {
+    host.innerHTML = '<div class="progress-empty">No class distribution reported yet.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, barH = 16, gap = 6, ML = 34, MR = 46, MT = 6;
+  const H = MT + classes.length * (barH + gap);
+  const plotW = W - ML - MR;
+  const maxV = Math.max(...classes.map((k) => k.distribution), 0.0001);
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Share of particles per class";
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+
+  classes.forEach((k, i) => {
+    const y = MT + i * (barH + gap);
+    const w = Math.max(1, (k.distribution / maxV) * plotW);
+    const lab = svgEl("text", { x: ML - 6, y: y + barH - 4, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = `#${k.index}`;
+    svg.appendChild(lab);
+    // 4px rounded data-end, anchored to the baseline
+    const bar = svgEl("rect", { x: ML, y, width: w, height: barH, rx: 4, fill: c.s1 });
+    svg.appendChild(bar);
+    const val = svgEl("text", { x: ML + w + 6, y: y + barH - 4, fill: c.text, "font-size": 10 });
+    val.textContent = `${(k.distribution * 100).toFixed(1)}%`;
+    svg.appendChild(val);
+    bar.addEventListener("mouseenter", () => {
+      tip.classList.remove("hidden");
+      tip.style.left = "10%";
+      tip.innerHTML = `<b>Class ${k.index}</b><br>${(k.distribution * 100).toFixed(1)}% of particles` +
+        (k.resolution_A != null ? `<br>${k.resolution_A.toFixed(2)} Å` : "");
+    });
+    bar.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+  });
+  host.appendChild(svg);
+  host.appendChild(tip);
+}
+
+// ==========================================================================
+// Theme (dark default / light alternative)
+// The whole stylesheet is written against CSS variables, so switching themes
+// is just stamping data-theme on <html>. Dark stays the default -- the light
+// theme is opt-in and remembered.
+// ==========================================================================
+const THEME_STORAGE_KEY = "relion_us_theme";
+
+function setTheme(theme, { persist = true } = {}) {
+  const value = theme === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", value);
+  const btn = document.getElementById("themeBtn");
+  if (btn) {
+    // The button shows the CURRENT theme, and its title says what clicking does.
+    btn.textContent = value === "light" ? "☀ Light" : "🌙 Dark";
+    btn.title = value === "light" ? "Switch to the dark theme" : "Switch to the light theme";
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, value);
+    } catch (e) {
+      // Non-fatal — the theme just won't be remembered across reloads.
+    }
+  }
+  // Charts are drawn with resolved colours, so they need a repaint on switch.
+  document.dispatchEvent(new CustomEvent("relion-us-theme-changed", { detail: { theme: value } }));
+}
+
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+
+(function initTheme() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem(THEME_STORAGE_KEY);
+  } catch (e) { /* storage unavailable */ }
+  // A remembered choice always wins. With no choice stored we keep dark, which
+  // is this app's designed default, rather than following the OS.
+  setTheme(stored === "light" ? "light" : "dark", { persist: false });
+  document.getElementById("themeBtn").addEventListener("click", () => {
+    setTheme(currentTheme() === "light" ? "dark" : "light");
+  });
+})();
 
 refreshProjectLabel();
 refreshCommandCenter();

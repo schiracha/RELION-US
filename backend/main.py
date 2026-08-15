@@ -60,6 +60,14 @@ Endpoints:
   GET  /api/runs/{run_id}/files/zip       -> download a user-selected subset
                                               of output files as one .zip
                                               (repeat ?path=... per file)
+  GET  /api/runs/{run_id}/progress        -> live progress for iterative jobs
+                                              (per-iteration resolution + class
+                                              distribution, from RELION's own
+                                              run_it###_model.star)
+  GET  /api/runs/{run_id}/progress/thumbnail
+                                           -> one class average / central slice
+                                              of a class volume, as a small PNG
+                                              (?reference=<rlnReferenceImage>)
   POST /api/viz/inspect                   -> visualizer: classify an MRC/STAR
                                               input, list its tomogram(s)
   GET  /api/viz/volume-info               -> visualizer: MRC dims, voxel size,
@@ -118,6 +126,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import job_registry
+import progress
 import project_manager
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
@@ -560,6 +569,54 @@ async def run_websocket(websocket: WebSocket, run_id: str):
         reader.cancel()
         if queue in run.subscribers:
             run.subscribers.remove(queue)
+
+
+# --------------------------------------------------------------------------
+# Live progress for iterative jobs (Class2D/Class3D/Refine3D/InitialModel/...)
+# Reads the per-iteration run_it###_model.star RELION writes itself; renders
+# class thumbnails on demand from the MRCs it already wrote. Nothing is cached
+# to disk. See progress.py.
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/runs/{run_id}/progress")
+def run_progress(run_id: str):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    run = run_manager.get(run_id)
+    internal_name = run.internal_name if run is not None else None
+    if internal_name is None:
+        entry = next(
+            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
+        )
+        internal_name = (entry or {}).get("internal_name")
+    if not internal_name or not progress.supports_progress(internal_name):
+        return {"available": False, "supported": False, "iterations": [], "latest": None}
+    try:
+        data = progress.read_progress(Path(cwd))
+    except progress.ProgressError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    data["supported"] = True
+    return data
+
+
+@app.get("/api/runs/{run_id}/progress/thumbnail")
+def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    try:
+        png = progress.render_class_thumbnail(Path(cwd), reference)
+    except progress.ProgressError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Immutable: RELION never rewrites a completed iteration's class images, so
+    # the browser can keep these without re-fetching while the popup is open.
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 # --------------------------------------------------------------------------
