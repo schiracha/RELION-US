@@ -101,6 +101,13 @@ Endpoints:
                                               pick a different folder" popup
   POST /api/project/init                  -> mark a folder as a new RELION-US
                                               project and switch to it
+  GET  /api/project/recent                -> recently opened project dirs,
+                                              most recent first, for the
+                                              Change Project dialog's
+                                              quick-switch list
+  POST /api/project/recent/remove         -> drop one entry from that list
+                                              (bookmark only; never touches
+                                              the directory)
   POST /api/project/create-folder         -> create a new folder from the
                                               Change Project browser ("Create
                                               Folder" button). Returns
@@ -164,6 +171,10 @@ app.add_middleware(
 )
 
 run_manager = JobRunManager(PROJECT_DIR)
+
+# The project the app starts in counts as opened, so the very first entry in
+# the Change Project dialog's recent list is the one already on screen.
+project_manager.remember_project(PROJECT_DIR)
 
 
 @app.get("/api/catalog")
@@ -463,6 +474,23 @@ def browse_project(req: ProjectPathRequest):
         raise HTTPException(status_code=400, detail=f"Not a directory: {target}")
 
 
+@app.get("/api/project/recent")
+def recent_projects():
+    """Recently opened project directories, most recent first, for the Change
+    Project dialog's quick-switch list. `exists`/`is_project` are recomputed on
+    every call — a folder can be deleted, or become a real RELION project, with
+    this app uninvolved."""
+    return {"recent": project_manager.load_recent_projects()}
+
+
+@app.post("/api/project/recent/remove")
+def forget_recent_project(req: ProjectPathRequest):
+    """Remove one entry from the recent list. Bookmark only — the directory
+    itself is never touched."""
+    project_manager.forget_project(req.path)
+    return {"ok": True, "recent": project_manager.load_recent_projects()}
+
+
 @app.post("/api/project/switch")
 def switch_project(req: ProjectPathRequest):
     target = Path(req.path).expanduser().resolve()
@@ -474,6 +502,7 @@ def switch_project(req: ProjectPathRequest):
         reason = "does_not_exist" if not target.is_dir() else "not_a_relion_project"
         return {"ok": False, "reason": reason, "path": str(target)}
     run_manager.set_project_dir(target)
+    project_manager.remember_project(target)
     return {"ok": True, "path": str(target), "history": run_manager.list_runs()}
 
 
@@ -485,6 +514,7 @@ def init_project(req: ProjectPathRequest):
     except project_manager.PermissionDeniedError as exc:
         return {"ok": False, "reason": "permission_denied", "message": str(exc)}
     run_manager.set_project_dir(target)
+    project_manager.remember_project(target)
     return {"ok": True, "path": str(target), "history": run_manager.list_runs()}
 
 
@@ -653,9 +683,14 @@ def viz_slice(
     index: int = Query(0),
     lo: float | None = Query(None),
     hi: float | None = Query(None),
+    # The orthogonal viewer's left panel needs [y, z] rather than [z, y]; see
+    # viz.render_slice_png().
+    transpose: bool = Query(False),
 ):
     try:
-        png = viz.render_slice_png(run_manager.project_dir, mrc_path, axis, index, lo, hi)
+        png = viz.render_slice_png(
+            run_manager.project_dir, mrc_path, axis, index, lo, hi, transpose=transpose
+        )
     except viz.VizError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return Response(content=png, media_type="image/png")

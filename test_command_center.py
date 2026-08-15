@@ -9,6 +9,7 @@ are deterministic.
 
 Usage: python3 test_command_center.py [base_url]
 """
+import os
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -30,6 +31,18 @@ def check(label, cond):
 import re as _re
 
 
+
+def launch_browser(p):
+    """Launch Chromium for the smoke tests.
+
+    By default let Playwright find its own bundled browser -- that is what
+    `playwright install chromium` sets up and it is right on almost every
+    machine. Set RELION_US_CHROMIUM to point at a specific binary when the
+    browser lives somewhere Playwright does not look (a shared read-only
+    install on a cluster, for instance)."""
+    exe = os.environ.get("RELION_US_CHROMIUM")
+    return p.chromium.launch(executable_path=exe) if exe else p.chromium.launch()
+
 def out_subdir(win):
     """Extract the job's output dir (from the draft's --o / --output-directory)
     so a simulated command can write into it -- jobs now run from the PROJECT
@@ -41,7 +54,7 @@ def out_subdir(win):
 
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+    browser = launch_browser(p)
     page = browser.new_page(viewport={"width": 1500, "height": 950})
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))

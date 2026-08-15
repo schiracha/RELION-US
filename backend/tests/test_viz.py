@@ -147,3 +147,60 @@ def test_slice_survives_nan_voxels(tmp_path):
     info = viz.volume_info(tmp_path, "nan.mrc")
     assert info["contrast_hi"] > info["contrast_lo"]
     assert np.isfinite(info["contrast_lo"]) and np.isfinite(info["contrast_hi"])
+
+
+# --------------------------------------------------------------------------
+# Slice transposition — the orthogonal viewer's left-hand (ZY) panel needs Y
+# running vertically so it shares the main XY panel's vertical axis. Getting
+# this backwards silently mirrors the side view: it still looks like a
+# tomogram, just with the picks in the wrong place.
+# --------------------------------------------------------------------------
+
+
+def _png_size(png: bytes) -> tuple[int, int]:
+    """Width, height straight out of the PNG IHDR (bytes 16..24)."""
+    import struct
+    assert png[:4] == b"\x89PNG"
+    return struct.unpack(">II", png[16:24])
+
+
+def test_slice_dimensions_untransposed(tmp_path):
+    # volume is 40x50x30 (nx, ny, nz)
+    _make_project(tmp_path)
+    assert _png_size(viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 15)) == (40, 50)  # x, y
+    assert _png_size(viz.render_slice_png(tmp_path, "TS_01.mrc", "y", 25)) == (40, 30)  # x, z
+    assert _png_size(viz.render_slice_png(tmp_path, "TS_01.mrc", "x", 20)) == (50, 30)  # y, z
+
+
+def test_transpose_swaps_width_and_height(tmp_path):
+    _make_project(tmp_path)
+    # The ZY panel asks for axis 'x' transposed: z across, y down.
+    assert _png_size(
+        viz.render_slice_png(tmp_path, "TS_01.mrc", "x", 20, transpose=True)
+    ) == (30, 50)
+
+
+def test_transpose_actually_transposes_the_pixels(tmp_path):
+    """Not just the shape — a transpose that only relabelled the dimensions
+    would pass the size check above while scrambling the image."""
+    import numpy as np
+    import mrcfile
+    from PIL import Image
+    import io
+
+    # A volume whose x-slice is an obvious gradient, so transposition is
+    # visible rather than inferred.
+    data = np.zeros((6, 8, 4), dtype=np.float32)        # z, y, x
+    for z in range(6):
+        for y in range(8):
+            data[z, y, :] = z * 10 + y
+    with mrcfile.new(tmp_path / "grad.mrc", overwrite=True) as m:
+        m.set_data(data)
+
+    plain = np.array(Image.open(io.BytesIO(
+        viz.render_slice_png(tmp_path, "grad.mrc", "x", 2))))
+    flipped = np.array(Image.open(io.BytesIO(
+        viz.render_slice_png(tmp_path, "grad.mrc", "x", 2, transpose=True))))
+    assert plain.shape == (6, 8)      # rows z, cols y
+    assert flipped.shape == (8, 6)    # rows y, cols z
+    assert np.array_equal(flipped, plain.T)

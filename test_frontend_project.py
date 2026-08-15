@@ -1,150 +1,177 @@
+"""
+Playwright test for the Change Project dialog: browsing, switching, the
+"not a RELION project" prompt, Create Folder (including its two error paths),
+and the recent-projects list filling in as you switch around.
+
+Builds its own fixture tree under /tmp/relion_test_projects, so it needs only
+a live backend — no particular starting project.
+
+Usage: python3 test_frontend_project.py [base_url]
+"""
+import os
+import shutil
 import sys
+from pathlib import Path
+
 from playwright.sync_api import sync_playwright
 
+
+def launch_browser(p):
+    """Launch Chromium for the smoke tests.
+
+    By default let Playwright find its own bundled browser -- that is what
+    `playwright install chromium` sets up and it is right on almost every
+    machine. Set RELION_US_CHROMIUM to point at a specific binary when the
+    browser lives somewhere Playwright does not look (a shared read-only
+    install on a cluster, for instance)."""
+    exe = os.environ.get("RELION_US_CHROMIUM")
+    return p.chromium.launch(executable_path=exe) if exe else p.chromium.launch()
+
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8420"
+FIXTURES = Path("/tmp/relion_test_projects")
+
 errors = []
+ok = True
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
-    page = browser.new_page(viewport={"width": 1400, "height": 900})
-    # Chromium logs a generic "Failed to load resource: 404" console error for
-    # the browser's own implicit favicon.ico request; this is benign (present
-    # even in the original test_frontend.py smoke test) and unrelated to any
-    # app functionality, so it's filtered out here rather than chased.
-    page.on("console", lambda msg: errors.append(msg.text)
-            if msg.type == "error" and "Failed to load resource" not in msg.text else None)
-    page.on("pageerror", lambda exc: errors.append(str(exc)))
-    page.on("response", lambda resp: errors.append(f"HTTP {resp.status} {resp.url}")
-            if resp.status >= 400 and "favicon.ico" not in resp.url else None)
 
-    page.goto("http://localhost:8420/", wait_until="networkidle")
+def check(label, cond):
+    global ok
+    status = "OK" if cond else "FAIL"
+    print(f"[{status}] {label}")
+    if not cond:
+        ok = False
 
-    # Project label should reflect the current (cwd-detected) project.
-    page.wait_for_timeout(500)
-    label = page.locator("#projectDirLabel").inner_text()
-    print("Initial project label:", label)
-    assert "existing_project" in label, f"expected existing_project in label, got {label!r}"
 
-    # Open Change Project modal
-    page.locator("#changeProjectBtn").click()
-    page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
-    print("Change Project modal opened")
+def make_fixtures():
+    shutil.rmtree(FIXTURES, ignore_errors=True)
+    # existing_project: already a RELION project (has RELION's own pipeline file)
+    (FIXTURES / "existing_project").mkdir(parents=True)
+    (FIXTURES / "existing_project" / "default_pipeline.star").write_text(
+        "# fake pipeline star for testing\n")
+    # plain_folder: a real folder that is NOT a project yet
+    (FIXTURES / "plain_folder").mkdir(parents=True)
 
-    # Browse into /tmp/relion_test_projects (parent of both test dirs)
-    page.locator("#projectPathInput").fill("/tmp/relion_test_projects")
-    page.locator("#projectPathGoBtn").click()
-    page.wait_for_timeout(500)
-    entries = page.locator(".browser-entry").all_inner_texts()
-    print("Browser entries at /tmp/relion_test_projects:", entries)
-    assert any("plain_folder" in e for e in entries)
-    assert any("existing_project" in e for e in entries)
 
-    # Click into plain_folder (already init'd as a project by curl test earlier)
-    page.locator(".browser-entry", has_text="plain_folder").first.click()
-    page.wait_for_timeout(500)
-    badge = page.locator(".project-badge.ok")
-    print("plain_folder recognized as project:", badge.count() > 0)
+def main():
+    make_fixtures()
 
-    # Switch to it
-    page.locator("#projectSwitchBtn").click()
-    page.wait_for_timeout(500)
-    label2 = page.locator("#projectDirLabel").inner_text()
-    print("Project label after switch:", label2)
-    assert "plain_folder" in label2
+    with sync_playwright() as p:
+        browser = launch_browser(p)
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page.on("console", lambda msg: errors.append(msg.text)
+                if msg.type == "error" and "Failed to load resource" not in msg.text else None)
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.on("response", lambda resp: errors.append(f"HTTP {resp.status} {resp.url}")
+                if resp.status >= 400 and "favicon.ico" not in resp.url else None)
 
-    # Running jobs bar should now show the history entry created earlier via curl
-    page.wait_for_selector(".run-chip", timeout=3000)
-    chip_text = page.locator(".run-chip").first.inner_text()
-    print("History chip found:", chip_text)
+        page.goto(BASE_URL + "/", wait_until="networkidle")
+        page.wait_for_timeout(500)
 
-    # Click the chip to reopen that run's popup
-    page.locator(".run-chip").first.click()
-    page.wait_for_selector(".winbox", timeout=3000)
-    print("Run history popup opened:", page.locator(".winbox").count())
-    page.wait_for_timeout(500)
-    output_text = page.locator(".live-output").first.inner_text()
-    print("Live output pane contents:", output_text[:200])
+        # --- browse to the fixture tree and switch to a real project ---
+        page.locator("#changeProjectBtn").click()
+        page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
+        page.locator("#projectPathInput").fill(str(FIXTURES))
+        page.locator("#projectPathGoBtn").click()
+        page.wait_for_timeout(500)
+        entries = page.locator("#projectBrowser .browser-entry").all_inner_texts()
+        check(f"Fixture folders listed ({entries})",
+              any("plain_folder" in e for e in entries)
+              and any("existing_project" in e for e in entries))
 
-    # Now test the "not a relion project" path against a brand-new folder name
-    page.evaluate("document.querySelectorAll('.winbox').forEach(w => w.remove())")
-    page.wait_for_timeout(200)
-    page.locator("#changeProjectBtn").click(force=True)
-    page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
-    page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
-    page.locator("#projectPathInput").fill("/tmp/relion_test_projects/brand_new_unseen_folder")
-    page.wait_for_timeout(200)
-    page.screenshot(path="/tmp/debug_before_switch.png")
-    page.locator("#projectSwitchBtn").click(force=True)
-    page.wait_for_timeout(500)
-    page.screenshot(path="/tmp/debug_after_switch.png")
-    print("Modal overlay hidden?", page.locator("#projectModalOverlay").get_attribute("class"))
-    print("NotAProject overlay class:", page.locator("#notAProjectOverlay").get_attribute("class"))
-    page.wait_for_selector("#notAProjectOverlay:not(.hidden)", timeout=3000)
-    prompt_text = page.locator("#notAProjectOverlay .modal p").inner_text()
-    print("Not-a-project prompt text:", prompt_text)
-    assert "doesn't look like a Relion Project" in prompt_text
+        page.locator("#projectBrowser .browser-entry", has_text="existing_project").first.click()
+        page.wait_for_timeout(500)
+        check("A folder with default_pipeline.star is badged as a project",
+              page.locator(".project-badge.ok").count() > 0)
 
-    page.locator("#startNewProjectBtn").click()
-    page.wait_for_timeout(500)
-    label3 = page.locator("#projectDirLabel").inner_text()
-    print("Project label after starting new project:", label3)
-    assert "brand_new_unseen_folder" in label3
+        page.locator("#projectSwitchBtn").click()
+        page.wait_for_timeout(600)
+        check("Switched to existing_project",
+              "existing_project" in page.locator("#projectDirLabel").inner_text())
 
-    # --- Create Folder button in the Change Project browser ---
-    page.locator("#changeProjectBtn").click(force=True)
-    page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
-    page.locator("#projectPathInput").fill("/tmp/relion_test_projects")
-    page.locator("#projectPathGoBtn").click()
-    page.wait_for_timeout(400)
+        # --- a folder that isn't a project yet: prompt, then start one ---
+        page.locator("#changeProjectBtn").click(force=True)
+        page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
+        page.locator("#projectPathInput").fill(str(FIXTURES / "brand_new_unseen_folder"))
+        page.locator("#projectSwitchBtn").click(force=True)
+        page.wait_for_selector("#notAProjectOverlay:not(.hidden)", timeout=3000)
+        prompt_text = page.locator("#notAProjectOverlay .modal p").inner_text()
+        check("Not-a-project prompt shown",
+              "doesn't look like a Relion Project" in prompt_text)
 
-    page.locator("#newFolderNameInput").fill("CreatedFromUI")
-    page.locator("#createFolderBtn").click()
-    page.wait_for_timeout(500)
-    entries_after_create = page.locator(".browser-entry").all_inner_texts()
-    print("Browser entries after Create Folder:", entries_after_create)
-    new_path_value = page.locator("#projectPathInput").input_value()
-    print("Path input after Create Folder:", new_path_value)
-    assert new_path_value.endswith("CreatedFromUI"), f"expected to navigate into the new folder, got {new_path_value!r}"
-    assert page.locator("#projectModalError").get_attribute("class") == "modal-error hidden", \
-        "no error banner expected on a successful Create Folder"
+        page.locator("#startNewProjectBtn").click()
+        page.wait_for_timeout(600)
+        check("Starting a new project switches to it",
+              "brand_new_unseen_folder" in page.locator("#projectDirLabel").inner_text())
+        check("Starting a new project does NOT fabricate default_pipeline.star",
+              not (FIXTURES / "brand_new_unseen_folder" / "default_pipeline.star").exists())
 
-    import os
-    assert os.path.isdir("/tmp/relion_test_projects/CreatedFromUI"), \
-        "Create Folder button did not actually create the directory on disk"
+        # --- recent projects: both visited projects should now be listed ---
+        page.locator("#changeProjectBtn").click(force=True)
+        page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
+        page.wait_for_timeout(500)
+        recent = page.locator(".recent-entry .recent-entry-path").all_inner_texts()
+        check(f"Both visited projects are in the recent list ({len(recent)} entries)",
+              any(e.endswith("existing_project") for e in recent)
+              and any(e.endswith("brand_new_unseen_folder") for e in recent))
+        check("Most recently opened is first",
+              recent and recent[0].endswith("brand_new_unseen_folder"))
 
-    # Empty name should show an inline error, not a silent no-op or a native alert
-    page.locator("#newFolderNameInput").fill("")
-    page.locator("#createFolderBtn").click()
-    page.wait_for_timeout(300)
-    err_class = page.locator("#projectModalError").get_attribute("class")
-    err_text = page.locator("#projectModalError").inner_text()
-    print("Error banner after empty-name Create Folder click:", err_class, "-", err_text)
-    assert "hidden" not in err_class
-    assert err_text
+        # double-clicking a recent entry switches straight to it
+        page.locator(".recent-entry", has_text="existing_project").first.dblclick()
+        page.wait_for_timeout(700)
+        check("Double-clicking a recent project switches to it",
+              "existing_project" in page.locator("#projectDirLabel").inner_text())
 
-    # Trigger the OSError branch for real: an intermediate path component
-    # that's a file, not a directory (verified against the live endpoint via
-    # curl already; this confirms the frontend surfaces main.py's returned
-    # `message` in the error banner rather than swallowing it).
-    with open("/tmp/relion_test_projects/CreatedFromUI/blocking_file", "w") as f:
-        f.write("x")
-    page.locator("#projectPathInput").fill("/tmp/relion_test_projects/CreatedFromUI")
-    page.locator("#projectPathGoBtn").click()
-    page.wait_for_timeout(300)
-    page.locator("#newFolderNameInput").fill("blocking_file/nested")
-    page.locator("#createFolderBtn").click()
-    page.wait_for_timeout(500)
-    err_text2 = page.locator("#projectModalError").inner_text()
-    print("Error banner after OSError-triggering Create Folder:", err_text2)
-    assert "Could not create folder" in err_text2
+        # --- Create Folder ---
+        page.locator("#changeProjectBtn").click(force=True)
+        page.wait_for_selector("#projectModalOverlay:not(.hidden)", timeout=3000)
+        page.locator("#projectPathInput").fill(str(FIXTURES))
+        page.locator("#projectPathGoBtn").click()
+        page.wait_for_timeout(400)
+        page.locator("#newFolderNameInput").fill("CreatedFromUI")
+        page.locator("#createFolderBtn").click()
+        page.wait_for_timeout(600)
+        check("Create Folder navigates into the new folder",
+              page.locator("#projectPathInput").input_value().endswith("CreatedFromUI"))
+        check("Create Folder actually created it on disk",
+              os.path.isdir(FIXTURES / "CreatedFromUI"))
+        check("No error banner on a successful create",
+              "hidden" in page.locator("#projectModalError").get_attribute("class"))
 
-    page.screenshot(path="/tmp/relion_us_project_screenshot.png", full_page=False)
-    browser.close()
+        # empty name -> inline error, not a silent no-op and not a native alert
+        page.locator("#newFolderNameInput").fill("")
+        page.locator("#createFolderBtn").click()
+        page.wait_for_timeout(300)
+        check("Empty folder name shows an inline error",
+              "hidden" not in page.locator("#projectModalError").get_attribute("class")
+              and page.locator("#projectModalError").inner_text())
 
+        # a file where a directory component is expected -> backend OSError,
+        # surfaced in the banner rather than swallowed
+        (FIXTURES / "CreatedFromUI" / "blocking_file").write_text("x")
+        page.locator("#projectPathInput").fill(str(FIXTURES / "CreatedFromUI"))
+        page.locator("#projectPathGoBtn").click()
+        page.wait_for_timeout(300)
+        page.locator("#newFolderNameInput").fill("blocking_file/nested")
+        page.locator("#createFolderBtn").click()
+        page.wait_for_timeout(600)
+        check("Backend error text reaches the banner",
+              "Could not create folder" in page.locator("#projectModalError").inner_text())
+
+        page.locator("#projectModalCancelBtn").click()
+        browser.close()
+
+    print()
+    if errors:
+        print("CONSOLE/PAGE ERRORS:")
+        for e in errors:
+            print(" -", e)
+        return False
+    print("No console/page errors.")
+    return True
+
+
+clean = main()
 print()
-if errors:
-    print("Console/page errors observed:")
-    for e in errors:
-        print(" -", e)
-    sys.exit(1)
-else:
-    print("No console/page errors. Change Project flow OK.")
+print("OVERALL:", "PASS" if (ok and clean) else "FAIL")
+sys.exit(0 if (ok and clean) else 1)

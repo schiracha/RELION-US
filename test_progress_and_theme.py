@@ -9,12 +9,25 @@ shape RELION's own Class2D writes.
 
 Usage: python3 test_progress_and_theme.py [base_url] [project_dir]
 """
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+
+def launch_browser(p):
+    """Launch Chromium for the smoke tests.
+
+    By default let Playwright find its own bundled browser -- that is what
+    `playwright install chromium` sets up and it is right on almost every
+    machine. Set RELION_US_CHROMIUM to point at a specific binary when the
+    browser lives somewhere Playwright does not look (a shared read-only
+    install on a cluster, for instance)."""
+    exe = os.environ.get("RELION_US_CHROMIUM")
+    return p.chromium.launch(executable_path=exe) if exe else p.chromium.launch()
 
 BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8429"
 PROJECT_DIR = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("relion_project")
@@ -63,9 +76,7 @@ def main():
     (PROJECT_DIR / "fake_iterative_job.py").write_text(FAKE_JOB)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
-        )
+        browser = launch_browser(p)
         page = browser.new_page(viewport={"width": 1500, "height": 1000})
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -185,7 +196,7 @@ def main():
               and viz.locator('[data-role="viz-browse-particles"]').count() == 1)
 
         viz.locator('[data-role="viz-browse-main"]').click()
-        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
         root_entries = page.locator(".file-picker .browser-entry").all_inner_texts()
         check("Picker hides files that don't match the extension filter",
               not any("ignore_me.txt" in e for e in root_entries))
@@ -200,7 +211,7 @@ def main():
               viz.locator('[data-role="viz-path"]').input_value() == "Tomograms/job099/TS_77.mrc")
 
         viz.locator('[data-role="viz-browse-particles"]').click()
-        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
         check("Second picker resumes in the same folder",
               "job099" in page.locator(".file-picker .picker-current").inner_text())
         star_only = page.locator(".file-picker .browser-entry.picker-file").all_inner_texts()
@@ -217,7 +228,7 @@ def main():
 
         # Esc closes the picker without changing the field
         viz.locator('[data-role="viz-browse-main"]').click()
-        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
         page.keyboard.press("Escape")
         page.wait_for_timeout(300)
         check("Escape cancels the picker", page.locator(".file-picker").count() == 0)

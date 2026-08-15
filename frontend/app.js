@@ -1290,10 +1290,89 @@ function renderBrowser(listing) {
   }
 }
 
+// --- Recent projects ------------------------------------------------------
+// Server-side cache (project_manager.load_recent_projects), not localStorage:
+// the paths belong to the machine running the backend, so they must survive a
+// different browser, a different machine, and a page reload on a cluster.
+
+const recentProjectsWrap = document.getElementById("recentProjectsWrap");
+const recentProjectsList = document.getElementById("recentProjectsList");
+
+function renderRecentProjects(recent) {
+  recentProjectsList.innerHTML = "";
+  if (!recent || !recent.length) {
+    recentProjectsWrap.classList.add("hidden");
+    return;
+  }
+  recentProjectsWrap.classList.remove("hidden");
+  recent.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "recent-entry" + (entry.exists ? "" : " missing");
+    row.title = entry.exists
+      ? entry.path
+      : entry.path + "  (folder no longer exists)";
+
+    const label = document.createElement("span");
+    label.className = "recent-entry-label";
+    const name = document.createElement("span");
+    name.className = "recent-entry-name";
+    name.textContent = entry.name;
+    const dir = document.createElement("span");
+    dir.className = "recent-entry-path";
+    dir.textContent = entry.path;
+    label.appendChild(name);
+    label.appendChild(dir);
+    row.appendChild(label);
+
+    // One click browses to it and fills the path box, rather than switching
+    // outright — same two-step confirm as any other folder, so a mis-click on
+    // a list of similar-looking paths can't move the app out from under a
+    // running job. Double-click is the shortcut for "yes, this one".
+    row.addEventListener("click", () => browseTo(entry.path));
+    row.addEventListener("dblclick", () => {
+      projectPathInput.value = entry.path;
+      document.getElementById("projectSwitchBtn").click();
+    });
+
+    const forget = document.createElement("button");
+    forget.type = "button";
+    forget.className = "recent-forget";
+    forget.textContent = "✕";
+    forget.title = "Remove from this list (does not delete the folder)";
+    forget.addEventListener("click", async (e) => {
+      e.stopPropagation();          // don't also browse into it
+      try {
+        const resp = await api("/api/project/recent/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: entry.path }),
+        });
+        renderRecentProjects(resp.recent);
+      } catch (err) {
+        showModalError(projectModalError, err.message);
+      }
+    });
+    row.appendChild(forget);
+    recentProjectsList.appendChild(row);
+  });
+}
+
+async function refreshRecentProjects() {
+  try {
+    const resp = await api("/api/project/recent");
+    renderRecentProjects(resp.recent);
+  } catch (err) {
+    // A missing/unreadable cache must not block the dialog — the browser
+    // below it is the primary way in.
+    renderRecentProjects([]);
+  }
+}
+
 function openProjectModal() {
   projectModalOverlay.classList.remove("hidden");
   clearModalError(projectModalError);
   newFolderNameInput.value = "";
+  refreshRecentProjects();
   api("/api/project").then((proj) => {
     projectPathInput.value = proj.path;
     browseTo(proj.path);
@@ -1436,158 +1515,357 @@ function choiceDialog(message, choices) {
 async function openVisualizer() {
   const body = document.createElement("div");
   body.className = "viz-popup";
+  // Layout: the orthogonal views take the whole left side; every control and
+  // input lives in a narrow right-hand rail, so the images get the window.
   body.innerHTML = `
-    <div class="viz-inputs">
-      <label>STAR (optimiser/tomograms/particles) or MRC:
-        <span class="viz-input-row">
-          <input type="text" data-role="viz-path" placeholder="e.g. Tomograms/job012/tomograms.star or TS_01.mrc" />
-          <button type="button" class="btn" data-role="viz-browse-main" title="Browse for a STAR or MRC file on the machine running the backend">Browse…</button>
-        </span>
-      </label>
-      <label>Particles/coords STAR (optional, if separate):
-        <span class="viz-input-row">
-          <input type="text" data-role="viz-particles" placeholder="e.g. particles.star" />
-          <button type="button" class="btn" data-role="viz-browse-particles" title="Browse for a particles/coordinates STAR file">Browse…</button>
-        </span>
-      </label>
-      <div class="viz-inputs-row">
-        <button class="btn primary" data-role="viz-load">Load</button>
-        <select data-role="viz-tomo" style="display:none"></select>
-        <span class="status-line" data-role="viz-status"></span>
-      </div>
-    </div>
-    <div class="viz-controls" data-role="viz-controls" style="display:none">
-      <div class="viz-ctrl-row">
-        <span>Axis:</span>
-        <button class="btn viz-axis active" data-axis="z">XY (Z)</button>
-        <button class="btn viz-axis" data-axis="y">XZ (Y)</button>
-        <button class="btn viz-axis" data-axis="x">ZY (X)</button>
-        <label class="viz-check"><input type="checkbox" data-role="viz-showpicks" checked /> Show picks</label>
-      </div>
-      <div class="viz-ctrl-row">
-        <span data-role="viz-slice-label">Slice</span>
-        <input type="range" data-role="viz-slice" min="0" max="0" value="0" style="flex:1" />
-      </div>
-      <div class="viz-ctrl-row">
-        <span>Contrast</span>
-        <input type="range" data-role="viz-lo" min="0" max="100" value="0" title="black point" />
-        <input type="range" data-role="viz-hi" min="0" max="100" value="100" title="white point" />
-      </div>
-      <div class="viz-ctrl-row">
-        <span>Pick Ø (vox)</span>
-        <input type="range" data-role="viz-diam" min="2" max="80" value="16" />
-        <span data-role="viz-diam-val">16</span>
-        <span>Line</span>
-        <input type="range" data-role="viz-width" min="1" max="6" value="2" />
-      </div>
-    </div>
-    <div class="viz-stage" data-role="viz-stage" style="display:none">
-      <div class="viz-image-wrap" data-role="viz-wrap">
-        <img data-role="viz-img" alt="tomogram slice" />
-        <canvas data-role="viz-overlay"></canvas>
+    <div class="viz-stage-col">
+      <div class="viz-ortho" data-role="viz-ortho">
+        <div class="viz-panel" data-panel="zy" title="ZY — side view. Click to move the crosshair, scroll to step through X.">
+          <img data-role="img-zy" alt="ZY slice" />
+          <canvas data-role="ov-zy"></canvas>
+          <span class="viz-panel-tag">ZY</span>
+        </div>
+        <div class="viz-panel viz-panel-main" data-panel="xy" title="XY — main view. Click to move the crosshair, scroll to step through Z.">
+          <img data-role="viz-img" alt="XY slice" />
+          <canvas data-role="ov-xy"></canvas>
+          <span class="viz-panel-tag">XY</span>
+        </div>
+        <div class="viz-corner" data-role="viz-corner"></div>
+        <div class="viz-panel" data-panel="xz" title="XZ — bottom view. Click to move the crosshair, scroll to step through Y.">
+          <img data-role="img-xz" alt="XZ slice" />
+          <canvas data-role="ov-xz"></canvas>
+          <span class="viz-panel-tag">XZ</span>
+        </div>
       </div>
       <div class="viz-meta" data-role="viz-meta"></div>
     </div>
+    <aside class="viz-side">
+      <div class="viz-side-group">
+        <label class="viz-field">
+          <span class="viz-field-label">Tomogram / STAR</span>
+          <span class="viz-input-row">
+            <input type="text" class="viz-input-sm" data-role="viz-path" placeholder="Tomograms/job012/tomograms.star" />
+            <button type="button" class="btn btn-icon" data-role="viz-browse-main" title="Browse for a STAR or MRC file on the machine running the backend">…</button>
+          </span>
+        </label>
+        <label class="viz-field">
+          <span class="viz-field-label">Picks STAR <span class="viz-hint">(optional)</span></span>
+          <span class="viz-input-row">
+            <input type="text" class="viz-input-sm" data-role="viz-particles" placeholder="particles.star" />
+            <button type="button" class="btn btn-icon" data-role="viz-browse-particles" title="Browse for a particles/coordinates STAR file">…</button>
+          </span>
+        </label>
+        <div class="viz-inputs-row">
+          <button class="btn primary btn-sm" data-role="viz-load">Load</button>
+          <select class="viz-input-sm" data-role="viz-tomo" style="display:none"></select>
+        </div>
+        <div class="status-line viz-status" data-role="viz-status"></div>
+      </div>
+
+      <div class="viz-controls" data-role="viz-controls" style="display:none">
+        <div class="viz-side-group">
+          <div class="viz-side-title">Position</div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">X</span>
+            <input type="range" data-role="pos-x" min="0" max="0" value="0" />
+            <span class="viz-ctrl-val" data-role="pos-x-val">0</span>
+          </div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Y</span>
+            <input type="range" data-role="pos-y" min="0" max="0" value="0" />
+            <span class="viz-ctrl-val" data-role="pos-y-val">0</span>
+          </div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Z</span>
+            <input type="range" data-role="pos-z" min="0" max="0" value="0" />
+            <span class="viz-ctrl-val" data-role="pos-z-val">0</span>
+          </div>
+          <div class="viz-hint">Click a view to move the crosshair; scroll over one to step through its own axis.</div>
+        </div>
+
+        <div class="viz-side-group">
+          <div class="viz-side-title">Contrast</div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Black</span>
+            <input type="range" data-role="viz-lo" min="0" max="100" value="0" title="black point" />
+          </div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">White</span>
+            <input type="range" data-role="viz-hi" min="0" max="100" value="100" title="white point" />
+          </div>
+        </div>
+
+        <div class="viz-side-group">
+          <div class="viz-side-title">Picks</div>
+          <label class="viz-check"><input type="checkbox" data-role="viz-showpicks" checked /> Show picks</label>
+          <label class="viz-check"><input type="checkbox" data-role="viz-crosshair" checked /> Show crosshair</label>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Ø vox</span>
+            <input type="range" data-role="viz-diam" min="2" max="80" value="16" />
+            <span class="viz-ctrl-val" data-role="viz-diam-val">16</span>
+          </div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Line</span>
+            <input type="range" data-role="viz-width" min="1" max="6" value="2" />
+            <span class="viz-ctrl-val" data-role="viz-width-val">2</span>
+          </div>
+        </div>
+      </div>
+    </aside>
   `;
 
   const q = (sel) => body.querySelector(sel);
   const statusEl = q('[data-role="viz-status"]');
   const state = {
     mrc: null, particles: null, tomo: null, vinfo: null, picks: [],
-    axis: "z", index: 0, lo: null, hi: null, diameter: 16, width: 2, showPicks: true,
+    // crosshair position in voxels — the three panels are just three cuts
+    // through this one point, which is what makes them feel linked.
+    x: 0, y: 0, z: 0,
+    lo: null, hi: null, diameter: 16, width: 2,
+    showPicks: true, showCrosshair: true,
   };
 
-  function axisDims() {
+  // Per-panel geometry. `axis`/`transpose` are what the slice endpoint needs;
+  // `col`/`row`/`normal` name which voxel coordinate each screen direction is,
+  // so the click, crosshair and pick maths are all driven from one table
+  // instead of three parallel sets of if/else branches.
+  const PANELS = {
+    xy: { axis: "z", transpose: false, col: "x", row: "y", normal: "z",
+          img: '[data-role="viz-img"]', ov: '[data-role="ov-xy"]' },
+    zy: { axis: "x", transpose: true,  col: "z", row: "y", normal: "x",
+          img: '[data-role="img-zy"]',  ov: '[data-role="ov-zy"]' },
+    xz: { axis: "y", transpose: false, col: "x", row: "z", normal: "y",
+          img: '[data-role="img-xz"]',  ov: '[data-role="ov-xz"]' },
+  };
+
+  const dimOf = (letter) => {
     const v = state.vinfo;
-    if (state.axis === "z") return { w: v.nx, h: v.ny, depth: v.nz };
-    if (state.axis === "y") return { w: v.nx, h: v.nz, depth: v.ny };
-    return { w: v.ny, h: v.nz, depth: v.nx }; // axis x
+    return letter === "x" ? v.nx : letter === "y" ? v.ny : v.nz;
+  };
+
+  // ---- layout ------------------------------------------------------------
+  // One isotropic scale for all three panels, so a voxel is the same size
+  // everywhere and the crosshair lines up across panel borders. Sizes are set
+  // in pixels rather than with `fr` units because the panels must match to the
+  // pixel for that alignment to hold.
+  function layoutStage() {
+    const v = state.vinfo;
+    if (!v) return;
+    const ortho = q('[data-role="viz-ortho"]');
+    const rect = ortho.getBoundingClientRect();
+    const GAP = 4;
+    const availW = Math.max(120, rect.width - GAP);
+    const availH = Math.max(120, rect.height - GAP);
+    const s = Math.min(availW / (v.nx + v.nz), availH / (v.ny + v.nz));
+    const leftW = Math.max(24, Math.round(v.nz * s));
+    const mainW = Math.max(48, Math.round(v.nx * s));
+    const mainH = Math.max(48, Math.round(v.ny * s));
+    const botH = Math.max(24, Math.round(v.nz * s));
+    ortho.style.gridTemplateColumns = `${leftW}px ${mainW}px`;
+    ortho.style.gridTemplateRows = `${mainH}px ${botH}px`;
+    drawOverlays();
   }
 
-  function drawOverlay() {
-    const img = q('[data-role="viz-img"]');
-    const cv = q('[data-role="viz-overlay"]');
-    if (!state.vinfo || !img.naturalWidth) return;
-    const dims = axisDims();
+  // ---- drawing -----------------------------------------------------------
+  function drawOverlay(key) {
+    const p = PANELS[key];
+    const img = q(p.img), cv = q(p.ov);
+    if (!state.vinfo || !img || !cv) return;
     const cw = img.clientWidth, ch = img.clientHeight;
+    if (!cw || !ch) return;
     cv.width = cw; cv.height = ch;
-    cv.style.width = cw + "px"; cv.style.height = ch + "px";
     const ctx = cv.getContext("2d");
     ctx.clearRect(0, 0, cw, ch);
-    if (!state.showPicks || !state.picks.length) return;
-    const sx = cw / dims.w, sy = ch / dims.h;
-    const r = state.diameter / 2;
-    const idx = state.index;
-    const palette = ["#39d353", "#ff6ac1", "#f5a623", "#4aa3ff", "#e5484d"];
-    for (const pk of state.picks) {
-      let center, colVal, rowVal;
-      if (state.axis === "z") { center = pk.z; colVal = pk.x; rowVal = pk.y; }
-      else if (state.axis === "y") { center = pk.y; colVal = pk.x; rowVal = pk.z; }
-      else { center = pk.x; colVal = pk.y; rowVal = pk.z; }
-      const d = Math.abs(idx - center);
-      if (d > r) continue;
-      const rr = Math.sqrt(Math.max(0, r * r - d * d));
-      ctx.beginPath();
-      ctx.arc(colVal * sx, rowVal * sy, Math.max(1, rr * sx), 0, 2 * Math.PI);
-      ctx.strokeStyle = palette[(pk.class || 0) % palette.length];
+
+    const sx = cw / dimOf(p.col), sy = ch / dimOf(p.row);
+
+    if (state.showPicks && state.picks.length) {
+      const r = state.diameter / 2;
+      const idx = state[p.normal];
+      const palette = ["#39d353", "#ff6ac1", "#f5a623", "#4aa3ff", "#e5484d"];
       ctx.lineWidth = state.width;
+      for (const pk of state.picks) {
+        // DeepETPicker's rule: a particle appears on every slice within
+        // +/-(diameter/2) of its centre, at the spherical cross-section
+        // radius for that distance.
+        const d = Math.abs(idx - pk[p.normal]);
+        if (d > r) continue;
+        const rr = Math.sqrt(Math.max(0, r * r - d * d));
+        ctx.beginPath();
+        ctx.arc(pk[p.col] * sx, pk[p.row] * sy, Math.max(1, rr * sx), 0, 2 * Math.PI);
+        ctx.strokeStyle = palette[(pk.class || 0) % palette.length];
+        ctx.stroke();
+      }
+    }
+
+    if (state.showCrosshair) {
+      const cx = state[p.col] * sx, cy = state[p.row] * sy;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,214,102,0.85)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(cx, 0); ctx.lineTo(cx, ch);
+      ctx.moveTo(0, cy); ctx.lineTo(cw, cy);
       ctx.stroke();
+      ctx.restore();
     }
   }
 
+  function drawOverlays() { Object.keys(PANELS).forEach(drawOverlay); }
+
+  // ---- slice fetching ----------------------------------------------------
+  // Only panels whose own slice index actually moved are refetched: clicking
+  // in XY moves x and y, which changes the ZY and XZ cuts but not XY's own.
+  const lastIndex = { xy: null, zy: null, xz: null };
+  let pending = new Set();
   let sliceTimer = null;
-  function renderSliceSoon() {
-    // Coalesce rapid slider input (a drag fires ~60 events/sec) into one
-    // request; the label/overlay still update immediately.
+
+  function requestPanels(keys) {
+    keys.forEach((k) => pending.add(k));
     if (sliceTimer) clearTimeout(sliceTimer);
-    sliceTimer = setTimeout(() => { sliceTimer = null; renderSlice(); }, 60);
+    // Coalesce: a slider drag or a click-drag fires ~60 events/sec, and each
+    // one is an mmap + PNG encode on the backend.
+    sliceTimer = setTimeout(() => {
+      sliceTimer = null;
+      const keys2 = Array.from(pending);
+      pending = new Set();
+      keys2.forEach(fetchPanel);
+    }, 60);
   }
 
-  function renderSlice() {
+  function fetchPanel(key) {
     if (!state.mrc || !state.vinfo) return;
-    const img = q('[data-role="viz-img"]');
+    const p = PANELS[key];
+    const index = state[p.normal];
     const params = new URLSearchParams({
-      mrc_path: state.mrc, axis: state.axis, index: String(state.index),
+      mrc_path: state.mrc, axis: p.axis, index: String(index),
     });
+    if (p.transpose) params.set("transpose", "true");
     if (state.lo != null) params.set("lo", String(state.lo));
     if (state.hi != null) params.set("hi", String(state.hi));
-    img.onload = drawOverlay;
+    const img = q(p.img);
+    img.onload = () => drawOverlay(key);
     img.src = `/api/viz/slice?${params.toString()}`;
+    lastIndex[key] = index;
+  }
+
+  function refreshAllPanels() {
+    Object.keys(PANELS).forEach(fetchPanel);
+    updateMeta();
+  }
+
+  function updateMeta() {
+    const v = state.vinfo;
+    if (!v) return;
     q('[data-role="viz-meta"]').textContent =
-      `${state.tomo || ""}  ·  ${state.vinfo.nx}×${state.vinfo.ny}×${state.vinfo.nz}` +
-      (state.vinfo.voxel_size ? `  ·  ${state.vinfo.voxel_size.toFixed(2)} Å/vox` : "") +
-      `  ·  ${state.picks.length} picks`;
+      `${state.tomo || ""}  ·  ${v.nx}×${v.ny}×${v.nz}` +
+      (v.voxel_size ? `  ·  ${v.voxel_size.toFixed(2)} Å/vox` : "") +
+      `  ·  ${state.picks.length} picks  ·  x ${state.x}  y ${state.y}  z ${state.z}`;
   }
 
-  function setupSliceRange() {
-    const dims = axisDims();
-    const slider = q('[data-role="viz-slice"]');
-    slider.max = String(dims.depth - 1);
-    state.index = Math.floor(dims.depth / 2);
-    slider.value = String(state.index);
-    q('[data-role="viz-slice-label"]').textContent = `Slice ${state.index}/${dims.depth - 1}`;
+  // ---- crosshair movement ------------------------------------------------
+  function setPosition(coords, { fromSlider = false } = {}) {
+    const changed = [];
+    for (const [letter, raw] of Object.entries(coords)) {
+      const max = dimOf(letter) - 1;
+      const val = Math.max(0, Math.min(max, Math.round(raw)));
+      if (val !== state[letter]) { state[letter] = val; changed.push(letter); }
+    }
+    if (!changed.length) return;
+    if (!fromSlider) syncSliders();
+    changed.forEach((letter) => {
+      q(`[data-role="pos-${letter}-val"]`).textContent = String(state[letter]);
+    });
+    // A panel is refetched when the coordinate it slices along moved.
+    const keys = Object.keys(PANELS).filter((k) => changed.includes(PANELS[k].normal));
+    if (keys.length) requestPanels(keys);
+    drawOverlays();
+    updateMeta();
   }
 
+  function syncSliders() {
+    ["x", "y", "z"].forEach((letter) => {
+      q(`[data-role="pos-${letter}"]`).value = String(state[letter]);
+    });
+  }
+
+  function setupPosition() {
+    const v = state.vinfo;
+    state.x = Math.floor(v.nx / 2);
+    state.y = Math.floor(v.ny / 2);
+    state.z = Math.floor(v.nz / 2);
+    ["x", "y", "z"].forEach((letter) => {
+      const sl = q(`[data-role="pos-${letter}"]`);
+      sl.max = String(dimOf(letter) - 1);
+      sl.value = String(state[letter]);
+      q(`[data-role="pos-${letter}-val"]`).textContent = String(state[letter]);
+    });
+  }
+
+  // ---- panel interaction -------------------------------------------------
+  function panelCoordsFromEvent(key, ev) {
+    const p = PANELS[key];
+    const img = q(p.img);
+    const rect = img.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const fx = (ev.clientX - rect.left) / rect.width;
+    const fy = (ev.clientY - rect.top) / rect.height;
+    return {
+      [p.col]: fx * (dimOf(p.col) - 1),
+      [p.row]: fy * (dimOf(p.row) - 1),
+    };
+  }
+
+  body.querySelectorAll(".viz-panel").forEach((panel) => {
+    const key = panel.dataset.panel;
+    let dragging = false;
+
+    const move = (ev) => {
+      if (!state.vinfo) return;
+      const coords = panelCoordsFromEvent(key, ev);
+      if (coords) setPosition(coords);
+    };
+    panel.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      dragging = true; move(ev); ev.preventDefault();
+    });
+    panel.addEventListener("mousemove", (ev) => { if (dragging) move(ev); });
+    // Listening on window, not the panel: a drag that leaves the panel (easy
+    // to do near an edge) would otherwise never see its mouseup and the view
+    // would keep following the cursor after the button was released.
+    window.addEventListener("mouseup", () => { dragging = false; });
+
+    panel.addEventListener("wheel", (ev) => {
+      if (!state.vinfo) return;
+      ev.preventDefault();          // don't scroll the popup body
+      const normal = PANELS[key].normal;
+      const step = ev.shiftKey ? 10 : 1;   // shift = coarse scrub
+      setPosition({ [normal]: state[normal] + (ev.deltaY > 0 ? step : -step) });
+    }, { passive: false });
+  });
+
+  // ---- loading -----------------------------------------------------------
   async function loadVolume(mrcPath) {
     statusEl.textContent = "Loading volume…";
     try {
       // Fetch FIRST, commit after: assigning state.mrc up front meant a failed
       // load left state.mrc pointing at the new volume while state.vinfo still
-      // described the old one, so the next slider nudge requested slices of the
-      // new MRC using the old volume's index range.
+      // described the old one, so the next nudge requested slices of the new
+      // MRC using the old volume's index range.
       const info = await api(`/api/viz/volume-info?mrc_path=${encodeURIComponent(mrcPath)}`);
       state.mrc = mrcPath;
       state.vinfo = info;
-      // contrast sliders map 0..100 -> the sampled intensity range
-      state.lo = state.vinfo.contrast_lo;
-      state.hi = state.vinfo.contrast_hi;
-      const vmin = state.vinfo.sample_min, vmax = state.vinfo.sample_max, span = (vmax - vmin) || 1;
+      state.lo = info.contrast_lo;
+      state.hi = info.contrast_hi;
+      const vmin = info.sample_min, span = (info.sample_max - info.sample_min) || 1;
       q('[data-role="viz-lo"]').value = String(Math.round(((state.lo - vmin) / span) * 100));
       q('[data-role="viz-hi"]').value = String(Math.round(((state.hi - vmin) / span) * 100));
       q('[data-role="viz-controls"]').style.display = "";
-      q('[data-role="viz-stage"]').style.display = "";
-      setupSliceRange();
-      renderSlice();
+      q('[data-role="viz-ortho"]').classList.add("loaded");
+      setupPosition();
+      layoutStage();
+      refreshAllPanels();
       statusEl.textContent = "";
     } catch (err) {
       statusEl.textContent = "Could not load volume: " + err.message;
@@ -1599,7 +1877,11 @@ async function openVisualizer() {
     try {
       const resp = await api(`/api/viz/picks`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ particles_path: state.particles, tomo_name: state.tomo || mrcPathForMatch, volume: state.vinfo }),
+        body: JSON.stringify({
+          particles_path: state.particles,
+          tomo_name: state.tomo || mrcPathForMatch,
+          volume: state.vinfo,
+        }),
       });
       if (resp.matched === false) {
         const choice = await choiceDialog(
@@ -1672,7 +1954,7 @@ async function openVisualizer() {
         state.tomo = t.name;
         await loadVolume(t.mrc_path);
         await loadPicks(t.mrc_path);
-        renderSlice();
+        refreshAllPanels();
       };
     } else {
       sel.style.display = "none";
@@ -1682,25 +1964,16 @@ async function openVisualizer() {
     state.tomo = t.name;
     await loadVolume(t.mrc_path);
     await loadPicks(t.mrc_path);
-    renderSlice();
+    refreshAllPanels();
   });
 
   // --- Controls ---
-  q('[data-role="viz-slice"]').addEventListener("input", (e) => {
-    state.index = parseInt(e.target.value, 10);
-    const dims = axisDims();
-    q('[data-role="viz-slice-label"]').textContent = `Slice ${state.index}/${dims.depth - 1}`;
-    renderSliceSoon();
-  });
-  body.querySelectorAll(".viz-axis").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      body.querySelectorAll(".viz-axis").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.axis = btn.dataset.axis;
-      setupSliceRange();
-      renderSlice();
+  ["x", "y", "z"].forEach((letter) => {
+    q(`[data-role="pos-${letter}"]`).addEventListener("input", (e) => {
+      setPosition({ [letter]: parseInt(e.target.value, 10) }, { fromSlider: true });
     });
   });
+
   function contrastFromSliders() {
     const v = state.vinfo; if (!v) return;
     const vmin = v.sample_min, span = (v.sample_max - v.sample_min) || 1;
@@ -1708,26 +1981,38 @@ async function openVisualizer() {
     let hi = vmin + (parseInt(q('[data-role="viz-hi"]').value, 10) / 100) * span;
     if (hi <= lo) hi = lo + span * 0.01;
     state.lo = lo; state.hi = hi;
-    renderSliceSoon();
+    requestPanels(Object.keys(PANELS));   // contrast affects all three
   }
   q('[data-role="viz-lo"]').addEventListener("input", contrastFromSliders);
   q('[data-role="viz-hi"]').addEventListener("input", contrastFromSliders);
+
   q('[data-role="viz-diam"]').addEventListener("input", (e) => {
     state.diameter = parseInt(e.target.value, 10);
     q('[data-role="viz-diam-val"]').textContent = String(state.diameter);
-    drawOverlay();
+    drawOverlays();
   });
-  q('[data-role="viz-width"]').addEventListener("input", (e) => { state.width = parseInt(e.target.value, 10); drawOverlay(); });
-  q('[data-role="viz-showpicks"]').addEventListener("change", (e) => { state.showPicks = e.target.checked; drawOverlay(); });
+  q('[data-role="viz-width"]').addEventListener("input", (e) => {
+    state.width = parseInt(e.target.value, 10);
+    q('[data-role="viz-width-val"]').textContent = String(state.width);
+    drawOverlays();
+  });
+  q('[data-role="viz-showpicks"]').addEventListener("change", (e) => {
+    state.showPicks = e.target.checked; drawOverlays();
+  });
+  q('[data-role="viz-crosshair"]').addEventListener("change", (e) => {
+    state.showCrosshair = e.target.checked; drawOverlays();
+  });
 
   new WinBox({
     title: "Tomogram Viewer",
-    width: "760px", height: "820px",
+    width: "1040px", height: "800px",
     x: "center", y: "center",
     mount: body,
     class: ["viz-winbox"],
-    onresize: () => drawOverlay(),
+    onresize: () => layoutStage(),
   });
+  // WinBox mounts asynchronously; the first layout needs the real box size.
+  setTimeout(layoutStage, 0);
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", openVisualizer);
@@ -1809,6 +2094,12 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
     }
 
     async function show(path) {
+      // Show where we're going before the round trip finishes: the dialog is
+      // in the DOM the moment it opens, and leaving the location line blank
+      // until the listing arrives reads as "no folder" on a slow filesystem
+      // (a cold cluster mount can take a second).
+      if (path) currentEl.textContent = path;
+      listEl.setAttribute("aria-busy", "true");
       let listing;
       try {
         listing = await api("/api/project/browse", {
@@ -1818,8 +2109,10 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
         });
       } catch (err) {
         listEl.innerHTML = `<div class="browser-entry picker-note">Could not open: ${escapeHtml(err.message)}</div>`;
+        listEl.removeAttribute("aria-busy");
         return;
       }
+      listEl.removeAttribute("aria-busy");
       currentEl.textContent = listing.path;
       pathInput.value = listing.path;
       listEl.innerHTML = "";

@@ -344,9 +344,17 @@ def render_slice_png(
     lo: Optional[float] = None,
     hi: Optional[float] = None,
     max_dim: int = 1200,
+    transpose: bool = False,
 ) -> bytes:
     """Memory-map the volume, extract one slice, contrast-stretch to 8-bit,
-    downsample if larger than max_dim, and return PNG bytes."""
+    downsample if larger than max_dim, and return PNG bytes.
+
+    `transpose` swaps the returned image's rows and columns. The orthogonal
+    viewer's left-hand panel needs the x-axis slice with Y running vertically
+    (so it shares the main XY panel's vertical axis) rather than the natural
+    [z, y] order, and transposing the small 2D slice here is cheaper and less
+    error-prone than rotating the PNG plus its overlay in the browser.
+    """
     import mrcfile
     from PIL import Image
 
@@ -358,6 +366,8 @@ def render_slice_png(
         if data is None or data.ndim != 3:
             raise VizError(f"{p.name}: not a 3D MRC volume")
         sl = _extract_slice(data, axis, int(index))
+    if transpose:
+        sl = np.ascontiguousarray(sl.T)
 
     # lo and hi are independent query params, so fill each in separately --
     # supplying only one used to silently discard it and re-derive both.

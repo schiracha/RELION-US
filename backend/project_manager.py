@@ -32,6 +32,8 @@ ask for and can't see). We only ever create our own marker + history file.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +145,119 @@ def init_new_project(path: Path) -> None:
             history_file.write_text("[]")
     except PermissionError as exc:
         raise PermissionDeniedError(PERMISSION_ERROR_MESSAGE) from exc
+
+
+# --------------------------------------------------------------------------
+# Recent-projects cache
+#
+# Per *user*, not per project: it has to survive switching away from a project
+# and outlive any single project directory, so it lives under the user's config
+# dir (XDG_CONFIG_HOME, else ~/.config) rather than inside a `.relion_us/`
+# marker. Holding it here also means a user with several projects on a shared
+# cluster filesystem gets their own list, not their group's.
+#
+# Only paths and timestamps are stored — nothing about the data, so the file is
+# safe to sync or delete. A missing/corrupt file is treated as "no recents".
+# --------------------------------------------------------------------------
+
+RECENTS_FILENAME = "recent_projects.json"
+RECENTS_LIMIT = 15
+
+
+def recents_path() -> Path:
+    """Location of the recent-projects cache. Honours XDG_CONFIG_HOME so it
+    lands wherever the user's other config does (and so tests can redirect it
+    without touching a real home directory)."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base).expanduser() if base else Path.home() / ".config"
+    return root / "relion_us" / RECENTS_FILENAME
+
+
+def load_recent_projects() -> list[dict[str, Any]]:
+    """Recently opened project directories, most recent first.
+
+    Each entry gains two freshly-computed fields the cache does not store,
+    because either can change without this app being involved (someone deletes
+    a folder, or RELION creates default_pipeline.star in it):
+
+      exists      — the directory is still there
+      is_project  — it still looks like a RELION project
+
+    Stale entries are returned rather than silently dropped, so the user can
+    see that a project they remember is gone instead of wondering where it
+    went in the list.
+    """
+    p = recents_path()
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        path = Path(str(item["path"]))
+        try:
+            exists = path.is_dir()
+        except OSError:
+            exists = False
+        out.append({
+            "path": str(path),
+            "name": path.name or str(path),
+            "last_opened": item.get("last_opened"),
+            "exists": exists,
+            "is_project": is_relion_project(path) if exists else False,
+        })
+    return out[:RECENTS_LIMIT]
+
+
+def _write_recents(entries: list[dict[str, Any]]) -> None:
+    """Persist the cache, keeping only the stored fields. Never raises: a
+    read-only or full home directory must not break opening a project, which
+    is the actual task the user asked for."""
+    slim = [
+        {"path": e["path"], "last_opened": e.get("last_opened")}
+        for e in entries[:RECENTS_LIMIT]
+    ]
+    p = recents_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(slim, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def remember_project(project_dir: Path, when: float | None = None) -> None:
+    """Record a project as most-recently-opened. Called on every successful
+    switch/init and at startup, so the list reflects real use rather than
+    needing the user to curate it. Re-opening an existing entry moves it to
+    the top instead of duplicating it (compared on the resolved path, so
+    `.`, a symlink and an absolute path are one entry)."""
+    try:
+        resolved = str(Path(project_dir).expanduser().resolve())
+    except OSError:
+        resolved = str(project_dir)
+    stamp = time.time() if when is None else when
+    kept = [e for e in load_recent_projects() if e["path"] != resolved]
+    _write_recents([{"path": resolved, "last_opened": stamp}] + kept)
+
+
+def forget_project(project_dir: str | Path) -> None:
+    """Drop one entry from the cache (the ✕ next to a recent project). Only
+    removes the bookmark — never touches the directory itself."""
+    try:
+        resolved = str(Path(project_dir).expanduser().resolve())
+    except OSError:
+        resolved = str(project_dir)
+    raw = str(project_dir)
+    _write_recents([
+        e for e in load_recent_projects() if e["path"] not in (resolved, raw)
+    ])
 
 
 def _history_path(project_dir: Path) -> Path:

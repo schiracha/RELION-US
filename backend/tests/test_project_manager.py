@@ -217,3 +217,139 @@ def test_detect_pipeline_hint_unknown_on_corrupt_pipeline_star(tmp_path):
     d.mkdir()
     (d / project_manager.RELION_PIPELINE_STAR).write_text("this is not valid STAR\n")
     assert project_manager.detect_pipeline_hint(d) == "unknown"
+
+
+# --------------------------------------------------------------------------
+# Recent-projects cache
+#
+# Every test redirects XDG_CONFIG_HOME into tmp_path -- the cache deliberately
+# lives in the user's real config dir, and a test suite must never write there.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def recents_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    return tmp_path
+
+
+def test_recents_empty_when_no_cache_file(recents_home):
+    assert project_manager.load_recent_projects() == []
+
+
+def test_recents_path_follows_xdg_config_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    assert project_manager.recents_path() == tmp_path / "cfg" / "relion_us" / "recent_projects.json"
+
+
+def test_remember_then_load_round_trips(recents_home):
+    proj = recents_home / "projA"
+    proj.mkdir()
+    project_manager.remember_project(proj)
+    recent = project_manager.load_recent_projects()
+    assert [e["path"] for e in recent] == [str(proj.resolve())]
+    assert recent[0]["name"] == "projA"
+    assert recent[0]["exists"] is True
+
+
+def test_most_recent_first(recents_home):
+    for name in ("a", "b", "c"):
+        (recents_home / name).mkdir()
+        project_manager.remember_project(recents_home / name)
+    assert [e["name"] for e in project_manager.load_recent_projects()] == ["c", "b", "a"]
+
+
+def test_reopening_moves_to_top_without_duplicating(recents_home):
+    for name in ("a", "b", "c"):
+        (recents_home / name).mkdir()
+        project_manager.remember_project(recents_home / name)
+    project_manager.remember_project(recents_home / "a")
+    names = [e["name"] for e in project_manager.load_recent_projects()]
+    assert names == ["a", "c", "b"]
+    assert names.count("a") == 1
+
+
+def test_same_dir_via_different_paths_is_one_entry(recents_home):
+    proj = recents_home / "projA"
+    proj.mkdir()
+    project_manager.remember_project(proj)
+    # The same directory reached by a longer route. Resolving before comparing
+    # is what keeps these from becoming three separate entries in the list.
+    project_manager.remember_project(proj / ".")
+    project_manager.remember_project(recents_home / "projA" / ".." / "projA")
+    recent = project_manager.load_recent_projects()
+    assert len(recent) == 1
+    assert recent[0]["path"] == str(proj.resolve())
+
+
+def test_recents_are_capped(recents_home):
+    for i in range(project_manager.RECENTS_LIMIT + 5):
+        d = recents_home / f"p{i:02d}"
+        d.mkdir()
+        project_manager.remember_project(d)
+    recent = project_manager.load_recent_projects()
+    assert len(recent) == project_manager.RECENTS_LIMIT
+    # the oldest ones fell off, not the newest
+    assert recent[0]["name"] == f"p{project_manager.RECENTS_LIMIT + 4:02d}"
+
+
+def test_deleted_project_is_kept_but_flagged(recents_home):
+    proj = recents_home / "gone"
+    proj.mkdir()
+    project_manager.remember_project(proj)
+    proj.rmdir()
+    recent = project_manager.load_recent_projects()
+    assert len(recent) == 1
+    assert recent[0]["exists"] is False
+    assert recent[0]["is_project"] is False
+
+
+def test_is_project_flag_is_recomputed_not_cached(recents_home):
+    proj = recents_home / "later"
+    proj.mkdir()
+    project_manager.remember_project(proj)
+    assert project_manager.load_recent_projects()[0]["is_project"] is False
+    # RELION itself writes this the first time a real job runs -- this app is
+    # not involved, so a cached flag would go stale.
+    (proj / "default_pipeline.star").write_text("# written by RELION\n")
+    assert project_manager.load_recent_projects()[0]["is_project"] is True
+
+
+def test_forget_removes_only_that_entry(recents_home):
+    for name in ("a", "b"):
+        (recents_home / name).mkdir()
+        project_manager.remember_project(recents_home / name)
+    project_manager.forget_project(recents_home / "a")
+    assert [e["name"] for e in project_manager.load_recent_projects()] == ["b"]
+
+
+def test_forget_does_not_delete_the_directory(recents_home):
+    proj = recents_home / "keepme"
+    proj.mkdir()
+    (proj / "data.star").write_text("x")
+    project_manager.remember_project(proj)
+    project_manager.forget_project(proj)
+    assert proj.is_dir() and (proj / "data.star").exists()
+
+
+def test_corrupt_cache_returns_empty_not_error(recents_home):
+    p = project_manager.recents_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json at all")
+    assert project_manager.load_recent_projects() == []
+
+
+def test_cache_holding_a_json_object_returns_empty(recents_home):
+    p = project_manager.recents_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"path": "/tmp"}')      # object, not the expected list
+    assert project_manager.load_recent_projects() == []
+
+
+def test_unwritable_config_dir_does_not_raise(recents_home, monkeypatch):
+    # A read-only or full home directory must not stop the user opening a
+    # project -- the recent list is a convenience, not the task.
+    def boom(*a, **k):
+        raise OSError("read-only file system")
+    monkeypatch.setattr(project_manager.Path, "write_text", boom)
+    project_manager.remember_project(recents_home)   # must not raise

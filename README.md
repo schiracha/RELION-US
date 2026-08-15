@@ -94,9 +94,14 @@ internet access.
 ## Using it
 
 - **Change Project** (top bar): switch which RELION project directory the
-  app is pointed at, at any time, without restarting the backend. Type a
-  path directly and hit Go/Enter, or click into subfolders in the browser
-  below it — that browser lists folders on the *machine running the
+  app is pointed at, at any time, without restarting the backend. Every
+  project you open or create is remembered, so the dialog opens with a
+  **Recent projects** list — one click browses to a project, a double-click
+  switches straight to it, and the ✕ drops it from the list (the folder
+  itself is never touched). A project that has since been deleted stays
+  listed but struck through, rather than quietly disappearing. Otherwise:
+  type a path directly and hit Go/Enter, or click into subfolders in the
+  browser below it — that browser lists folders on the *machine running the
   backend*, not your browser's machine, which matters when the backend is
   on a remote host like an HPC cluster login node. If the folder you pick
   doesn't look like a RELION project (no `default_pipeline.star` and not
@@ -237,20 +242,36 @@ of mirroring them.)
 The **🔍 Visualize** button opens a viewer — it is *not* a job, so it never
 appears in the Command Center and writes nothing. Give it an optimiser
 STAR, a `tomograms.star`, or an MRC (with or without a particles/coords
-STAR) — type a path or hit **Browse…** — and it loads one tomogram at a
-time:
+STAR) — type a path or hit the **…** browse button — and it loads one
+tomogram at a time.
 
-- browse slices along **XY / XZ / YZ**, with black/white-point contrast
-  sliders (default is a robust 0.5–99.5% percentile, since raw cryo-ET
-  min/max is usually washed out);
-- picks are overlaid using DeepETPicker's own model — a particle is drawn on
-  every slice within ±(diameter/2) of its centre, with radius
-  `sqrt(r² − Δ²)` so the marker grows toward the particle's centre
-  slice — with diameter and line-width controls;
-- if the tomogram's name doesn't match any `rlnTomoName` in the picks file,
-  you get a warning with **Load anyway / Reload files / Cancel**.
+**Three linked orthogonal views**, laid out the way DeepETPicker's picker is:
+**XY** is the large main view, **ZY** sits to its left, **XZ** below it. All
+three are cuts through one crosshair position, so:
 
-Both inputs have a **Browse…** button. It lists files on the *machine
+- **click** (or click-drag) in any view to move the crosshair — the other two
+  jump to that point;
+- **scroll** over a view to step along its own axis (scroll the main view to
+  walk through Z); hold **Shift** for 10-slice steps;
+- or drive X/Y/Z directly with the sliders in the side panel.
+
+The three panels share one isotropic scale, so a voxel is the same size in
+each and the crosshair lines up across the panel borders — the side views are
+as tall/wide as the volume actually is, not stretched to fill a box.
+
+Everything else lives in a narrow rail on the right so the images get the
+window: the two file inputs, black/white-point contrast sliders (default is a
+robust 0.5–99.5% percentile, since raw cryo-ET min/max is usually washed
+out), pick diameter and line width, and toggles for the pick overlay and the
+crosshair.
+
+Picks are overlaid using DeepETPicker's own model — a particle is drawn on
+every slice within ±(diameter/2) of its centre, with radius `sqrt(r² − Δ²)`
+so the marker grows toward the particle's centre slice — in all three views
+at once. If the tomogram's name doesn't match any `rlnTomoName` in the picks
+file, you get a warning with **Load anyway / Reload files / Cancel**.
+
+Both inputs have a **…** browse button. It lists files on the *machine
 running the backend*, not your own — which is the point when the backend is
 on a cluster login node and a native file dialog would show you the wrong
 filesystem. It filters to the relevant extensions (STAR/MRC for the tomogram
@@ -258,8 +279,9 @@ field, STAR only for the picks field), remembers the folder you were last
 in, and fills the field with a project-relative path.
 
 The volume is never loaded whole: the backend memory-maps the MRC and
-returns one slice at a time as a PNG, so scrubbing stays fast on large
-tomograms. This needs `mrcfile` and `pillow` (both in
+returns one slice at a time as a PNG, and only the panels whose own slice
+index moved are refetched — clicking in XY changes the ZY and XZ cuts but not
+XY's own. This needs `mrcfile` and `pillow` (both in
 `backend/requirements.txt`).
 
 ## Live progress for iterative jobs
@@ -365,29 +387,46 @@ parsing gaps introduced by a new RELION release show up as failures.
 ## Testing
 
 ```bash
-cd backend && python3 -m pytest -q          # backend unit + regression tests
+./run_tests.sh              # backend suite only — seconds, run it always
+./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
+./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
+./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
+./run_tests.sh project      # + Change Project, recents, Create Folder
+./run_tests.sh all          # everything (~80 s) — before you commit a milestone
 ```
 
-The backend suite runs against real extracted RELION data and real
-converter behaviour rather than synthetic fixtures, so a change in RELION's
-job definitions or a regression in a format bridge shows up as a failure.
-One test auto-skips unless IMOD's `point2model`/`model2point` are on PATH
-(the `.mod` round-trip).
+The browser suites are tiered because each one needs its own backend on its own
+throwaway project, and running all of them to check a change that touched one
+module costs minutes and tells you nothing. Pick the tier that covers what you
+changed; `run_tests.sh`'s header comment has the mapping. `all` is for a real
+checkpoint, or for a change to something shared like the popup scaffolding in
+`app.js`.
 
-Browser tests use Playwright against a running instance and an empty
-project:
+The runner creates a fresh project directory and picks a free port per suite,
+waits for each backend to answer before starting, and tears everything down
+afterwards — including on Ctrl-C. It also redirects `XDG_CONFIG_HOME`, so a
+test run never touches your real recent-projects list. Nothing is left running
+and no project of yours is touched: a suite that asserts "no jobs yet" would
+fail against a project that has history, which is a false alarm rather than a
+bug.
+
+The backend suite runs against real extracted RELION data and real converter
+behaviour rather than synthetic fixtures, so a change in RELION's job
+definitions or a regression in a format bridge shows up as a failure. One test
+auto-skips unless IMOD's `point2model`/`model2point` are on PATH (the `.mod`
+round-trip).
+
+To run one suite by hand, point it at any live instance — each takes a base URL
+(and the two that write fixtures also take a project directory):
 
 ```bash
-./run.sh &                                   # or point them at an existing instance
-python3 test_frontend.py                     # job list, popups, SPA/Tomo toggle
-python3 test_frontend_project.py             # Change Project, Create Folder
-python3 test_command_center.py               # history table/timeline, Outputs tab
-python3 test_command_center_abort_overwrite.py
-python3 test_progress_and_theme.py           # Progress tab, theme, file pickers
+python3 test_command_center.py http://127.0.0.1:8420
+python3 test_viewer_and_recents.py http://127.0.0.1:8420 /path/to/empty/project
 ```
 
-Point them at a different host/port with a first argument, e.g.
-`python3 test_command_center.py http://127.0.0.1:8420`.
+Set `RELION_US_CHROMIUM` if Playwright can't find a usable Chromium itself
+(a shared read-only install on a cluster, say); otherwise `playwright install
+chromium` is all that's needed.
 
 ## License
 

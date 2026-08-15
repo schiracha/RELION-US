@@ -358,6 +358,41 @@ html, body {
 .modal-error.hidden { display: none; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* --- Recent projects (Change Project dialog) --- */
+.recent-projects { margin-bottom: 12px; }
+.recent-projects.hidden { display: none; }
+.recent-projects-head {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--text-dim); margin-bottom: 4px;
+}
+#recentProjectsList {
+  max-height: 150px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--panel-alt);
+}
+.recent-entry {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px 5px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.recent-entry:last-child { border-bottom: none; }
+.recent-entry:hover { background: var(--accent-dim); }
+.recent-entry-label { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.recent-entry-name { font-size: 12px; }
+.recent-entry-path {
+  font-size: 10px; color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;    /* keep the tail of a long path visible */
+}
+/* A folder that has since been deleted or unmounted stays listed rather than
+   vanishing, so the user can see what happened instead of wondering. */
+.recent-entry.missing .recent-entry-name { color: var(--text-dim); text-decoration: line-through; }
+.recent-forget {
+  background: none; border: none; color: var(--text-dim);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 4px; flex-shrink: 0;
+}
+.recent-forget:hover { color: var(--err); }
+
 /* --- Job popup body (mounted inside a WinBox window) -------------------- */
 .job-popup {
   display: flex;
@@ -551,23 +586,77 @@ html, body {
 
 .winbox { --icon-color: var(--text); }
 
-/* ---- Tomogram / particle-pick visualizer ---- */
-.viz-popup { display: flex; flex-direction: column; gap: 8px; padding: 10px; height: 100%; box-sizing: border-box; }
-.viz-inputs { display: flex; flex-direction: column; gap: 6px; }
-.viz-inputs label { display: flex; flex-direction: column; font-size: 12px; color: var(--text-dim); gap: 2px; }
-.viz-inputs input[type="text"] { padding: 5px 8px; }
-.viz-inputs-row { display: flex; align-items: center; gap: 8px; }
-.viz-controls { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 8px; }
-.viz-ctrl-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.viz-ctrl-row > span { color: var(--text-dim); }
-.viz-axis { padding: 2px 8px; }
-.viz-axis.active { background: var(--accent); color: #fff; }
-.viz-check { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-.viz-stage { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.viz-image-wrap { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: auto; }
-.viz-image-wrap img { max-width: 100%; max-height: 100%; image-rendering: pixelated; display: block; }
-.viz-image-wrap canvas { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: none; }
-.viz-meta { font-size: 11px; color: var(--text-dim); padding: 4px 2px 0; }
+/* ---- Tomogram / particle-pick visualizer ----
+   Three linked orthogonal views (XY main, ZY left, XZ below) with every
+   control in a narrow right-hand rail, so the images get the window. Panel
+   pixel sizes are set from JS (layoutStage) rather than with `fr` units: the
+   three panels must match to the pixel for the crosshair to line up across
+   their borders. */
+.viz-popup {
+  display: flex; flex-direction: row; gap: 10px;
+  padding: 10px; height: 100%; box-sizing: border-box; min-height: 0;
+}
+.viz-stage-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+.viz-ortho {
+  flex: 1; min-height: 0; min-width: 0;
+  display: grid;
+  grid-template-areas: "zy xy" "corner xz";
+  grid-template-columns: 90px 1fr;
+  grid-template-rows: 1fr 90px;
+  gap: 4px;
+  align-content: center; justify-content: center;
+}
+.viz-panel { position: relative; background: #000; overflow: hidden; cursor: crosshair; }
+.viz-panel[data-panel="zy"] { grid-area: zy; }
+.viz-panel[data-panel="xy"] { grid-area: xy; }
+.viz-panel[data-panel="xz"] { grid-area: xz; }
+.viz-corner { grid-area: corner; }
+.viz-panel img {
+  width: 100%; height: 100%; display: block;
+  image-rendering: pixelated;
+}
+.viz-panel canvas { position: absolute; inset: 0; pointer-events: none; }
+.viz-panel-tag {
+  position: absolute; left: 3px; top: 2px;
+  font-size: 10px; letter-spacing: 0.5px; color: rgba(255,255,255,0.55);
+  pointer-events: none; user-select: none;
+}
+/* Before a volume is loaded the panels are empty boxes; don't show three
+   black rectangles at the user. */
+.viz-ortho:not(.loaded) .viz-panel { background: transparent; border: 1px dashed var(--border); }
+.viz-meta { font-size: 11px; color: var(--text-dim); padding: 6px 2px 0; }
+
+.viz-side {
+  width: 230px; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 12px;
+  overflow-y: auto; padding-right: 2px;
+}
+.viz-side-group { display: flex; flex-direction: column; gap: 6px; }
+.viz-side-group + .viz-side-group { border-top: 1px solid var(--border); padding-top: 10px; }
+.viz-side-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--text-dim);
+}
+.viz-field { display: flex; flex-direction: column; gap: 2px; }
+.viz-field-label { font-size: 11px; color: var(--text-dim); }
+.viz-hint { font-size: 10px; color: var(--text-dim); line-height: 1.35; }
+.viz-status { font-size: 11px; min-height: 14px; }
+.viz-input-row { display: flex; gap: 4px; align-items: center; }
+.viz-input-row input[type="text"] { flex: 1; min-width: 0; }
+.viz-input-row .btn { white-space: nowrap; flex-shrink: 0; }
+.viz-input-sm { padding: 3px 6px; font-size: 11px; }
+.btn-icon { padding: 3px 7px; line-height: 1; font-size: 12px; }
+.btn-sm { padding: 3px 10px; font-size: 11px; }
+.viz-inputs-row { display: flex; align-items: center; gap: 6px; }
+.viz-inputs-row select { flex: 1; min-width: 0; }
+
+.viz-controls { display: flex; flex-direction: column; gap: 12px; }
+.viz-ctrl-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.viz-ctrl-row input[type="range"] { flex: 1; min-width: 0; }
+.viz-ctrl-key { color: var(--text-dim); width: 34px; flex-shrink: 0; }
+.viz-ctrl-val { color: var(--text-dim); width: 26px; text-align: right; flex-shrink: 0; }
+.viz-check { display: flex; align-items: center; gap: 5px; font-size: 11px; }
 
 /* ---- Job Progress tab (live charts + class thumbnails) ---- */
 .progress-controls {
@@ -602,10 +691,8 @@ html, body {
 .thumb-iter { margin-bottom: 10px; }
 .thumb-iter-label { font-size: 10px; color: var(--accent); display: block; margin-bottom: 3px; }
 
-/* ---- File picker + Browse buttons ---- */
-.viz-input-row { display: flex; gap: 6px; align-items: center; }
-.viz-input-row input[type="text"] { flex: 1; min-width: 0; }
-.viz-input-row .btn { white-space: nowrap; flex-shrink: 0; }
+/* ---- File picker + Browse buttons ----
+   (.viz-input-row is defined with the visualizer's side rail above.) */
 .picker-current {
   font-size: 11px; color: var(--text-dim); margin: 2px 0 6px;
   font-family: ui-monospace, "SF Mono", Consolas, monospace;

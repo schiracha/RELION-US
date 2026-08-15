@@ -92,9 +92,12 @@ relion_us/
 ├── docs/                     # this file
 ├── run.sh                    # launch helper (no install script -- see README.md
 │                              #   for building the Python environment yourself)
+├── run_tests.sh              # tiered test runner: backend suite always, browser
+│                              #   suites by tier (see "Testing" in README.md)
 └── test_*.py                 # Playwright browser smoke tests (job list, Change
-                              #   Project, Command Center, abort/overwrite,
-                              #   Progress tab + theme + file pickers)
+                              #   Project + recents, Command Center,
+                              #   abort/overwrite, Progress tab + theme + file
+                              #   pickers, orthogonal viewer)
 ```
 
 ### Why this instead of a Streamlit GUI
@@ -204,6 +207,26 @@ projects, browsing folders, and the "this doesn't look like a RELION
 project" prompt are all handled by `backend/project_manager.py` and the
 `/api/project/*` endpoints in `main.py`; see that module's docstring for
 the full design reasoning.
+
+**Recent projects.** Every successful open, switch or init records the
+directory in a per-*user* cache (`project_manager.remember_project()`), which
+the Change Project dialog shows as a quick-switch list. Three deliberate
+choices:
+
+- It lives under `XDG_CONFIG_HOME`/`~/.config/relion_us/`, not in a project's
+  `.relion_us/` marker: the list has to outlive any single project and survive
+  switching away from one. On a shared cluster filesystem that also means each
+  user gets their own list rather than their group's.
+- `exists` and `is_project` are **recomputed on every read**, never cached. A
+  folder can be deleted, or become a real RELION project the first time RELION
+  writes `default_pipeline.star` into it, with this app uninvolved. A stale
+  entry is returned flagged rather than dropped, so a project the user
+  remembers doesn't silently vanish from the list.
+- Paths are resolved before comparing, so the same directory reached by a
+  different route is one entry, not several.
+
+Writing the cache never raises: a read-only or full home directory must not
+stop someone opening a project, which is the task they actually asked for.
 
 ### SPA / Tomo / All jobs-list toggle
 
@@ -381,9 +404,27 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
 
 - **Slice browsing.** `mrcfile.mmap` memory-maps the volume so a slice request
   touches only that slice's bytes; the server contrast-stretches it to 8-bit
-  and returns a PNG. The volume is never loaded whole. An XY/XZ/YZ axis toggle
-  covers the three orthogonal planes (DeepETPicker shows all three at once via
-  a linked tri-view; this viewer uses one pane with a toggle).
+  and returns a PNG. The volume is never loaded whole.
+- **Three linked orthogonal views**, matching DeepETPicker's tri-view: XY as
+  the large main panel, ZY to its left, XZ below it. All three are cuts through
+  one crosshair position (`state.x/y/z`), so a click in any panel moves the
+  other two, and a wheel over a panel steps along that panel's own axis. Each
+  panel's plane, slice axis and screen->voxel mapping live in one `PANELS`
+  table in `app.js` rather than in three parallel branches — the click,
+  crosshair and pick maths all read from it.
+  - **Only the panels that moved are refetched.** A click in XY changes x and
+    y, which changes the ZY and XZ cuts but not XY's own; refetching all three
+    would triple the mmap+PNG work for no visible change.
+  - **One isotropic scale for all three panels** (`layoutStage()`), computed
+    from the volume dims, with panel sizes set in pixels rather than `fr`
+    units. The panels have to match to the pixel or the crosshair does not line
+    up across their borders, and a side view stretched to fill its box would
+    misrepresent the volume's aspect.
+  - **The ZY panel is served transposed** (`GET /api/viz/slice?transpose=1`).
+    The natural x-axis slice is `[z, y]`; the left-hand panel needs Y running
+    vertically so it shares the main panel's vertical axis. Transposing the
+    small 2D array server-side is cheaper and less error-prone than rotating
+    the PNG and its overlay canvas in the browser.
 - **Pick overlay.** Picks are sent once as JSON (voxel coords); the browser
   draws them on a `<canvas>` using DeepETPicker's exact rule — a particle
   appears on every slice within ±(diameter/2) of its centre, with radius
@@ -407,6 +448,10 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
   without the mismatched picks.
 - **Safety.** Every path is resolved against the active project directory and
   must stay inside it; the viewer only ever reads.
+- **Layout.** The three views take the whole left side; every input and control
+  lives in a fixed-width rail on the right, with compact inputs and an icon-only
+  browse button. The images are the reason the window is open, so the controls
+  are sized not to compete with them.
 - **Browse buttons.** Both inputs have a server-side file picker
   (`pickFileDialog()` in `app.js`) rather than an `<input type="file">` — the
   backend often runs on a different machine than the browser (an HPC login
@@ -417,7 +462,7 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
   (what the viewer's API expects, and the idiom RELION itself stores).
 
 Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
-`GET /api/viz/slice`, `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
+`GET /api/viz/slice` (`?transpose`), `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
 
 ## Invariants worth preserving
 
@@ -447,6 +492,9 @@ easy to undo accidentally during a refactor.
   the header's `RawSize` minus dark frames.
 - **Every path is resolved against the project directory and must stay inside
   it** — in the viewer, the file picker, and the custom-job runners alike.
+- **The recent-projects cache stores paths only, and recomputes
+  `exists`/`is_project` on every read.** Caching those flags would show a
+  deleted project as live, or a real RELION project as "not a project".
 
 **Job execution**
 

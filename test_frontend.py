@@ -1,16 +1,37 @@
+"""
+Playwright smoke test for the base UI: the jobs list, opening a job popup,
+its tabs and command box, and the SPA/Tomo/All sidebar toggle.
+
+Usage: python3 test_frontend.py [base_url]
+"""
+import os
 import sys
 from playwright.sync_api import sync_playwright
+
+BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8420"
+
+
+def launch_browser(p):
+    """Launch Chromium for the smoke tests.
+
+    By default let Playwright find its own bundled browser -- that is what
+    `playwright install chromium` sets up and it is right on almost every
+    machine. Set RELION_US_CHROMIUM to point at a specific binary when the
+    browser lives somewhere Playwright does not look (a shared read-only
+    install on a cluster, for instance)."""
+    exe = os.environ.get("RELION_US_CHROMIUM")
+    return p.chromium.launch(executable_path=exe) if exe else p.chromium.launch()
 
 errors = []
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+    browser = launch_browser(p)
     page = browser.new_page(viewport={"width": 1400, "height": 900})
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))
     page.on("response", lambda resp: errors.append(f"HTTP {resp.status} {resp.url}") if resp.status >= 400 else None)
 
-    page.goto("http://localhost:8420/", wait_until="networkidle")
+    page.goto(BASE_URL + "/", wait_until="networkidle")
     page.wait_for_selector(".job-item", timeout=5000)
     n_jobs = page.locator(".job-item").count()
     print(f"Sidebar loaded with {n_jobs} job items")
