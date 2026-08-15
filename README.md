@@ -22,20 +22,19 @@ way RELION's own GUI expects.
 
 ## Why this exists
 
-RELION's own GUI is a compiled Qt5/C++ application. Its command-assembly
-logic sometimes duplicates flags or inserts options you can only override
-by running from the terminal. RELION-US allows you to edit the command and
-whatever is in the command textbox when you click Run is executed exactly
-as written, via the shell, nothing added or removed. The draft command
-that pre-fills is based on the standard inputs suggested (see "How the
-draft command is built" below) — always check it, and the job's real
-RELION C++ source is one tab away for cross-referencing. Its also built to 
-work between projects in separate project directories without closing down.
-You can change workign directories on the fly and the application will 
-reparse the environment.  You need to be vigilant about your own resources
-and what you are working on. This is a pre-beta software, so use at your 
-own risk, float your own fixes and lets build a user interface by users 
-for users.
+RELION's own GUI is a compiled Qt5/C++ application that assembles each
+job's command internally and hands it straight to the shell. RELION-US puts
+that command in front of you first and lets you edit it: whatever is in the
+command textbox when you click Run is executed exactly as written, via the
+shell, nothing added or removed. The draft command that pre-fills is based
+on the standard inputs suggested (see "How the draft command is built"
+below) — always check it, and the job's real RELION C++ source is one tab
+away for cross-referencing. It's also built to work between projects in
+separate project directories without closing down. You can change working
+directories on the fly and the application will reparse the environment.
+You need to be vigilant about your own resources and what you are working
+on. This is pre-beta software, so use at your own risk, float your own
+fixes, and let's build a user interface by users for users.
 
 It's also built to be portable and multi-machine-friendly: it's a normal
 web page. Run the backend on your workstation or a remote HPC cluster
@@ -197,10 +196,9 @@ trusting the output:
   AreTomo manual and the teamtomo/alnfile parser) and writes IMOD-style
   `.xf` + `.tlt`, which RELION-5's IMOD tilt-series import reads. It
   deliberately hands off through IMOD files rather than writing RELION's
-  tilt-series STAR directly: the sign conventions for RELION's
-  `rlnTomoZRot`/`XShiftAngst` aren't documented well enough to reproduce
-  with confidence, whereas the `.xf` mapping is corroborated by AreTomo's
-  own `-OutImod` export. Dark (excluded) frames are reported. `TX`/`TY` are
+  tilt-series STAR directly: the `.xf` mapping is independently corroborated
+  by AreTomo's own `-OutImod` export, which makes it the better-verified
+  route into RELION. Dark (excluded) frames are reported. `TX`/`TY` are
   in pixels of the aligned stack — the `.aln` records no pixel size, so
   supply it downstream. If you still have AreTomo's own `-OutImod` output,
   prefer it; validate against a real `-OutImod` `.xf` if exactness matters.
@@ -231,7 +229,8 @@ group, not just the shell), Mark finished / Mark failed, **Delete**, and
 **Clean** / **Harsh Clean**. Clean is a *review* flow, not a silent sweep:
 it lists every file with its size, pre-checks a suggestion, and deletes only
 what you confirm. (RELION's own cleanup uses per-job-type glob patterns
-hard-coded in C++, which this doesn't try to mirror.)
+defined in its C++ source; this uses its own review-based suggestion instead
+of mirroring them.)
 
 ## Tomogram / particle-pick viewer
 
@@ -266,8 +265,8 @@ tomograms. This needs `mrcfile` and `pillow` (both in
 ## Live progress for iterative jobs
 
 Classification and refinement runs take a long time and report every few
-iterations, so those jobs get a **Progress** tab next to Outputs/Errors —
-charts instead of squinting at log text. It covers **Class2D, Class3D,
+iterations, so those jobs get a **Progress** tab next to Outputs/Errors that
+plots that report as it arrives. It covers **Class2D, Class3D,
 Refine3D, 3D initial model, MultiBody, and tomo Reconstruct Particle**;
 jobs with nothing to plot (Import, MaskCreate, the converters) simply don't
 show the tab.

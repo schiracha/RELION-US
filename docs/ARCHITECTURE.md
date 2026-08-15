@@ -11,23 +11,21 @@ Jobs list.
 ## Why a companion tool instead of patching RELION itself
 
 RELION's own GUI (`relion`, built from `src/apps/maingui.cpp` and the
-`gui_*` sources in [3dem/relion](https://github.com/3dem/relion)) is a
-monolithic Qt5 C++ application compiled together with the whole processing
-engine. Patching it directly means rebuilding the entire RELION binary
-(CMake + Qt5 + FFTW + CUDA toolchain) every time you want to test a change,
-re-merging your patch by hand on every upstream release, and your changes
-only running wherever you've built that exact binary — which fights the
-"portable" goal directly.
+`gui_*` sources in [3dem/relion](https://github.com/3dem/relion)) is a Qt5
+C++ application compiled together with the processing engine. Patching it
+means rebuilding the RELION binary (CMake + Qt5 + FFTW + CUDA toolchain) for
+every change, re-merging the patch on every upstream release, and running
+only wherever that exact binary was built — none of which suits a front end
+meant to be portable and quick to iterate on.
 
-Instead, RELION-US is a **separate, lightweight layer that sits next to a
+RELION-US is therefore a **separate, lightweight layer that sits next to a
 normal RELION install**: it reads and writes the same STAR files RELION
-uses (RELION's actual interchange format — the GUI itself is just a job
-scheduler over STAR files and `relion_*` command-line programs), and drives
-`relion_*` binaries as subprocesses, exactly as the real GUI would. That
-gets a friendlier, more visual, portable front end without touching
-upstream code, zero merge conflicts with upstream RELION releases, and
-something that runs identically on a laptop and, launched as a job, on
-any SLURM cluster.
+uses (RELION's interchange format — the GUI is a job scheduler over STAR
+files and `relion_*` command-line programs), and drives `relion_*` binaries
+as subprocesses, exactly as the real GUI would. That gets an alternative,
+more visual front end without touching upstream code, zero merge conflicts
+with upstream RELION releases, and something that runs identically on a
+laptop and, launched as a job, on any SLURM cluster.
 
 **Concretely, at runtime**: RELION-US never runs RELION's own GUI binary.
 `backend/data/extract_job_definitions.py` reads RELION's GUI source
@@ -53,9 +51,9 @@ editable command box — nothing added, removed, or silently rewritten.
   involving `.mod` files, rather than reimplementing IMOD's binary model
   format.
 - **RELION's own source**, read as ground truth by the extractor (see
-  below) rather than hand-typed field lists — the whole point is to avoid
-  the exact class of bug ("RELION inserted a flag I can't see or override")
-  that motivated this project in the first place.
+  below) rather than hand-typed field lists — so the forms and the draft
+  commands track whatever the installed RELION release actually defines,
+  and the real C++ builder is always available for cross-reference.
 
 ## Components
 
@@ -131,7 +129,7 @@ RELION C++ source is one tab away for cross-checking. See the main
 #### Draft-command overlays for RELION-5's Python tomo tools
 
 The `--<key>`-matches-the-flag rule holds for the ~27 core RELION programs,
-whose CLI flag names equal their internal option keys. It breaks for
+whose CLI flag names equal their internal option keys. It does not apply to
 RELION-5's newer **Python tomo tools** (`relion_python_tomo_import`,
 `_pick`, `_denoise`, `_exclude_tilt_images`) and DynaMight, which use
 hyphenated multi-word flags (`--tilt-image-movie-pattern`,
@@ -156,7 +154,7 @@ Both are handled by a small, **source-verified data overlay** in `job_catalog.py
 verbatim from `getCommandsTomoImportJob()` / `getCommandsTomoExcludeTiltImagesJob()`
 and cited by source line — the same "curated overlay verified against RELION
 source" pattern as `JOB_DIRNAME`. A mapped flag is authoritative (always
-emitted, bypassing the unreliable `flags_used` test); `DRAFT_SUPPRESS` keeps
+emitted, bypassing the name-matching `flags_used` test); `DRAFT_SUPPRESS` keeps
 the non-default (`do_coords`) branch's options out of the default draft. This
 is deliberately **not** a reimplementation of RELION's per-job command
 branching: jobs with genuinely multi-command / mode-branched builders
@@ -252,8 +250,8 @@ source, not a project-level flag:
    39147729) is making tomography particles look like ordinary
    `particles.star` rows so those downstream jobs work unmodified.
 
-**Auto-switching based on the loaded project** — the "nice to have" from
-the original request — works when there's a signal to use:
+**Auto-switching based on the loaded project** works when there's a signal
+to use:
 `project_manager.detect_pipeline_hint()` reads `default_pipeline.star`'s
 `pipeline_processes` block (via the same `starfile` wrapper `star_io.py`
 already uses) and checks which known SPA-only/Tomo-only
@@ -262,9 +260,8 @@ returning `'spa'`, `'tomo'`, `'mixed'`, or `'unknown'`. `GET /api/project`
 exposes this as `pipeline_hint`; the frontend auto-applies it on project
 load/switch only when it's unambiguous (`'spa'` or `'tomo'`) — a brand-new
 project (`'unknown'`, no `default_pipeline.star` yet) or one that's run
-both types (`'mixed'`) leaves the toggle wherever it was, which is exactly
-the "if not that's fine, a manual switch is good" fallback that was asked
-for. The user's last manual choice also persists across reloads via
+both types (`'mixed'`) leaves the toggle wherever it was, falling back to a
+manual switch. The user's last manual choice also persists across reloads via
 `localStorage` (falls back to `'all'` silently if storage is unavailable).
 
 ### Division of labor: local vs. a SLURM cluster
@@ -335,15 +332,15 @@ they are worth re-checking after a major version bump of any of these tools.
   AreTomo manual and the teamtomo/alnfile parser). SEC is a 0-based index into
   the post-dark-removal stack; TX/TY are pixels of the aligned stack, and the
   `.aln` records no pixel size. Only ROT/TX/TY/TILT/SEC are consumed — the
-  remaining columns are fit metrics AreTomo does not document precisely.
+  remaining columns are per-section fit metrics that carry no geometry.
 
   The bridge writes IMOD `.xf` + `.tlt` and hands off to RELION's IMOD
   tilt-series import rather than writing RELION's tilt-series STAR directly.
   The `.xf` mapping (`θ = −ROT`, shift negated and rotated into the
-  transformed frame) is corroborated by AreTomo's own `-OutImod` export and by
-  teamtomo/alnfile; RELION's sign conventions for
-  `rlnTomoZRot`/`rlnTomoXShiftAngst` are not documented well enough to
-  reproduce with the same confidence.
+  transformed frame) has two independent corroborations — AreTomo's own
+  `-OutImod` export and teamtomo/alnfile — so it is the better-verified
+  route. Writing `rlnTomoZRot`/`rlnTomoXShiftAngst` directly would need a
+  sign convention this bridge has no second source to check against.
 
 ### Coordinate transforms
 
