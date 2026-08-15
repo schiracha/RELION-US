@@ -94,6 +94,77 @@ def test_executable_path_placeholder_resolves_from_field_values():
     assert "fn_dynamight_exe" in cmd_unset  # falls back to a pointer, not blank/None
 
 
+# --- Draft-command overrides for RELION-5 Python tomo tools -----------------
+# These jobs' real CLI flags are hyphenated multi-word names that don't match
+# their snake_case option keys, so the generic draft rule can't map them. The
+# curated, source-verified overlays in job_catalog (DRAFT_PROGRAM_OVERRIDE /
+# DRAFT_FLAG_MAP / DRAFT_SUPPRESS) fix that. See getCommandsTomoImportJob in
+# src/pipeline_jobs.cpp (RELION cloned 2026-08-14).
+
+def test_tomo_import_default_draft_uses_serialem_tiltseries_program():
+    """The default TomoImport (do_coords == false) must draft the SerialEM
+    tilt-series importer, NOT the do_coords==true coordinate importer the
+    extractor originally picked up as program_guess."""
+    d = job_registry.build_job_definition("TomoImport")
+    draft = d["draft_command"]
+    assert draft.startswith("relion_python_tomo_import SerialEM"), draft
+    # must NOT be the coordinate-branch program
+    assert "relion_tomo_import_coordinates" not in draft, draft
+
+
+def test_tomo_import_default_draft_maps_hyphenated_flags():
+    """The hyphenated RELION flags must appear, mapped from their snake_case
+    option keys — this is the core bug the overlay fixes."""
+    d = job_registry.build_job_definition("TomoImport")
+    draft = d["draft_command"]
+    for flag in (
+        "--nominal-pixel-size",
+        "--voltage",
+        "--spherical-aberration",
+        "--amplitude-contrast",
+        "--dose-per-tilt-image",
+        "--tilt-image-movie-pattern",
+        "--mdoc-file-pattern",
+        "--nominal-tilt-axis-angle",
+    ):
+        assert flag in draft, f"{flag} missing from draft: {draft}"
+    # truncated garbage flags from the old hyphen-splitting bug must be gone
+    for bad in ("--tilt ", "--nominal ", "--dose ", "--spherical ", "--amplitude "):
+        assert bad not in draft, f"truncated flag {bad!r} leaked into draft: {draft}"
+
+
+def test_tomo_import_default_draft_suppresses_coordinate_branch_fields():
+    """do_coords==true branch options (scale_factor, add_factor, ...) must not
+    leak into the default tilt-series draft, and must not be flagged as
+    'unmapped' either (they're deliberately omitted, not un-handled)."""
+    d = job_registry.build_job_definition("TomoImport")
+    draft = d["draft_command"]
+    assert "--scale_factor" not in draft, draft
+    assert "--add_factor" not in draft, draft
+    for suppressed in ("scale_factor", "add_factor", "in_coords", "is_center"):
+        assert suppressed not in d["unmapped_fields"], suppressed
+
+
+def test_tomo_exclude_tilt_images_maps_its_hyphenated_flags():
+    d = job_registry.build_job_definition("TomoExcludeTiltImages")
+    draft = d["draft_command"]
+    assert "--cache-size" in draft, draft
+    # in_tiltseries has an empty default so no value is emitted, but the key
+    # must be mapped (not flagged unmapped) via the overlay.
+    assert "in_tiltseries" not in d["unmapped_fields"], d["unmapped_fields"]
+
+
+def test_extractor_regex_captures_full_hyphenated_flags():
+    """Guard the root-cause fix: the flag regex must capture whole hyphenated
+    flags, not truncate at the first hyphen."""
+    import re as _re
+    src = 'command += " --tilt-image-movie-pattern \\"" + x; command += " --i \\""'
+    flags = _re.findall(r'"\s*(--[A-Za-z][A-Za-z0-9_-]*)', src)
+    assert "--tilt-image-movie-pattern" in flags
+    assert "--tilt" not in flags
+    assert "--i" in flags
+
+
 def test_catalog_lists_all_relion_and_custom_jobs():
     catalog = job_registry.list_catalog()
     names = {j["internal_name"] for j in catalog}

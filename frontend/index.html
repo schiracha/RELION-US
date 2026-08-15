@@ -12,6 +12,7 @@
     <button id="toggleSidebarBtn" title="Hide/show job list">☰ Jobs</button>
     <span id="appTitle" title="RELION - User Sourced">RELION-US</span>
     <button id="changeProjectBtn" title="Switch to a different RELION project directory">📁 Change Project</button>
+    <button id="visualizeBtn" title="Open the tomogram / particle-pick viewer (not a job)">🔍 Visualize</button>
     <span id="projectDirLabel"></span>
     <div id="zoomControl">
       <label for="zoomSlider">Scale</label>
@@ -33,11 +34,35 @@
       <div id="jobCategories"></div>
     </aside>
     <main id="mainArea">
-      <div id="emptyState">
-        <p>Select a job type from the list to open it in its own window.</p>
-        <p class="hint">Multiple jobs can be open at once, each in its own draggable/resizable popup — click a running job's title bar to bring it forward.</p>
+      <div id="commandCenter">
+        <div id="ccToolbar">
+          <div class="cc-view-toggle" role="group" aria-label="Job history view">
+            <button type="button" class="cc-view-btn active" data-view="table" title="Sortable table view">☰ Table</button>
+            <button type="button" class="cc-view-btn" data-view="timeline" title="Chronological timeline view, connecting each job to its detected inputs">↕ Timeline</button>
+          </div>
+          <button type="button" id="ccDirectionBtn" class="btn" title="Reverse timeline order">Newest first ↓</button>
+          <span id="ccHint">Select a job type from the list to launch it — every job you run shows up here.</span>
+        </div>
+        <div id="ccTableView" class="cc-view">
+          <table id="ccTable">
+            <thead>
+              <tr>
+                <th data-sort="job_name">Job<span class="sort-arrow"></span></th>
+                <th data-sort="display_name">Type<span class="sort-arrow"></span></th>
+                <th data-sort="status">Status<span class="sort-arrow"></span></th>
+                <th data-sort="started_at">Started<span class="sort-arrow"></span></th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody id="ccTableBody"></tbody>
+          </table>
+          <div id="ccTableEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
+        </div>
+        <div id="ccTimelineView" class="cc-view hidden">
+          <div id="ccTimelineList"></div>
+          <div id="ccTimelineEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
+        </div>
       </div>
-      <div id="runningJobsBar"></div>
     </main>
   </div>
 

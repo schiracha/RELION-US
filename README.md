@@ -4,12 +4,18 @@
 RELION, built as a *companion* to RELION, not a modified RELION GUI. It
 reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
 to build accurate forms for every RELION job type (32 of them, single-
-particle and tomography), folds in IMOD/Warp-M/DeepETPicker import bridges
-as three more entries in the same Jobs list, and runs everything through
-one consistent popup-window UI: standard inputs on top, an Advanced tab
-with every other option, an Errors tab, live streaming output at the
+particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
+bridges as four more entries in the same Jobs list, and runs everything
+through one consistent popup-window UI: standard inputs on top, an Advanced
+tab with every other option, an Errors tab, live streaming output at the
 bottom — and, critically, **an editable command box you approve before
 anything runs.**
+
+The main panel is a **Command Center** showing every job you've run (a
+sortable table or a timeline that links each job to its inputs), and the
+top bar has a **🔍 Visualize** button that opens a tomogram / particle-pick
+viewer. Jobs run **from the project directory**, exactly like RELION, so
+project-root-relative paths behave the way RELION's own GUI expects.
 
 ## Why this exists
 
@@ -41,8 +47,8 @@ environment works; a plain venv is the least assumption-laden option and
 works the same way on every distro:
 
 ```bash
-python3 -m venv relnu
-source relnu/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
@@ -92,14 +98,15 @@ internet access.
   RELION's own pipeline file for you, only a small marker + history log;
   RELION's own tools still create `default_pipeline.star` correctly the
   first time a real job runs.
-- **Job history bar** (below the empty-state message): every run started
-  in the *current* project, newest first, reload-safe. Click a chip to
-  reopen that run's command/status/live output — for a run from the
-  current backend session this reconnects to the live stream; for one from
-  a previous session (backend since restarted) it shows the saved status
-  only, since the transcript itself isn't persisted, only the summary.
+- **Command Center** (main panel): every run started in the *current*
+  project, reload-safe, as a sortable table or a linked timeline — see
+  "Command Center" below. Click a row or card to reopen that run's
+  options/status/outputs — for a run from the current backend session this
+  reconnects to the live stream; for one from a previous session (backend
+  since restarted) it shows the saved status and its output files, since the
+  live transcript itself isn't persisted, only the summary.
 - **Jobs list** (left sidebar, `☰ Jobs` toggles it): every RELION job type
-  grouped by category, plus a separate "(custom)" tag for the three import
+  grouped by category, plus a separate "(custom)" tag for the four import
   bridges. Click one to open it in its own popup — open as many at once as
   you want, each is independent.
 - **Standard inputs**: RELION's own first GUI tab for that job (almost
@@ -142,10 +149,11 @@ binary at all — RELION runs whatever executable path you set in a
 "Location of X executable" field. The draft command resolves that
 automatically from the field's current value.
 
-## The three custom import jobs
+## The four custom import jobs
 
-`Import from IMOD (.mod)`, `Import from Warp/M`, and `Import from
-DeepETPicker` live in `backend/converters/` and use the same popup layout,
+`Import from IMOD (.mod)`, `Import from Warp/M`, `Import from
+DeepETPicker`, and `Import from AreTomo2 (.aln)` live in
+`backend/converters/` and use the same popup layout,
 live output, and Errors tab as every RELION job — they just don't have a
 command box, since they call directly into Python rather than spawning a
 subprocess. Status of each, so you know what to double-check before
@@ -162,11 +170,74 @@ trusting the output:
   weren't hard-coded without verification against a real file. Send a real
   `.tomostar` or particle STAR export and the mapping can be filled in and
   verified.
-- **DeepETPicker bridge**: verified against the DeepETPicker README
-  (`.coords` = `class_id x y z`, voxels) and fully implemented/tested.
-  DeepETPicker also ships its own `coords_to_relion4.py` — prefer that
-  directly for a one-off conversion; this module is for wiring `.coords`
-  -> particles.star into RELION-US's Jobs list/live-output flow.
+- **DeepETPicker bridge**: verified against the DeepETPicker README *and*
+  its own `utils/coords_to_relion4.py` (`.coords` = `class_id x y z` in
+  voxels; a bare 3-column `x y z` file is also accepted, matching what
+  DeepETPicker itself accepts). Fully implemented/tested. DeepETPicker also
+  ships that converter — prefer it directly for a one-off conversion; this
+  module is for wiring `.coords` -> particles.star into RELION-US's Jobs
+  list/live-output flow.
+- **AreTomo2 bridge**: reads AreTomo2's `.aln` global alignment block
+  (`SEC ROT GMAG TX TY SMEAN SFIT SCALE BASE TILT`, verified against the
+  AreTomo manual and the teamtomo/alnfile parser) and writes IMOD-style
+  `.xf` + `.tlt`, which RELION-5's IMOD tilt-series import reads. It
+  deliberately hands off through IMOD files rather than writing RELION's
+  tilt-series STAR directly, because RELION's sign conventions for
+  `rlnTomoZRot`/`XShiftAngst` couldn't be verified to this project's
+  standard. Dark (excluded) frames are reported. `TX`/`TY` are in pixels of
+  the aligned stack — the `.aln` records no pixel size, so supply it
+  downstream. If you still have AreTomo's own `-OutImod` output, prefer it;
+  validate against a real `-OutImod` `.xf` if exactness matters.
+
+**Coordinate flips.** The IMOD and DeepETPicker importers have
+`Swap Y and Z` and per-axis `Mirror` options (`backend/converters/
+coord_transform.py`). The Y/Z swap is the fix for IMOD's "flipped"
+(`trimvol -yz`) vs "rotated" (`trimvol -rx`) tomogram convention — a model
+built on a flipped or raw-`tilt` volume has depth in Y, not Z. Mirroring
+requires the tomogram dimension for that axis, and fails loudly if you
+don't supply it rather than silently producing wrong coordinates.
+
+## Command Center (job history)
+
+The main panel lists every job run in the current project, in two togglable
+views: a **table** (sortable by job name/number, type, status, or start
+time) and a **timeline** (newest-first or oldest-first, with a card per job
+that links to the jobs its inputs came from). Clicking a job reopens its
+popup showing the options it ran with, its live or final status, an
+**Outputs** tab (browse/download individual files or a `.zip` of any
+selection), the **Errors** tab, and the **RELION Source** tab.
+
+The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
+close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
+same job directory and job number, so it stays one entry — matching how
+RELION reuses a pipeline job slot), **Abort** (kills the whole process
+group, not just the shell), Mark finished / Mark failed, **Delete**, and
+**Clean** / **Harsh Clean**. Clean is a *review* flow, not a silent sweep:
+it lists every file with its size, pre-checks a suggestion, and deletes only
+what you confirm. (RELION's own cleanup uses per-job-type glob patterns in
+C++; that dispatch table is deliberately not reimplemented here.)
+
+## Tomogram / particle-pick viewer
+
+The **🔍 Visualize** button opens a viewer — it is *not* a job, so it never
+appears in the Command Center and writes nothing. Give it an optimiser
+STAR, a `tomograms.star`, or an MRC (with or without a particles/coords
+STAR) and it loads one tomogram at a time:
+
+- browse slices along **XY / XZ / YZ**, with black/white-point contrast
+  sliders (default is a robust 0.5–99.5% percentile, since raw cryo-ET
+  min/max is usually washed out);
+- picks are overlaid using DeepETPicker's own model — a particle is drawn on
+  every slice within ±(diameter/2) of its centre, with radius
+  `sqrt(r² − Δ²)` so the marker grows toward the particle's centre slice —
+  with diameter and line-width controls;
+- if the tomogram's name doesn't match any `rlnTomoName` in the picks file,
+  you get a warning with **Load anyway / Reload files / Cancel**.
+
+The volume is never loaded whole: the backend memory-maps the MRC and
+returns one slice at a time as a PNG, so scrubbing stays fast on large
+tomograms. This needs `mrcfile` and `pillow` (both in
+`backend/requirements.txt`).
 
 ## SLURM templates (any cluster)
 
@@ -215,7 +286,7 @@ caught the bugs listed below during development.
   verbatim (that's genuinely how RELION's own External job works — you
   name your own flags there).
 - Warp/M column names in the custom import job are unverified against your
-  specific install (see "The three custom import jobs" above).
+  specific install (see "The four custom import jobs" above).
 - This extraction pipeline was built and tested against one specific
   RELION checkout; job internals do change across releases, so re-running
   the extractor (above) periodically is worth doing, and the test suite

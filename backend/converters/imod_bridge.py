@@ -126,6 +126,13 @@ def model_to_coordinates(
     mod_path: PathLike,
     tomo_name: str,
     scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    swap_yz: bool = False,
+    flip_x: bool = False,
+    flip_y: bool = False,
+    flip_z: bool = False,
+    tomo_size_x: Optional[float] = None,
+    tomo_size_y: Optional[float] = None,
+    tomo_size_z: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Convert an IMOD .mod point/scattered-point model into a DataFrame with
@@ -135,6 +142,22 @@ def model_to_coordinates(
     at the tomogram's own binning) into whatever pixel size RELION expects
     for this tomogram if the .mod was built on a differently-binned volume.
     Leave as (1, 1, 1) if the .mod and the RELION tomogram share binning.
+
+    IMPORTANT axis-convention caveat (verified against IMOD's own docs,
+    bio3d.colorado.edu/imod/doc, 2026-08-14): this function emits model2point
+    coordinates VERBATIM as X, Y, Z and does NOT reorder axes. IMOD tomograms
+    can be stored in two non-equivalent orientations:
+      * "rotated"  (etomo default; trimvol -rx / clip rotx): depth is Z,
+        handedness preserved — matches what RELION expects.
+      * "flipped"  (trimvol -yz): Y and Z swapped, handedness INVERTED.
+    A model built on a raw `tilt` reconstruction (perpendicular slices) has
+    depth in Y, not Z. So if your .mod was drawn on a flipped or raw-tilt
+    volume, the Z you get here is actually Y (and vice-versa) relative to a
+    RELION tomogram — you must swap them yourself (or re-orient the volume
+    with trimvol -rx before picking). Additionally, IMOD model coordinates
+    are 0-based pixel positions and the Z value carries a -0.5 half-pixel
+    offset by IMOD's convention. This bridge deliberately does not guess
+    which orientation your .mod used; confirm it before trusting Z.
     """
     model2point = _require_binary("model2point")
     mod_path = Path(mod_path)
@@ -166,6 +189,18 @@ def model_to_coordinates(
             "rlnCoordinateZ": [z * sz for _, _, z in coords],
         }
     )
+    # Optional axis flips/swap, applied AFTER scaling (so tomo_size_* are in
+    # the same scaled pixel units as the coordinates). See
+    # coord_transform.apply_coordinate_transform and the Y/Z caveat above.
+    if swap_yz or flip_x or flip_y or flip_z:
+        from .coord_transform import apply_coordinate_transform
+
+        df = apply_coordinate_transform(
+            df,
+            swap_yz=swap_yz,
+            flip_x=flip_x, flip_y=flip_y, flip_z=flip_z,
+            tomo_size_x=tomo_size_x, tomo_size_y=tomo_size_y, tomo_size_z=tomo_size_z,
+        )
     return df
 
 

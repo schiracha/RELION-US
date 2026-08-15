@@ -1,9 +1,9 @@
 // app.js — RELION-US frontend. Vanilla JS, no build step.
-// Each job opened from the sidebar becomes an independent WinBox popup
-// (draggable/resizable/minimizable, cryoSPARC-style) mounted with a form
-// built from the job definition the backend serves. See style.css for the
-// popup's internal layout (standard fields on top, tabs, editable command
-// box, live output at the bottom).
+// Each job opened from the sidebar (or reopened from the Command Center)
+// becomes an independent WinBox popup (draggable/resizable/minimizable,
+// cryoSPARC-style) mounted with a form built from the job definition the
+// backend serves. See style.css for the popup's internal layout (standard
+// fields on top, tabs, editable command box, live output at the bottom).
 
 const openPopups = {}; // internal_name+instance -> winbox instance, for future multi-instance support
 let jobCounter = 0;
@@ -15,6 +15,104 @@ async function api(path, opts) {
     throw new Error(`${res.status} ${res.statusText}: ${text}`);
   }
   return res.json();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function formatBytes(n) {
+  if (n === undefined || n === null) return "";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+function formatTimestamp(t) {
+  if (!t) return "—";
+  return new Date(t * 1000).toLocaleString();
+}
+
+function formatDuration(startedAt, endedAt) {
+  if (!startedAt) return "—";
+  const end = endedAt || Date.now() / 1000;
+  const secs = Math.max(0, Math.round(end - startedAt));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const remSecs = secs % 60;
+  if (mins < 60) return `${mins}m ${remSecs}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs}h ${remMins}m`;
+}
+
+// --- Lightweight custom confirm/prompt dialogs -----------------------------
+// Deliberately never native confirm()/prompt() (or alert()): those are
+// modal at the OS/browser level and block the whole page, including
+// anything driving it programmatically (e.g. Playwright) -- this app
+// already avoids native alert() for project-switch errors for the same
+// reason (see the #projectModalError/#notAProjectError banners). These
+// build a throwaway overlay, resolve a promise, and remove themselves.
+
+function confirmDialog(message, { confirmLabel = "OK", danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "mini-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="mini-dialog">
+        <p></p>
+        <div class="mini-dialog-actions">
+          <button class="btn" data-role="cancel">Cancel</button>
+          <button class="btn ${danger ? "danger" : "primary"}" data-role="confirm"></button>
+        </div>
+      </div>`;
+    overlay.querySelector("p").textContent = message;
+    overlay.querySelector('[data-role="confirm"]').textContent = confirmLabel;
+    function done(result) {
+      overlay.remove();
+      resolve(result);
+    }
+    overlay.querySelector('[data-role="cancel"]').addEventListener("click", () => done(false));
+    overlay.querySelector('[data-role="confirm"]').addEventListener("click", () => done(true));
+    document.body.appendChild(overlay);
+  });
+}
+
+function promptDialog(message, defaultValue = "") {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "mini-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="mini-dialog">
+        <p></p>
+        <input type="text" data-role="value" />
+        <div class="mini-dialog-actions">
+          <button class="btn" data-role="cancel">Cancel</button>
+          <button class="btn primary" data-role="confirm">OK</button>
+        </div>
+      </div>`;
+    overlay.querySelector("p").textContent = message;
+    const input = overlay.querySelector('[data-role="value"]');
+    input.value = defaultValue;
+    function done(result) {
+      overlay.remove();
+      resolve(result);
+    }
+    overlay.querySelector('[data-role="cancel"]').addEventListener("click", () => done(null));
+    overlay.querySelector('[data-role="confirm"]').addEventListener("click", () => done(input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") done(input.value);
+      if (e.key === "Escape") done(null);
+    });
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+  });
 }
 
 // --- Sidebar -------------------------------------------------------------
@@ -46,19 +144,13 @@ async function loadCatalog() {
       item.dataset.pipeline = job.pipeline_type || "shared";
       item.innerHTML = `<span class="job-name">${escapeHtml(job.display_name)}</span>
                          <span class="job-desc">${escapeHtml(job.description)}</span>`;
-      item.addEventListener("click", () => openJobPopup(job.internal_name, job.display_name, job.is_custom));
+      item.addEventListener("click", () => openJobPopup(job.internal_name, job.display_name));
       block.appendChild(item);
     }
     container.appendChild(block);
   }
 
   applyJobFilters();
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
 }
 
 // --- SPA / Tomo / All toggle ----------------------------------------------
@@ -205,10 +297,20 @@ function buildFieldRow(key, option, value) {
 }
 
 // --- Job popup ---------------------------------------------------------
+// One popup implementation for both cases:
+//   - launching a NEW job from the sidebar (existingRun is null)
+//   - reopening a job from the Command Center table/timeline (existingRun
+//     is that run's summary dict from /api/runs)
+// existingRun's own field_values (if the run recorded them — see
+// backend/main.py's start_run, which now forwards field_values for RELION
+// jobs too, not just custom ones) prefill the form instead of the job
+// type's defaults, and the command box shows the command that was ACTUALLY
+// run rather than a fresh draft, so reopening history shows history.
 
-async function openJobPopup(internalName, displayName, isCustom) {
+async function openJobPopup(internalName, displayName, existingRun) {
   jobCounter += 1;
   const popupId = `${internalName}-${jobCounter}`;
+  const isReopen = !!existingRun;
 
   let def;
   try {
@@ -220,22 +322,49 @@ async function openJobPopup(internalName, displayName, isCustom) {
 
   const optionsByKey = {};
   (def.options || []).forEach((o) => (optionsByKey[o.key] = o));
+  const prefillValues = (isReopen && existingRun.field_values) || def.default_values || {};
+
+  // The RELION-style output dir (<JobDir>/jobNNN) this popup targets. For a
+  // fresh job it's the prospective next dir from the job definition; passed
+  // to /api/runs so the backend (running from the project root, like RELION)
+  // creates and tracks that dir. The backend finalizes/renumbers at Run time.
+  let popupOutputSubdir = def.output_subdir || "";
+
+  // currentRun tracks whichever run this popup is currently showing —
+  // starts as existingRun when reopening, or null until Run/Overwrite
+  // gives it one. Actions (abort/rename/note/clean/delete/etc.) all key
+  // off currentRun.run_id.
+  let currentRun = existingRun ? { ...existingRun } : null;
 
   const body = document.createElement("div");
   body.className = "job-popup";
   body.innerHTML = `
     <div class="job-desc-bar">${escapeHtml(def.description || "")}</div>
+    <div class="job-actions-toolbar" data-role="actions-toolbar">
+      <span class="job-name-display" data-role="job-name-display" title="Click to rename (RELION's 'Alias' job action)">${escapeHtml((currentRun && currentRun.job_name) || displayName)}</span>
+      <button class="btn" data-action="collapse" title="Minimize this window">− Collapse</button>
+      <button class="btn" data-action="close" title="Close this window">✕ Close</button>
+      <button class="btn" data-action="note" title="Edit note">📝 Note</button>
+      <button class="btn" data-action="overwrite" hidden title="Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)">⟳ Overwrite</button>
+      <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
+      <button class="btn" data-action="mark-finished" hidden title="Manually mark as finished">✓ Mark Finished</button>
+      <button class="btn" data-action="mark-failed" hidden title="Manually mark as failed">✗ Mark Failed</button>
+      <button class="btn" data-action="delete" hidden title="Delete this job (and optionally its output files)">🗑 Delete</button>
+    </div>
+    <div class="job-note-row hidden" data-role="note-row"></div>
     <div class="job-standard-form" data-role="standard-form"></div>
     <div class="tab-bar" data-role="tab-bar">
       <button class="tab-btn active" data-tab="advanced">Advanced</button>
+      <button class="tab-btn" data-tab="outputs" hidden>Outputs</button>
       <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
     <div class="tab-content active" data-tab-content="advanced"></div>
+    <div class="tab-content" data-tab-content="outputs"></div>
     <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
     ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
     ${def.is_custom ? "" : `
-    <div class="command-row">
+    <div class="command-row" data-role="command-row">
       <label>Command (edit freely — this exact string runs, nothing added or removed under the hood)
         <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
       </label>
@@ -246,7 +375,7 @@ async function openJobPopup(internalName, displayName, isCustom) {
       </div>
     </div>`}
     ${def.is_custom ? `
-    <div class="command-row">
+    <div class="command-row" data-role="command-row">
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
         <span class="status-line" data-role="status-line"></span>
@@ -260,7 +389,7 @@ async function openJobPopup(internalName, displayName, isCustom) {
   for (const key of def.standard_fields || []) {
     const opt = optionsByKey[key];
     if (!opt) continue;
-    const val = (def.default_values || {})[key];
+    const val = prefillValues[key];
     standardForm.appendChild(buildFieldRow(key, opt, val));
   }
 
@@ -272,7 +401,7 @@ async function openJobPopup(internalName, displayName, isCustom) {
     const shown = new Set(def.standard_fields || []);
     (def.options || []).forEach((opt) => {
       if (shown.has(opt.key)) return;
-      const val = (def.default_values || {})[opt.key];
+      const val = prefillValues[opt.key];
       const row = document.createElement("div");
       row.className = "job-standard-form";
       row.style.borderBottom = "none";
@@ -294,7 +423,7 @@ async function openJobPopup(internalName, displayName, isCustom) {
       for (const key of keys) {
         const opt = optionsByKey[key];
         if (!opt) continue;
-        const val = (def.default_values || {})[key];
+        const val = prefillValues[key];
         grid.appendChild(buildFieldRow(key, opt, val));
       }
       advancedContent.appendChild(grid);
@@ -304,10 +433,12 @@ async function openJobPopup(internalName, displayName, isCustom) {
   // Tab switching
   body.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (btn.hidden) return;
       body.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
       body.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
       btn.classList.add("active");
       body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
+      if (btn.dataset.tab === "outputs") loadOutputsTab();
     });
   });
 
@@ -324,16 +455,17 @@ async function openJobPopup(internalName, displayName, isCustom) {
   // Draft command recompute (RELION jobs only)
   const commandBox = body.querySelector('[data-role="command-box"]');
   if (commandBox) {
-    commandBox.value = def.draft_command || "";
+    commandBox.value = isReopen ? (currentRun.command || "") : (def.draft_command || "");
     const recomputeBtn = body.querySelector('[data-role="recompute-btn"]');
     recomputeBtn.addEventListener("click", async () => {
       try {
         const resp = await api(`/api/jobs/${internalName}/draft`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ field_values: collectValues() }),
+          body: JSON.stringify({ field_values: collectValues(), output_subdir: popupOutputSubdir }),
         });
         commandBox.value = resp.draft_command;
+        if (resp.output_subdir) popupOutputSubdir = resp.output_subdir;
         if (resp.unmapped_fields && resp.unmapped_fields.length) {
           commandBox.title = "Not auto-mapped to a flag (add manually if needed): " +
             resp.unmapped_fields.join(", ");
@@ -349,6 +481,7 @@ async function openJobPopup(internalName, displayName, isCustom) {
   const errorsPre = body.querySelector('[data-role="errors-pre"]');
   const errorBadge = body.querySelector('[data-role="error-badge"]');
   let errorLines = [];
+  let ws = null;
 
   function appendOutputLine(text, isStderr) {
     const line = document.createElement("div");
@@ -365,9 +498,275 @@ async function openJobPopup(internalName, displayName, isCustom) {
     }
   }
 
+  // --- Job actions toolbar --------------------------------------------
+  const toolbar = body.querySelector('[data-role="actions-toolbar"]');
+  const jobNameDisplay = toolbar.querySelector('[data-role="job-name-display"]');
+  const noteRow = body.querySelector('[data-role="note-row"]');
+  const overwriteBtn = toolbar.querySelector('[data-action="overwrite"]');
+  const abortBtn = toolbar.querySelector('[data-action="abort"]');
+  const markFinishedBtn = toolbar.querySelector('[data-action="mark-finished"]');
+  const markFailedBtn = toolbar.querySelector('[data-action="mark-failed"]');
+  const deleteBtn = toolbar.querySelector('[data-action="delete"]');
+  const noteBtn = toolbar.querySelector('[data-action="note"]');
+  const outputsTabBtn = body.querySelector('[data-tab="outputs"]');
+
+  function refreshNoteRow() {
+    const note = (currentRun && currentRun.note) || "";
+    if (note) {
+      noteRow.textContent = "Note: " + note;
+      noteRow.classList.remove("hidden");
+    } else {
+      noteRow.classList.add("hidden");
+    }
+  }
+
+  function refreshToolbarState() {
+    const hasRun = !!currentRun;
+    const status = hasRun ? currentRun.status : null;
+    jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
+    overwriteBtn.hidden = !hasRun || status === "running";
+    abortBtn.hidden = !hasRun || status !== "running";
+    markFinishedBtn.hidden = !hasRun || status === "running" || status === "completed";
+    markFailedBtn.hidden = !hasRun || status === "running" || status === "failed";
+    deleteBtn.hidden = !hasRun || status === "running";
+    outputsTabBtn.hidden = !hasRun;
+    refreshNoteRow();
+  }
+  refreshToolbarState();
+
+  async function renameJob() {
+    if (!currentRun) return;
+    const newAlias = await promptDialog("Rename this job (leave blank to clear and revert to the plain job number):", currentRun.job_name);
+    if (newAlias === null) return;
+    try {
+      const updated = await api(`/api/runs/${currentRun.run_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alias: newAlias }),
+      });
+      currentRun = { ...currentRun, ...updated };
+      refreshToolbarState();
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not rename job: " + err.message);
+    }
+  }
+  jobNameDisplay.addEventListener("click", renameJob);
+
+  noteBtn.addEventListener("click", async () => {
+    if (!currentRun) {
+      alert("Run this job first, then add a note.");
+      return;
+    }
+    const newNote = await promptDialog("Note for this job:", currentRun.note || "");
+    if (newNote === null) return;
+    try {
+      const updated = await api(`/api/runs/${currentRun.run_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: newNote }),
+      });
+      currentRun = { ...currentRun, ...updated };
+      refreshNoteRow();
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not save note: " + err.message);
+    }
+  });
+
+  markFinishedBtn.addEventListener("click", async () => {
+    if (!currentRun) return;
+    try {
+      const updated = await api(`/api/runs/${currentRun.run_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "completed" }),
+      });
+      currentRun = { ...currentRun, ...updated };
+      statusLine.textContent = "Status: completed (manually marked)";
+      statusLine.className = "status-line ok";
+      refreshToolbarState();
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not update status: " + err.message);
+    }
+  });
+
+  markFailedBtn.addEventListener("click", async () => {
+    if (!currentRun) return;
+    try {
+      const updated = await api(`/api/runs/${currentRun.run_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "failed" }),
+      });
+      currentRun = { ...currentRun, ...updated };
+      statusLine.textContent = "Status: failed (manually marked)";
+      statusLine.className = "status-line failed";
+      refreshToolbarState();
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not update status: " + err.message);
+    }
+  });
+
+  abortBtn.addEventListener("click", async () => {
+    if (!currentRun) return;
+    const ok = await confirmDialog(`Abort "${currentRun.job_name}"? The running process will be stopped.`, { confirmLabel: "Abort", danger: true });
+    if (!ok) return;
+    try {
+      await api(`/api/runs/${currentRun.run_id}/abort`, { method: "POST" });
+    } catch (err) {
+      alert("Could not abort: " + err.message);
+    }
+  });
+
+  deleteBtn.addEventListener("click", async () => {
+    if (!currentRun) return;
+    const removeFiles = await confirmDialog(
+      `Delete "${currentRun.job_name}"?\n\nThis removes it from the job history. Also delete its output directory (${currentRun.cwd || "unknown path"})? This cannot be undone.`,
+      { confirmLabel: "Delete + remove files", danger: true }
+    );
+    // A single confirm covers both "delete the history entry" (always) and
+    // "also remove files" (what the danger-styled confirm button means
+    // here) -- Cancel aborts the whole action rather than offering a third
+    // "delete history only" click, keeping this to one dialog.
+    if (!removeFiles) return;
+    try {
+      await api(`/api/runs/${currentRun.run_id}?remove_files=true`, { method: "DELETE" });
+      if (ws) try { ws.close(); } catch (e) { /* noop */ }
+      win.close();
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not delete job: " + err.message);
+    }
+  });
+
+  overwriteBtn.addEventListener("click", async () => {
+    if (!currentRun) return;
+    const cmdToRun = commandBox ? commandBox.value : "";
+    const ok = await confirmDialog(
+      `Overwrite "${currentRun.job_name}"? This re-runs into the SAME output directory (${currentRun.cwd}), overwriting its files:\n\n${cmdToRun || "(custom job — reruns with the current field values)"}`,
+      { confirmLabel: "Run (overwrite)", danger: true }
+    );
+    if (!ok) return;
+    try {
+      const payload = { internal_name: internalName, overwrite_run_id: currentRun.run_id };
+      if (def.is_custom) payload.field_values = collectValues();
+      else { payload.command = cmdToRun; payload.field_values = collectValues(); }
+      win.close();
+      const run = await api("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      openJobPopup(internalName, displayName, run);
+      refreshCommandCenter();
+    } catch (err) {
+      alert("Could not start overwrite run: " + err.message);
+    }
+  });
+
+  // --- Outputs tab: file listing, download, Clean / Harsh Clean --------
+  const outputsContent = body.querySelector('[data-tab-content="outputs"]');
+  let outputsLoaded = false;
+
+  function renderOutputsList(files, { withCheckboxes = false } = {}) {
+    if (!files.length) {
+      return '<div class="outputs-empty">No output files yet.</div>';
+    }
+    return `<div class="outputs-list">${files.map((f) => `
+      <div class="outputs-row" data-path="${escapeHtml(f.path)}">
+        ${withCheckboxes ? `<input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />` : ""}
+        <span class="out-path">${escapeHtml(f.path)}</span>
+        <span class="out-size">${formatBytes(f.size)}</span>
+        <span class="out-download" data-role="download" title="Download">⬇</span>
+      </div>`).join("")}</div>`;
+  }
+
+  function wireDownloadClicks(container) {
+    container.querySelectorAll('[data-role="download"]').forEach((el) => {
+      el.addEventListener("click", () => {
+        const row = el.closest(".outputs-row");
+        const url = `/api/runs/${currentRun.run_id}/files/download?path=${encodeURIComponent(row.dataset.path)}`;
+        window.open(url, "_blank");
+      });
+    });
+  }
+
+  async function loadOutputsTab() {
+    if (!currentRun) return;
+    outputsContent.innerHTML = '<div class="outputs-empty">Loading…</div>';
+    try {
+      const { files } = await api(`/api/runs/${currentRun.run_id}/files`);
+      outputsContent.innerHTML = `
+        <div class="outputs-toolbar">
+          <button class="btn" data-role="clean-btn">🧹 Clean</button>
+          <button class="btn danger" data-role="harsh-clean-btn">🔥 Harsh Clean</button>
+          <button class="btn" data-role="download-selected-btn">⬇ Download selected as .zip</button>
+        </div>
+        ${renderOutputsList(files, { withCheckboxes: true })}
+      `;
+      wireDownloadClicks(outputsContent);
+
+      outputsContent.querySelector('[data-role="download-selected-btn"]').addEventListener("click", () => {
+        const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
+          .map((cb) => cb.closest(".outputs-row").dataset.path);
+        if (!paths.length) { alert("Check at least one file first."); return; }
+        const qs = paths.map((p) => `path=${encodeURIComponent(p)}`).join("&");
+        window.open(`/api/runs/${currentRun.run_id}/files/zip?${qs}`, "_blank");
+      });
+
+      async function runClean(harsh) {
+        const { files: candidates } = await api(`/api/runs/${currentRun.run_id}/files?harsh=${harsh}`);
+        outputsContent.innerHTML = `
+          <p style="color:var(--text-dim);font-size:11px;">
+            ${harsh ? "Harsh" : "Gentle"} clean review — a suggested selection is pre-checked
+            (generic housekeeping patterns${harsh ? " + files over 100 MB" : ""}; see the Outputs
+            tab docs). Nothing is deleted until you review and confirm below.
+          </p>
+          ${renderOutputsList(candidates, { withCheckboxes: true })}
+          <div class="outputs-toolbar" style="margin-top:8px;">
+            <button class="btn danger" data-role="confirm-delete-btn">Delete checked files</button>
+            <button class="btn" data-role="cancel-clean-btn">Cancel</button>
+          </div>
+        `;
+        outputsContent.querySelector('[data-role="cancel-clean-btn"]').addEventListener("click", loadOutputsTab);
+        outputsContent.querySelector('[data-role="confirm-delete-btn"]').addEventListener("click", async () => {
+          const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
+            .map((cb) => cb.closest(".outputs-row").dataset.path);
+          if (!paths.length) { alert("Nothing checked — nothing to delete."); return; }
+          const ok = await confirmDialog(`Delete ${paths.length} file(s)? This cannot be undone.`, { confirmLabel: "Delete", danger: true });
+          if (!ok) return;
+          try {
+            await api(`/api/runs/${currentRun.run_id}/files/delete`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ relative_paths: paths }),
+            });
+          } catch (err) {
+            alert("Could not delete files: " + err.message);
+          }
+          loadOutputsTab();
+        });
+      }
+
+      outputsContent.querySelector('[data-role="clean-btn"]').addEventListener("click", () => runClean(false));
+      outputsContent.querySelector('[data-role="harsh-clean-btn"]').addEventListener("click", () => runClean(true));
+    } catch (err) {
+      outputsContent.innerHTML = `<div class="outputs-empty">Could not load output files: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // --- Collapse / Close ------------------------------------------------
+  toolbar.querySelector('[data-action="collapse"]').addEventListener("click", () => win.minimize());
+  toolbar.querySelector('[data-action="close"]').addEventListener("click", () => win.close());
+
+  // --- Run / live status -------------------------------------------------
+
   function connectWebSocket(runId) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/runs/${runId}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/runs/${runId}`);
     ws.onmessage = (evt) => {
       const msg = JSON.parse(evt.data);
       if (msg.type === "stdout") appendOutputLine(msg.line, false);
@@ -375,7 +774,10 @@ async function openJobPopup(internalName, displayName, isCustom) {
       else if (msg.type === "status") {
         statusLine.textContent = `Status: ${msg.status}` +
           (msg.exit_code !== undefined && msg.exit_code !== null ? ` (exit ${msg.exit_code})` : "");
-        statusLine.className = "status-line " + (msg.status === "completed" ? "ok" : msg.status === "failed" ? "failed" : "");
+        statusLine.className = "status-line " + (msg.status === "completed" ? "ok" : (msg.status === "failed" || msg.status === "aborted") ? "failed" : "");
+        if (currentRun) currentRun.status = msg.status;
+        refreshToolbarState();
+        refreshCommandCenter();
       } else if (msg.type === "error") {
         appendOutputLine(msg.line, true);
       }
@@ -384,49 +786,232 @@ async function openJobPopup(internalName, displayName, isCustom) {
   }
 
   const runBtn = body.querySelector('[data-role="run-btn"]');
-  runBtn.addEventListener("click", async () => {
-    runBtn.disabled = true;
-    statusLine.textContent = "Starting…";
-    statusLine.className = "status-line";
-    try {
-      const payload = { internal_name: internalName };
-      if (def.is_custom) {
-        payload.field_values = collectValues();
-      } else {
-        payload.command = commandBox.value;
+  if (isReopen) {
+    // Reopening history: don't offer a bare "Run" (that's what Overwrite,
+    // in the toolbar, is for — re-running into the SAME job explicitly).
+    // Show status/output immediately instead.
+    const commandRow = body.querySelector('[data-role="command-row"]');
+    if (commandRow) commandRow.querySelector('[data-role="run-btn"]').style.display = "none";
+    statusLine.textContent = `Status: ${currentRun.status}`;
+    statusLine.className = "status-line " + (currentRun.status === "completed" ? "ok" : (currentRun.status === "failed" || currentRun.status === "aborted") ? "failed" : "");
+    connectWebSocket(currentRun.run_id);
+  } else {
+    runBtn.addEventListener("click", async () => {
+      runBtn.disabled = true;
+      statusLine.textContent = "Starting…";
+      statusLine.className = "status-line";
+      try {
+        const payload = { internal_name: internalName };
+        if (def.is_custom) {
+          payload.field_values = collectValues();
+        } else {
+          payload.command = commandBox.value;
+          payload.field_values = collectValues();
+          // Tell the backend which <JobDir>/jobNNN this command's --o targets,
+          // so it creates/tracks that dir and can renumber if it was taken.
+          payload.subdir = popupOutputSubdir;
+        }
+        const run = await api("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        currentRun = run;
+        refreshToolbarState();
+        connectWebSocket(run.run_id);
+        refreshCommandCenter();
+      } catch (err) {
+        appendOutputLine("Failed to start run: " + err.message, true);
+      } finally {
+        runBtn.disabled = false;
       }
-      const run = await api("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      connectWebSocket(run.run_id);
-      refreshRunningJobsBar();
-    } catch (err) {
-      appendOutputLine("Failed to start run: " + err.message, true);
-    } finally {
-      runBtn.disabled = false;
-    }
-  });
+    });
+  }
 
   const win = new WinBox({
     title: displayName,
-    width: "620px",
-    height: "700px",
+    width: "660px",
+    height: "740px",
     x: "center",
     y: "center",
     mount: body,
     class: ["no-full"],
+    onclose: () => { if (ws) try { ws.close(); } catch (e) { /* noop */ } return false; },
   });
   openPopups[popupId] = win;
 }
 
 loadCatalog().catch((err) => {
-  document.getElementById("emptyState").innerHTML =
-    `<p style="color:#e2584d">Failed to load job catalog: ${escapeHtml(err.message)}</p>`;
+  document.getElementById("ccHint").textContent = `Failed to load job catalog: ${err.message}`;
 });
 
-// --- Project switching + job history ----------------------------------
+// --- Command Center (job history: table / timeline) -----------------------
+
+const CC_VIEW_KEY = "relion_us_cc_view";
+const CC_DIRECTION_KEY = "relion_us_cc_direction";
+let ccRuns = [];
+let ccView = "table";
+let ccSort = { key: "started_at", dir: "desc" };
+let ccDirection = "desc"; // timeline: 'desc' = newest first, 'asc' = oldest first
+try {
+  const savedView = localStorage.getItem(CC_VIEW_KEY);
+  if (savedView === "table" || savedView === "timeline") ccView = savedView;
+  const savedDir = localStorage.getItem(CC_DIRECTION_KEY);
+  if (savedDir === "asc" || savedDir === "desc") ccDirection = savedDir;
+} catch (e) { /* fall back to defaults */ }
+
+function statusBadge(status) {
+  return `<span class="cc-status-badge status-${escapeHtml(status || "pending")}">${escapeHtml(status || "pending")}</span>`;
+}
+
+function sortedRuns() {
+  const rows = ccRuns.slice();
+  const { key, dir } = ccSort;
+  rows.sort((a, b) => {
+    let av = a[key];
+    let bv = b[key];
+    if (key === "job_name") { av = (av || "").toLowerCase(); bv = (bv || "").toLowerCase(); }
+    if (av === undefined || av === null) av = "";
+    if (bv === undefined || bv === null) bv = "";
+    if (av < bv) return dir === "asc" ? -1 : 1;
+    if (av > bv) return dir === "asc" ? 1 : -1;
+    return 0;
+  });
+  return rows;
+}
+
+function renderTable() {
+  const tbody = document.getElementById("ccTableBody");
+  const empty = document.getElementById("ccTableEmpty");
+  tbody.innerHTML = "";
+  const rows = sortedRuns();
+  empty.classList.toggle("hidden", rows.length > 0);
+  for (const run of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(run.job_name || "job???")}${run.note ? '<span class="cc-job-note-icon" title="' + escapeHtml(run.note) + '">📝</span>' : ""}</td>
+      <td>${escapeHtml(run.display_name || run.internal_name)}</td>
+      <td>${statusBadge(run.status)}</td>
+      <td>${formatTimestamp(run.started_at)}</td>
+      <td>${formatDuration(run.started_at, run.ended_at)}</td>
+    `;
+    tr.addEventListener("click", () => reopenRun(run));
+    tbody.appendChild(tr);
+  }
+  document.querySelectorAll("#ccTable th[data-sort]").forEach((th) => {
+    const arrow = th.querySelector(".sort-arrow");
+    arrow.textContent = th.dataset.sort === ccSort.key ? (ccSort.dir === "asc" ? "▲" : "▼") : "";
+  });
+}
+
+function renderTimeline() {
+  const list = document.getElementById("ccTimelineList");
+  const empty = document.getElementById("ccTimelineEmpty");
+  list.innerHTML = "";
+  let rows = ccRuns.slice().sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+  if (ccDirection === "desc") rows = rows.reverse();
+  empty.classList.toggle("hidden", rows.length > 0);
+  for (const run of rows) {
+    const card = document.createElement("div");
+    card.className = "cc-card";
+    // Lineage: inputs that came from another job's output are shown as a
+    // clickable "from: jobNNN" chip (see backend list_runs input_links);
+    // any remaining detected input files are listed plainly.
+    const links = run.input_links || [];
+    const linkedPaths = new Set(links.map((l) => l.path));
+    let inputsLine = "";
+    if (links.length) {
+      const uniqueJobs = {};
+      links.forEach((l) => { uniqueJobs[l.run_id] = l.job_name; });
+      const chips = Object.entries(uniqueJobs)
+        .map(([rid, name]) => `<span class="cc-input-job" data-run-id="${escapeHtml(rid)}" title="Open ${escapeHtml(name)}">↳ from ${escapeHtml(name)}</span>`)
+        .join(" ");
+      inputsLine += `<div class="cc-card-inputs"><span class="cc-inputs-label">Inputs from:</span> ${chips}</div>`;
+    }
+    const looseInputs = (run.detected_inputs || []).filter((p) => !linkedPaths.has(p));
+    if (looseInputs.length) {
+      inputsLine += `<div class="cc-card-inputs"><span class="cc-inputs-label">Detected inputs:</span> ${looseInputs.map(escapeHtml).join(", ")}</div>`;
+    }
+    const noteLine = run.note ? `<div class="cc-card-note">📝 ${escapeHtml(run.note)}</div>` : "";
+    card.innerHTML = `
+      <div class="cc-card-top">
+        <span class="cc-card-name">${escapeHtml(run.job_name || "job???")}</span>
+        <span class="cc-card-type">${escapeHtml(run.display_name || run.internal_name)}</span>
+        ${statusBadge(run.status)}
+      </div>
+      <div class="cc-card-meta">${formatTimestamp(run.started_at)} · ${formatDuration(run.started_at, run.ended_at)}</div>
+      ${inputsLine}
+      ${noteLine}
+    `;
+    card.addEventListener("click", () => reopenRun(run));
+    // Clicking a lineage chip opens the PRODUCING job, not this card's job.
+    card.querySelectorAll(".cc-input-job").forEach((chip) => {
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const producer = ccRuns.find((r) => r.run_id === chip.dataset.runId);
+        if (producer) reopenRun(producer);
+      });
+    });
+    list.appendChild(card);
+  }
+}
+
+function renderCommandCenterViews() {
+  document.getElementById("ccTableView").classList.toggle("hidden", ccView !== "table");
+  document.getElementById("ccTimelineView").classList.toggle("hidden", ccView !== "timeline");
+  document.getElementById("ccDirectionBtn").style.display = ccView === "timeline" ? "inline-block" : "none";
+  document.getElementById("ccDirectionBtn").textContent = ccDirection === "desc" ? "Newest first ↓" : "Oldest first ↑";
+  if (ccView === "table") renderTable();
+  else renderTimeline();
+}
+
+async function refreshCommandCenter() {
+  try {
+    const proj = await api("/api/project");
+    ccRuns = proj.history || [];
+  } catch (err) {
+    ccRuns = [];
+  }
+  renderCommandCenterViews();
+}
+
+function reopenRun(run) {
+  // Note: openJobPopup fetches the job definition fresh from
+  // /api/jobs/{internal_name} and uses ITS is_custom flag throughout, so we
+  // don't need (and shouldn't try) to infer custom-vs-RELION from the run
+  // summary here.
+  openJobPopup(run.internal_name, run.display_name || run.internal_name, run);
+}
+
+document.querySelectorAll(".cc-view-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    ccView = btn.dataset.view;
+    try { localStorage.setItem(CC_VIEW_KEY, ccView); } catch (e) { /* noop */ }
+    document.querySelectorAll(".cc-view-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    renderCommandCenterViews();
+  });
+});
+document.querySelectorAll(".cc-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === ccView));
+
+document.getElementById("ccDirectionBtn").addEventListener("click", () => {
+  ccDirection = ccDirection === "desc" ? "asc" : "desc";
+  try { localStorage.setItem(CC_DIRECTION_KEY, ccDirection); } catch (e) { /* noop */ }
+  renderCommandCenterViews();
+});
+
+document.querySelectorAll("#ccTable th[data-sort]").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (ccSort.key === key) {
+      ccSort.dir = ccSort.dir === "asc" ? "desc" : "asc";
+    } else {
+      ccSort = { key, dir: key === "started_at" ? "desc" : "asc" };
+    }
+    renderTable();
+  });
+});
+
+// --- Project switching -------------------------------------------------
 
 const projectDirLabel = document.getElementById("projectDirLabel");
 const changeProjectBtn = document.getElementById("changeProjectBtn");
@@ -437,7 +1022,6 @@ const projectBrowser = document.getElementById("projectBrowser");
 const projectModalError = document.getElementById("projectModalError");
 const notAProjectOverlay = document.getElementById("notAProjectOverlay");
 const notAProjectError = document.getElementById("notAProjectError");
-const runningJobsBar = document.getElementById("runningJobsBar");
 
 let pendingProjectPath = null; // path awaiting a "start new / pick different" decision
 
@@ -466,86 +1050,6 @@ async function refreshProjectLabel() {
   } catch (err) {
     projectDirLabel.textContent = "(unknown project)";
   }
-}
-
-async function refreshRunningJobsBar() {
-  let history = [];
-  try {
-    const proj = await api("/api/project");
-    history = proj.history || [];
-  } catch (err) {
-    runningJobsBar.innerHTML = "";
-    return;
-  }
-  runningJobsBar.innerHTML = "";
-  if (!history.length) return;
-
-  const title = document.createElement("div");
-  title.className = "running-jobs-title";
-  title.textContent = "Job history for this project";
-  runningJobsBar.appendChild(title);
-
-  const list = document.createElement("div");
-  list.className = "running-jobs-list";
-  history.slice().reverse().forEach((run) => {
-    const chip = document.createElement("div");
-    chip.className = "run-chip status-" + run.status;
-    chip.title = run.command || "";
-    chip.innerHTML = `<span class="run-chip-name">${escapeHtml(run.display_name)}</span>
-                       <span class="run-chip-status">${escapeHtml(run.status)}</span>`;
-    chip.addEventListener("click", () => openRunHistoryPopup(run));
-    list.appendChild(chip);
-  });
-  runningJobsBar.appendChild(list);
-}
-
-function appendPlainLine(container, text, isStderr) {
-  const line = document.createElement("div");
-  line.className = "output-line" + (isStderr ? " stderr" : "");
-  line.textContent = text;
-  container.appendChild(line);
-  container.scrollTop = container.scrollHeight;
-}
-
-function openRunHistoryPopup(runSummary) {
-  const body = document.createElement("div");
-  body.className = "job-popup";
-  body.innerHTML = `
-    <div class="job-desc-bar">${escapeHtml(runSummary.command || "(custom job — see live output for the summary)")}</div>
-    <div class="command-row">
-      <span class="status-line" data-role="status-line">Status: ${escapeHtml(runSummary.status)}</span>
-    </div>
-    <div class="live-output" data-role="live-output"></div>
-  `;
-  const liveOutput = body.querySelector('[data-role="live-output"]');
-  const statusLine = body.querySelector('[data-role="status-line"]');
-
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/runs/${runSummary.run_id}`);
-  ws.onmessage = (evt) => {
-    const msg = JSON.parse(evt.data);
-    if (msg.type === "stdout") appendPlainLine(liveOutput, msg.line, false);
-    else if (msg.type === "stderr") appendPlainLine(liveOutput, msg.line, true);
-    else if (msg.type === "status") {
-      statusLine.textContent = `Status: ${msg.status}` +
-        (msg.exit_code !== undefined && msg.exit_code !== null ? ` (exit ${msg.exit_code})` : "");
-    } else if (msg.type === "error") {
-      statusLine.textContent =
-        `Status: ${runSummary.status} (live transcript unavailable — the backend was restarted since this run)`;
-    }
-  };
-  ws.onerror = () => appendPlainLine(liveOutput, "[websocket error]", true);
-
-  new WinBox({
-    title: runSummary.display_name,
-    width: "560px",
-    height: "500px",
-    x: "center",
-    y: "center",
-    mount: body,
-    class: ["no-full"],
-    onclose: () => { try { ws.close(); } catch (e) { /* noop */ } return false; },
-  });
 }
 
 async function browseTo(path) {
@@ -614,7 +1118,7 @@ function closeProjectModal() {
 
 async function onProjectChanged() {
   await refreshProjectLabel();
-  await refreshRunningJobsBar();
+  await refreshCommandCenter();
 }
 
 changeProjectBtn.addEventListener("click", openProjectModal);
@@ -709,5 +1213,298 @@ document.getElementById("pickDifferentFolderBtn").addEventListener("click", () =
   openProjectModal();
 });
 
+// ==========================================================================
+// Tomogram / particle-pick visualizer (a tool, not a job). Server slices the
+// MRC (mrcfile mmap -> PNG); picks are overlaid client-side using
+// DeepETPicker's model: a particle shows on every slice within +/-(diameter/2)
+// of its centre, with radius sqrt(r^2 - delta^2). See backend/viz.py.
+// ==========================================================================
+
+let vizCounter = 0;
+
+function choiceDialog(message, choices) {
+  // choices: [{key,label,danger?}] -> resolves to key (or null if dismissed)
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "mini-dialog-overlay";
+    const box = document.createElement("div");
+    box.className = "mini-dialog";
+    const msg = document.createElement("div");
+    msg.textContent = message;
+    const actions = document.createElement("div");
+    actions.className = "mini-dialog-actions";
+    choices.forEach((c) => {
+      const b = document.createElement("button");
+      b.className = "btn" + (c.danger ? " danger" : "") + (c.primary ? " primary" : "");
+      b.textContent = c.label;
+      b.addEventListener("click", () => { overlay.remove(); resolve(c.key); });
+      actions.appendChild(b);
+    });
+    box.appendChild(msg); box.appendChild(actions); overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
+}
+
+async function openVisualizer() {
+  vizCounter += 1;
+  const body = document.createElement("div");
+  body.className = "viz-popup";
+  body.innerHTML = `
+    <div class="viz-inputs">
+      <label>STAR (optimiser/tomograms/particles) or MRC:
+        <input type="text" data-role="viz-path" placeholder="e.g. Tomograms/job012/tomograms.star or TS_01.mrc" />
+      </label>
+      <label>Particles/coords STAR (optional, if separate):
+        <input type="text" data-role="viz-particles" placeholder="e.g. particles.star" />
+      </label>
+      <div class="viz-inputs-row">
+        <button class="btn primary" data-role="viz-load">Load</button>
+        <select data-role="viz-tomo" style="display:none"></select>
+        <span class="status-line" data-role="viz-status"></span>
+      </div>
+    </div>
+    <div class="viz-controls" data-role="viz-controls" style="display:none">
+      <div class="viz-ctrl-row">
+        <span>Axis:</span>
+        <button class="btn viz-axis active" data-axis="z">XY (Z)</button>
+        <button class="btn viz-axis" data-axis="y">XZ (Y)</button>
+        <button class="btn viz-axis" data-axis="x">ZY (X)</button>
+        <label class="viz-check"><input type="checkbox" data-role="viz-showpicks" checked /> Show picks</label>
+      </div>
+      <div class="viz-ctrl-row">
+        <span data-role="viz-slice-label">Slice</span>
+        <input type="range" data-role="viz-slice" min="0" max="0" value="0" style="flex:1" />
+      </div>
+      <div class="viz-ctrl-row">
+        <span>Contrast</span>
+        <input type="range" data-role="viz-lo" min="0" max="100" value="0" title="black point" />
+        <input type="range" data-role="viz-hi" min="0" max="100" value="100" title="white point" />
+      </div>
+      <div class="viz-ctrl-row">
+        <span>Pick Ø (vox)</span>
+        <input type="range" data-role="viz-diam" min="2" max="80" value="16" />
+        <span data-role="viz-diam-val">16</span>
+        <span>Line</span>
+        <input type="range" data-role="viz-width" min="1" max="6" value="2" />
+      </div>
+    </div>
+    <div class="viz-stage" data-role="viz-stage" style="display:none">
+      <div class="viz-image-wrap" data-role="viz-wrap">
+        <img data-role="viz-img" alt="tomogram slice" />
+        <canvas data-role="viz-overlay"></canvas>
+      </div>
+      <div class="viz-meta" data-role="viz-meta"></div>
+    </div>
+  `;
+
+  const q = (sel) => body.querySelector(sel);
+  const statusEl = q('[data-role="viz-status"]');
+  const state = {
+    mrc: null, particles: null, tomo: null, vinfo: null, picks: [],
+    axis: "z", index: 0, lo: null, hi: null, diameter: 16, width: 2, showPicks: true,
+  };
+
+  function axisDims() {
+    const v = state.vinfo;
+    if (state.axis === "z") return { w: v.nx, h: v.ny, depth: v.nz };
+    if (state.axis === "y") return { w: v.nx, h: v.nz, depth: v.ny };
+    return { w: v.ny, h: v.nz, depth: v.nx }; // axis x
+  }
+
+  function drawOverlay() {
+    const img = q('[data-role="viz-img"]');
+    const cv = q('[data-role="viz-overlay"]');
+    if (!state.vinfo || !img.naturalWidth) return;
+    const dims = axisDims();
+    const cw = img.clientWidth, ch = img.clientHeight;
+    cv.width = cw; cv.height = ch;
+    cv.style.width = cw + "px"; cv.style.height = ch + "px";
+    const ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, cw, ch);
+    if (!state.showPicks || !state.picks.length) return;
+    const sx = cw / dims.w, sy = ch / dims.h;
+    const r = state.diameter / 2;
+    const idx = state.index;
+    const palette = ["#39d353", "#ff6ac1", "#f5a623", "#4aa3ff", "#e5484d"];
+    for (const pk of state.picks) {
+      let center, colVal, rowVal;
+      if (state.axis === "z") { center = pk.z; colVal = pk.x; rowVal = pk.y; }
+      else if (state.axis === "y") { center = pk.y; colVal = pk.x; rowVal = pk.z; }
+      else { center = pk.x; colVal = pk.y; rowVal = pk.z; }
+      const d = Math.abs(idx - center);
+      if (d > r) continue;
+      const rr = Math.sqrt(Math.max(0, r * r - d * d));
+      ctx.beginPath();
+      ctx.arc(colVal * sx, rowVal * sy, Math.max(1, rr * sx), 0, 2 * Math.PI);
+      ctx.strokeStyle = palette[(pk.class || 0) % palette.length];
+      ctx.lineWidth = state.width;
+      ctx.stroke();
+    }
+  }
+
+  function renderSlice() {
+    if (!state.mrc || !state.vinfo) return;
+    const img = q('[data-role="viz-img"]');
+    const params = new URLSearchParams({
+      mrc_path: state.mrc, axis: state.axis, index: String(state.index),
+    });
+    if (state.lo != null) params.set("lo", String(state.lo));
+    if (state.hi != null) params.set("hi", String(state.hi));
+    img.onload = drawOverlay;
+    img.src = `/api/viz/slice?${params.toString()}`;
+    q('[data-role="viz-meta"]').textContent =
+      `${state.tomo || ""}  ·  ${state.vinfo.nx}×${state.vinfo.ny}×${state.vinfo.nz}` +
+      (state.vinfo.voxel_size ? `  ·  ${state.vinfo.voxel_size.toFixed(2)} Å/vox` : "") +
+      `  ·  ${state.picks.length} picks`;
+  }
+
+  function setupSliceRange() {
+    const dims = axisDims();
+    const slider = q('[data-role="viz-slice"]');
+    slider.max = String(dims.depth - 1);
+    state.index = Math.floor(dims.depth / 2);
+    slider.value = String(state.index);
+    q('[data-role="viz-slice-label"]').textContent = `Slice ${state.index}/${dims.depth - 1}`;
+  }
+
+  async function loadVolume(mrcPath) {
+    statusEl.textContent = "Loading volume…";
+    try {
+      state.mrc = mrcPath;
+      state.vinfo = await api(`/api/viz/volume-info?mrc_path=${encodeURIComponent(mrcPath)}`);
+      // contrast sliders map 0..100 -> value_min..value_max
+      state.lo = state.vinfo.contrast_lo;
+      state.hi = state.vinfo.contrast_hi;
+      const vmin = state.vinfo.value_min, vmax = state.vinfo.value_max, span = (vmax - vmin) || 1;
+      q('[data-role="viz-lo"]').value = String(Math.round(((state.lo - vmin) / span) * 100));
+      q('[data-role="viz-hi"]').value = String(Math.round(((state.hi - vmin) / span) * 100));
+      q('[data-role="viz-controls"]').style.display = "";
+      q('[data-role="viz-stage"]').style.display = "";
+      setupSliceRange();
+      renderSlice();
+      statusEl.textContent = "";
+    } catch (err) {
+      statusEl.textContent = "Could not load volume: " + err.message;
+    }
+  }
+
+  async function loadPicks(mrcPathForMatch) {
+    if (!state.particles) { state.picks = []; return; }
+    try {
+      const resp = await api(`/api/viz/picks`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ particles_path: state.particles, tomo_name: state.tomo || mrcPathForMatch, volume: state.vinfo }),
+      });
+      if (resp.matched === false) {
+        const choice = await choiceDialog(
+          "⚠ " + resp.message + "\n\nLoad these picks anyway, pick different files, or cancel?",
+          [
+            { key: "anyway", label: "Load anyway", primary: true },
+            { key: "reload", label: "Reload files" },
+            { key: "cancel", label: "Cancel", danger: true },
+          ]
+        );
+        if (choice !== "anyway") {
+          state.picks = [];
+          if (choice === "reload") { q('[data-role="viz-particles"]').focus(); }
+          return;
+        }
+      }
+      state.picks = resp.picks || [];
+    } catch (err) {
+      statusEl.textContent = "Could not load picks: " + err.message;
+      state.picks = [];
+    }
+  }
+
+  // --- Load button: inspect -> populate tomograms -> load volume+picks ---
+  q('[data-role="viz-load"]').addEventListener("click", async () => {
+    const path = q('[data-role="viz-path"]').value.trim();
+    state.particles = q('[data-role="viz-particles"]').value.trim() || null;
+    if (!path) { statusEl.textContent = "Enter a STAR or MRC path."; return; }
+    statusEl.textContent = "Inspecting…";
+    let info;
+    try {
+      info = await api(`/api/viz/inspect`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, particles_path: state.particles }),
+      });
+    } catch (err) { statusEl.textContent = "Error: " + err.message; return; }
+
+    if (info.particles_path) state.particles = info.particles_path;
+    if (info.needs_mrc) {
+      statusEl.textContent = (info.warnings || []).join(" ") || "Provide the MRC tomogram as the main path.";
+      return;
+    }
+    const tomos = info.tomograms || [];
+    const sel = q('[data-role="viz-tomo"]');
+    if (tomos.length > 1) {
+      sel.innerHTML = tomos.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
+      sel.style.display = "";
+      sel.onchange = async () => {
+        const t = tomos[sel.value];
+        state.tomo = t.name;
+        await loadVolume(t.mrc_path);
+        await loadPicks(t.mrc_path);
+        renderSlice();
+      };
+    } else {
+      sel.style.display = "none";
+    }
+    if (!tomos.length) { statusEl.textContent = "No tomogram volume found to display."; return; }
+    const t = tomos[0];
+    state.tomo = t.name;
+    await loadVolume(t.mrc_path);
+    await loadPicks(t.mrc_path);
+    renderSlice();
+  });
+
+  // --- Controls ---
+  q('[data-role="viz-slice"]').addEventListener("input", (e) => {
+    state.index = parseInt(e.target.value, 10);
+    const dims = axisDims();
+    q('[data-role="viz-slice-label"]').textContent = `Slice ${state.index}/${dims.depth - 1}`;
+    renderSlice();
+  });
+  body.querySelectorAll(".viz-axis").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      body.querySelectorAll(".viz-axis").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.axis = btn.dataset.axis;
+      setupSliceRange();
+      renderSlice();
+    });
+  });
+  function contrastFromSliders() {
+    const v = state.vinfo; if (!v) return;
+    const vmin = v.value_min, span = (v.value_max - v.value_min) || 1;
+    let lo = vmin + (parseInt(q('[data-role="viz-lo"]').value, 10) / 100) * span;
+    let hi = vmin + (parseInt(q('[data-role="viz-hi"]').value, 10) / 100) * span;
+    if (hi <= lo) hi = lo + span * 0.01;
+    state.lo = lo; state.hi = hi;
+    renderSlice();
+  }
+  q('[data-role="viz-lo"]').addEventListener("input", contrastFromSliders);
+  q('[data-role="viz-hi"]').addEventListener("input", contrastFromSliders);
+  q('[data-role="viz-diam"]').addEventListener("input", (e) => {
+    state.diameter = parseInt(e.target.value, 10);
+    q('[data-role="viz-diam-val"]').textContent = String(state.diameter);
+    drawOverlay();
+  });
+  q('[data-role="viz-width"]').addEventListener("input", (e) => { state.width = parseInt(e.target.value, 10); drawOverlay(); });
+  q('[data-role="viz-showpicks"]').addEventListener("change", (e) => { state.showPicks = e.target.checked; drawOverlay(); });
+
+  new WinBox({
+    title: "Tomogram Viewer",
+    width: "760px", height: "820px",
+    x: "center", y: "center",
+    mount: body,
+    class: ["viz-winbox"],
+    onresize: () => drawOverlay(),
+  });
+}
+
+document.getElementById("visualizeBtn").addEventListener("click", openVisualizer);
+
 refreshProjectLabel();
-refreshRunningJobsBar();
+refreshCommandCenter();

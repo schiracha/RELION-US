@@ -5216,17 +5216,20 @@
     "commands_source": "bool RelionJob::getCommandsDynaMightJob(std::string &outputname, std::vector<std::string> &commands,\n                                       std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)\n{\n\tcommands.clear();\n\tinitialisePipeline(outputname, job_counter);\n\tstd::string command;\n\n\tcommand = joboptions[\"fn_dynamight_exe\"].getString();\n\n\tif (!is_continue)\n\t{\n\t\t\n\n\t\tNode node(joboptions[\"fn_star\"].getString(), joboptions[\"fn_star\"].node_type);\n\t\tinputNodes.push_back(node);\n\t\tNode node2(joboptions[\"fn_map\"].getString(), joboptions[\"fn_map\"].node_type);\n\t\tinputNodes.push_back(node2);\n\t\t \n\t}\n\telse\n\t{\n\t\tint c = 0;\n\t\tif (joboptions[\"do_visualize\"].getBoolean()) c++;\n\t\tif (joboptions[\"do_inverse\"].getBoolean()) c++;\n\t\tif (joboptions[\"do_reconstruct\"].getBoolean()) c++;\n\t\tif (c == 0)\n\t\t{\n\t\t\terror_message = \"You need to select at least one task on one of the tabs...\";\n\t\t\treturn false;\n\t\t}\n\t\tif (c > 1)\n\t\t{\n\t\t\terror_message = \"You can not perform more than one task simultaneously...\";\n\t\t\treturn false;\n\t\t}\n\t}\n\n\tif (!is_continue || !(joboptions[\"do_visualize\"].getBoolean() || joboptions[\"do_inverse\"].getBoolean() || joboptions[\"do_reconstruct\"].getBoolean()) )\n\t{\n\t\tcommand += \" optimize-deformations \";\n\t\tcommand += \" --refinement-star-file \" + joboptions[\"fn_star\"].getString();\n\t\tcommand += \" --output-directory \" + outputname;\n\t\tcommand += \" --initial-model \" + joboptions[\"fn_map\"].getString();\n\t\tcommand += \" --n-gaussians \" + joboptions[\"nr_gaussians\"].getString();\n\t\tif (joboptions[\"initial_threshold\"].getString() != \"\")\n\t\tcommand += \" --initial-threshold \" + joboptions[\"initial_threshold\"].getString();\n\t\tcommand += \" --regularization-factor \"  + joboptions[\"reg_factor\"].getString();\n\t\tcommand += \" --n-threads \" + joboptions[\"nr_threads\"].getString();\n\n\t\tif (joboptions[\"do_preload\"].getBoolean())\n\t\t\tcommand += \" --preload-images \";\n\n\t\t\n\t\t\n\n\t}\n\telse if (joboptions[\"do_visualize\"].getBoolean())\n\t{\n\n\t\tcommand += \" explore-latent-space \" + outputname;\n\t\tcommand += \" --half-set \" + joboptions[\"halfset\"].getString();\n\n\t\tif (joboptions[\"fn_checkpoint\"].getString() != \"\")\n\t\t\tcommand += \" --checkpoint-file \" + joboptions[\"fn_checkpoint\"].getString();\n\n\t\t\n\t\t\n\t}\n\telse if (joboptions[\"do_inverse\"].getBoolean())\n\t{\n\t\tcommand += \" optimize-inverse-deformations \" + outputname;\n\t\tcommand += \" --n-epochs \" + joboptions[\"nr_epochs\"].getString();\n\n\t\tif (joboptions[\"fn_checkpoint\"].getString() != \"\")\n\t\t\tcommand += \" --checkpoint-file \" + joboptions[\"fn_checkpoint\"].getString();\n\n\t\tif (joboptions[\"do_store_deform\"].getBoolean())\n\t\t\tcommand += \" --save-deformations \";\n\n\t\tif (joboptions[\"do_preload\"].getBoolean())\n\t\t\tcommand += \" --preload-images\";\n\t}\n\telse if (joboptions[\"do_reconstruct\"].getBoolean())\n\t{\n\t\tcommand += \" deformable-backprojection \" + outputname;\n\t\tcommand += \" --batch-size \" + joboptions[\"backproject_batchsize\"].getString();\n\n\t\tif (joboptions[\"fn_checkpoint\"].getString() != \"\")\n\t\t\tcommand += \" --checkpoint-file \" + joboptions[\"fn_checkpoint\"].getString();\n\n\t\tif (joboptions[\"do_preload\"].getBoolean())\n\t\t\tcommand += \" --preload-images\";\n\n\t\t\n\t\t\n\n\t\tNode onode(outputname + \"backprojection/map_half1.mrc\", LABEL_DYNAMIGHT_HALFMAP);\n\t\toutputNodes.push_back(onode);\n\t\tNode onode2(outputname + \"backprojection/map_half2.mrc\", LABEL_DYNAMIGHT_HALFMAP);\n\t\toutputNodes.push_back(onode2);\n\n\t}\n\n\tif (joboptions[\"gpu_id\"].getString() != \"\")\n\t\tcommand += \" --gpu-id \" + joboptions[\"gpu_id\"].getString();\n\n\t\n\tcommand += \" \" + joboptions[\"other_args\"].getString();\n\tcommands.push_back(command);\n\n\t\n\n\treturn prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message, true);\n}",
     "program_guess": "{joboptions.fn_dynamight_exe}",
     "flags_used": [
-      "--refinement",
-      "--output",
-      "--initial",
-      "--n",
-      "--regularization",
-      "--preload",
-      "--half",
-      "--checkpoint",
-      "--save",
-      "--batch",
-      "--gpu"
+      "--refinement-star-file",
+      "--output-directory",
+      "--initial-model",
+      "--n-gaussians",
+      "--initial-threshold",
+      "--regularization-factor",
+      "--n-threads",
+      "--preload-images",
+      "--half-set",
+      "--checkpoint-file",
+      "--n-epochs",
+      "--save-deformations",
+      "--batch-size",
+      "--gpu-id"
     ],
     "tab_layout": {
       "tab_order": [
@@ -6273,19 +6276,21 @@
       "--centered",
       "--scale_factor",
       "--add_factor",
-      "--tilt",
-      "--mdoc",
-      "--nominal",
+      "--tilt-image-movie-pattern",
+      "--mdoc-file-pattern",
+      "--nominal-tilt-axis-angle",
+      "--nominal-pixel-size",
       "--voltage",
-      "--spherical",
-      "--amplitude",
-      "--optics",
-      "--dose",
+      "--spherical-aberration",
+      "--amplitude-contrast",
+      "--optics-group-name",
+      "--dose-per-movie-frame",
+      "--dose-per-tilt-image",
       "--prefix",
-      "--mtf",
-      "--invert",
-      "--images",
-      "--output"
+      "--mtf-file",
+      "--invert-defocus-handedness",
+      "--images-are-motion-corrected",
+      "--output-directory"
     ],
     "tab_layout": {
       "tab_order": [
@@ -6786,15 +6791,16 @@
     "commands_source": "bool RelionJob::getCommandsTomoDenoiseTomogramsJob(std::string &outputname, std::vector<std::string> &commands,\n                                            std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)\n{\n\tcommands.clear();\n\tinitialisePipeline(outputname, job_counter);\n\tstd::string command;\n\n\tint i = 0;\n\tif (joboptions[\"do_cryocare_train\"].getBoolean()) i++;\n\tif (joboptions[\"do_cryocare_predict\"].getBoolean()) i++;\n\n\tif (i != 1)\n\t{\n\t\terror_message = \"ERROR: you should (only) enable ONE of the methods: cryoCARE:train (--do_cryocare_train), cryoCARE:predict (--do_cryocare_predict)\";\n\t\treturn false;\n\t}\n\n\tif (joboptions[\"do_cryocare_train\"].getBoolean() && joboptions[\"do_cryocare_predict\"].getBoolean())\n\t{\n\t\terror_message = \"ERROR: you should (only) enable ONE of the methods: cryoCARE:train (--do_cryocare_train), cryoCARE:predict (--do_cryocare_predict)\";\n\t}\n\tif (joboptions[\"do_cryocare_train\"].getBoolean() &&  joboptions[\"tomograms_for_training\"].getString().length() == 0)\n\t{\n\t\terror_message = \"ERROR: cryoCARE training is enabled but the tomograms to train (--tomograms_for_training) on have not been specified.\";\n\t\treturn false;\n\t}\n\tif (joboptions[\"do_cryocare_predict\"].getBoolean() && joboptions[\"care_denoising_model\"].getString().length() == 0)\n\t{\n\t\terror_message = \"ERROR: cryoCARE predict is enabled but path to the denoising model (--care_denoising_model) generated in cryoCARE:train has not been specified.\";\n\t\treturn false;\n\t} \n\n\tcommand=\"`which relion_python_tomo_denoise` \";\n\n\tif (error_message != \"\") return false;\n\n\tif (joboptions[\"do_cryocare_train\"].getBoolean())\n\t{\n\t\tcommand += \" cryoCARE:train \";\n\t}\n\tif (joboptions[\"do_cryocare_predict\"].getBoolean())\n\t{\n\t\tcommand += \" cryoCARE:predict \";\n\t}\n\tif (joboptions[\"in_tomoset\"].getString() == \"\")\n\t{\n\t\terror_message = \"ERROR: you need to provide an input STAR file\";\n\t\treturn false;\n\t}\n\tcommand += \" --tomogram-star-file \" + joboptions[\"in_tomoset\"].getString();\n\tNode node(joboptions[\"in_tomoset\"].getString(), joboptions[\"in_tomoset\"].node_type);\n\tinputNodes.push_back(node);\n\n    if (joboptions[\"cryocare_path\"].getString() != \"\")\n        command += \" --cryocare-path \"  + joboptions[\"cryocare_path\"].getString();\n\n\tcommand += \" --output-directory \" + outputname;\n\tNode node2(outputname+\"tomograms.star\", LABEL_DENOISE_TOMOGRAMS);\n\toutputNodes.push_back(node2);  \n\n\tif (joboptions[\"gpu_ids\"].getString().length() > 0)\n\t{\n\t\tstd::string s = joboptions[\"gpu_ids\"].getString();\n\t\tif (s.find(':') != std::string::npos || s.find(',') != std::string::npos) \n\t\t{\n\t\t\terror_message = \"ERROR: cryoCARE cannot currently use MPI or multiple GPUs in parallel. Only select one GPU.\";\n\t\t\treturn false;\n\t\t}\n\t\telse\n\t\t\tcommand += \" --gpu \" + joboptions[\"gpu_ids\"].getString() + ' ';\n\t}\n\telse\n\t{\n\t\terror_message = \"ERROR: You must state desired GPU ID.\";\n\t\treturn false;\n\t}\n\tif (joboptions[\"tomograms_for_training\"].getString().length() > 0 && joboptions[\"do_cryocare_train\"].getBoolean())\n\t{\n\t\tcommand += \" --training-tomograms \" + joboptions[\"tomograms_for_training\"].getString();\n\t\tcommand += \" --number-training-subvolumes \" + joboptions[\"number_training_subvolumes\"].getString();\n\t\tcommand += \" --subvolume-sidelength \" + joboptions[\"subvolume_dimensions\"].getString();\n\t}\n\tif (joboptions[\"denoising_tomo_name\"].getString().length() > 0 && joboptions[\"do_cryocare_predict\"].getBoolean())\n\t{\n\t\tcommand += \" --tomogram-name \" + joboptions[\"denoising_tomo_name\"].getString();\n\t}\n\tif (joboptions[\"care_denoising_model\"].getString().length() > 0 && joboptions[\"do_cryocare_predict\"].getBoolean())\n\t{\n\t\tcommand += \" --model-file \" + joboptions[\"care_denoising_model\"].getString();\n\t}\n\tif (joboptions[\"ntiles_x\"].getString().length() > 0 && joboptions[\"ntiles_y\"].getString().length() > 0 && joboptions[\"ntiles_z\"].getString().length() > 0 && joboptions[\"do_cryocare_predict\"].getBoolean())\n\t{\n\t\tcommand += \" --n-tiles \" + joboptions[\"ntiles_x\"].getString() + \" \" + joboptions[\"ntiles_y\"].getString() + \" \" + joboptions[\"ntiles_z\"].getString() + \" \";\n\t}\n\n\t\n\tcommand += \" \" + joboptions[\"other_args\"].getString();\n\tcommands.push_back(command);\n\n\treturn prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);\n}",
     "program_guess": "`which relion_python_tomo_denoise`",
     "flags_used": [
-      "--tomogram",
-      "--cryocare",
-      "--output",
+      "--tomogram-star-file",
+      "--cryocare-path",
+      "--output-directory",
       "--gpu",
-      "--training",
-      "--number",
-      "--subvolume",
-      "--model",
-      "--n"
+      "--training-tomograms",
+      "--number-training-subvolumes",
+      "--subvolume-sidelength",
+      "--tomogram-name",
+      "--model-file",
+      "--n-tiles"
     ],
     "tab_layout": {
       "tab_order": [
@@ -6872,12 +6878,12 @@
     "commands_source": "bool RelionJob::getCommandsTomoPickTomogramsJob(std::string &outputname, std::vector<std::string> &commands,\n                                       std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)\n{\n\tcommands.clear();\n\tinitialisePipeline(outputname, job_counter);\n\tstd::string command0, command, command2;\n\n\tif (error_message != \"\") return false;\n\n    if (joboptions[\"pick_mode\"].getString() == \"particles\" && joboptions[\"in_star_file\"].getString().length() > 0)\n    {\n        command0 = \"`which relion_python_tomo_get_particle_poses`\";\n        command0 += \" particles-from-star\";\n        command0 += \" --tomograms-file \" + joboptions[\"in_tomoset\"].getString();\n        command0 += \" --annotations-directory \" + outputname + \"annotations\";\n        command0 += \" --in-star-file \" + joboptions[\"in_star_file\"].getString();\n\n        command0 += \" \" + joboptions[\"other_args\"].getString();\n        commands.push_back(command0);\n\n        Node node(joboptions[\"in_star_file\"].getString(), joboptions[\"in_star_file\"].node_type);\n        inputNodes.push_back(node);\n    }\n\n\tcommand=\"`which relion_python_tomo_pick` \";\n\n\tif (joboptions[\"in_tomoset\"].getString() == \"\")\n\t{\n\t\terror_message = \"ERROR: you need to provide an input STAR file\";\n\t\treturn false;\n\t}\n\n\t \n\n\tcommand += \" \" + joboptions[\"pick_mode\"].getString();\n\tcommand += \" --tilt-series-star-file \" + joboptions[\"in_tomoset\"].getString();\n\t\n\n\tNode node(joboptions[\"in_tomoset\"].getString(), joboptions[\"in_tomoset\"].node_type);\n\tinputNodes.push_back(node);\n\n\tcommand += \" --output-directory \" + outputname;\n\n\t\n\tcommand += \" \" + joboptions[\"other_args\"].getString();\n\tcommands.push_back(command);\n\n\tcommand2 = \"`which relion_python_tomo_get_particle_poses`\";\n\tcommand2 += \" \" + joboptions[\"pick_mode\"].getString();\n\tcommand2 += \" --tilt-series-star-file \" + joboptions[\"in_tomoset\"].getString();\n\tcommand2 += \" --annotations-directory \" + outputname + \"annotations\";\n\tcommand2 += \" --output-directory \" + outputname;\n\n\tFileName fnt = joboptions[\"pick_mode\"].getString();\n\tif (!fnt.contains(\"particles\"))\n\t\tcommand2 += \" --spacing-angstroms \" + joboptions[\"particle_spacing\"].getString();\n\n\t\n\tcommand2 += \" \" + joboptions[\"other_args\"].getString();\n\tcommands.push_back(command2);\n\n\tstd::string mytype = LABEL_TOMOPICK_PARTS_PARTS;\n    if (fnt.contains(\"filaments\")) mytype = LABEL_TOMOPICK_PARTS_FILAMENT;\n    else if (fnt.contains(\"spheres\")) mytype = LABEL_TOMOPICK_PARTS_SPHERE;\n    else if (fnt.contains(\"surface\")) mytype = LABEL_TOMOPICK_PARTS_SURFACE;\n    Node node2(outputname+\"particles.star\", mytype);\n\toutputNodes.push_back(node2);\n\tNode node3(outputname+\"optimisation_set.star\", LABEL_TOMOPICK_OPTSET);\n\toutputNodes.push_back(node3);\n\n\treturn prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);\n}",
     "program_guess": "`which relion_python_tomo_pick`",
     "flags_used": [
-      "--tomograms",
-      "--annotations",
-      "--in",
-      "--tilt",
-      "--output",
-      "--spacing"
+      "--tomograms-file",
+      "--annotations-directory",
+      "--in-star-file",
+      "--tilt-series-star-file",
+      "--output-directory",
+      "--spacing-angstroms"
     ],
     "tab_layout": {
       "tab_order": [
@@ -6919,9 +6925,9 @@
     "commands_source": "bool RelionJob::getCommandsTomoExcludeTiltImagesJob(std::string &outputname, std::vector<std::string> &commands,\n                                       std::string &final_command, bool do_makedir, int job_counter, std::string &error_message)\n{\n\tcommands.clear();\n\tinitialisePipeline(outputname, job_counter);\n\tstd::string command;\n\n\tif (error_message != \"\") return false;\n\n\tcommand=\"`which relion_python_tomo_exclude_tilt_images` \";\n\n\tif (joboptions[\"in_tiltseries\"].getString() == \"\")\n\t{\n\t\terror_message = \"ERROR: you need to provide an input STAR file\";\n\t\treturn false;\n\t}\n\n\tcommand += \" --tilt-series-star-file \" + joboptions[\"in_tiltseries\"].getString();\n\tcommand += \" --cache-size \" + joboptions[\"cache_size\"].getString() + ' ';\n\n\tNode node(joboptions[\"in_tiltseries\"].getString(), joboptions[\"in_tiltseries\"].node_type);\n\tinputNodes.push_back(node);\n\n\tcommand += \" --output-directory \" + outputname;\n\tNode node2(outputname+\"selected_tilt_series.star\", LABEL_EXCLUDE_TOMOGRAMS);\n\toutputNodes.push_back(node2);\n\n\t\n\tcommand += \" \" + joboptions[\"other_args\"].getString();\n\tcommands.push_back(command);\n\n\treturn prepareFinalCommand(outputname, commands, final_command, do_makedir, error_message);\n}",
     "program_guess": "`which relion_python_tomo_exclude_tilt_images`",
     "flags_used": [
-      "--tilt",
-      "--cache",
-      "--output"
+      "--tilt-series-star-file",
+      "--cache-size",
+      "--output-directory"
     ],
     "tab_layout": {
       "tab_order": [

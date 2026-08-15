@@ -22,13 +22,53 @@ Endpoints:
                                               {internal_name, field_values} for custom jobs
                                               Executes EXACTLY `command` as
                                               given — see job_runner.py.
-  GET  /api/runs                          -> list all runs (for a "Running
-                                              jobs" panel / reopening a
-                                              popup after refresh)
+                                              Optional overwrite_run_id
+                                              re-runs into an earlier run's
+                                              own output directory + job
+                                              number (Command Center
+                                              'Overwrite' action) instead of
+                                              allocating a new one.
+  GET  /api/runs                          -> list all runs (for the Command
+                                              Center table/timeline)
   GET  /api/runs/{run_id}                 -> full state of one run
                                               (stdout/stderr buffers so far)
   WS   /ws/runs/{run_id}                  -> live stdout/stderr/status
                                               stream for one run
+  POST /api/runs/{run_id}/abort           -> Command Center 'Abort' action
+  PATCH /api/runs/{run_id}                -> Command Center 'Alias'/'Edit
+                                              Note'/'Mark as finished'/'Mark
+                                              as failed' actions. Body: any
+                                              of {alias, note, status}
+  DELETE /api/runs/{run_id}               -> Command Center 'Delete' action.
+                                              ?remove_files=true also deletes
+                                              the job's own output directory
+  GET  /api/runs/{run_id}/files           -> Outputs tab file listing.
+                                              ?harsh=true/false instead
+                                              returns the Clean/Harsh Clean
+                                              review list (files annotated
+                                              with a pre-checked `suggested`
+                                              bool -- see job_runner.py's
+                                              cleanup_candidates() for why
+                                              this is a suggestion, not a
+                                              port of RELION's own per-job
+                                              -type cleanup rules)
+  GET  /api/runs/{run_id}/files/download  -> download one output file
+                                              (?path=relative/path)
+  POST /api/runs/{run_id}/files/delete    -> delete a user-confirmed set of
+                                              output files (Clean/Harsh
+                                              Clean, or manual selection)
+  GET  /api/runs/{run_id}/files/zip       -> download a user-selected subset
+                                              of output files as one .zip
+                                              (repeat ?path=... per file)
+  POST /api/viz/inspect                   -> visualizer: classify an MRC/STAR
+                                              input, list its tomogram(s)
+  GET  /api/viz/volume-info               -> visualizer: MRC dims, voxel size,
+                                              default contrast
+  GET  /api/viz/slice                     -> visualizer: one slice as a PNG
+                                              (?mrc_path&axis&index&lo&hi)
+  POST /api/viz/picks                     -> visualizer: picks (voxel coords)
+                                              for a tomogram + filename-match
+                                              check
   GET  /api/project                       -> current project dir + whether
                                               it's a recognized RELION
                                               project + its run history +
@@ -66,15 +106,20 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
+import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 import job_registry
 import project_manager
+import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
 from job_runner import JobRunManager
 
@@ -122,13 +167,21 @@ def get_job_definition(internal_name: str):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         return CUSTOM_JOB_DEFINITIONS[internal_name]
     try:
-        return job_registry.build_job_definition(internal_name)
+        # Prospective RELION-style output dir (<JobDir>/jobNNN) for the draft's
+        # --o, matching RELION's run-from-project-root convention. Finalized at
+        # Run time (see job_runner.start_subprocess_job).
+        output_subdir = run_manager.prospective_subdir(internal_name)
+        return job_registry.build_job_definition(internal_name, output_subdir=output_subdir)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
 
 
 class DraftRequest(BaseModel):
     field_values: dict
+    # The output dir the popup is currently targeting (from the job
+    # definition's output_subdir). Kept stable across recomputes so the
+    # command's --o doesn't jump job numbers while the user edits fields.
+    output_subdir: str | None = None
 
 
 @app.post("/api/jobs/{internal_name}/draft")
@@ -139,8 +192,11 @@ def recompute_draft(internal_name: str, req: DraftRequest):
         raw = job_registry._load_raw()[internal_name]
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
-    draft, unmapped = job_registry._build_draft_command(raw, req.field_values)
-    return {"draft_command": draft, "unmapped_fields": unmapped}
+    output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
+    draft, unmapped = job_registry._build_draft_command(
+        raw, req.field_values, internal_name, output_subdir
+    )
+    return {"draft_command": draft, "unmapped_fields": unmapped, "output_subdir": output_subdir}
 
 
 class StartRunRequest(BaseModel):
@@ -148,6 +204,11 @@ class StartRunRequest(BaseModel):
     command: str | None = None
     field_values: dict | None = None
     subdir: str | None = None
+    # Command Center "Overwrite" job action (see job_runner.py's
+    # start_subprocess_job/start_custom_job docstrings): re-runs into the
+    # SAME output directory + job number as an earlier run, instead of
+    # allocating a new one.
+    overwrite_run_id: str | None = None
 
 
 @app.post("/api/runs")
@@ -163,7 +224,13 @@ async def start_run(req: StartRunRequest):
             # but *before* Run was clicked lands in the right place.
             return await runner(run_manager.project_dir, values)
 
-        run = await run_manager.start_custom_job(req.internal_name, display_name, factory)
+        try:
+            run = await run_manager.start_custom_job(
+                req.internal_name, display_name, factory,
+                field_values=values, overwrite_run_id=req.overwrite_run_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         return run.to_summary()
 
     if not req.command:
@@ -173,15 +240,144 @@ async def start_run(req: StartRunRequest):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {req.internal_name}")
     display_name = meta[1]
-    run = await run_manager.start_subprocess_job(
-        req.internal_name, display_name, req.command, subdir=req.subdir
-    )
+    try:
+        run = await run_manager.start_subprocess_job(
+            req.internal_name, display_name, req.command,
+            subdir=req.subdir, field_values=req.field_values,
+            overwrite_run_id=req.overwrite_run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return run.to_summary()
 
 
 @app.get("/api/runs")
 def list_runs():
     return run_manager.list_runs()
+
+
+@app.post("/api/runs/{run_id}/abort")
+async def abort_run(run_id: str):
+    """Command Center 'Abort' action (real RELION 'Abort running')."""
+    ok = await run_manager.abort_run(run_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="Run is not currently running (or doesn't exist)")
+    return {"ok": True}
+
+
+class RunUpdateRequest(BaseModel):
+    alias: str | None = None
+    note: str | None = None
+    status: str | None = None
+
+
+@app.patch("/api/runs/{run_id}")
+def update_run(run_id: str, req: RunUpdateRequest):
+    """Command Center 'Alias' / 'Edit Note' / 'Mark as finished'/'Mark as
+    failed' actions, combined into one endpoint since they're all small,
+    independent metadata edits. Any combination of fields may be given in
+    one call; each is applied in turn."""
+    updated: dict | None = None
+    if req.alias is not None:
+        updated = run_manager.set_alias(run_id, req.alias)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown run_id")
+    if req.note is not None:
+        updated = run_manager.set_note(run_id, req.note)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown run_id")
+    if req.status is not None:
+        try:
+            updated = run_manager.set_status(run_id, req.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown run_id")
+    if updated is None:
+        raise HTTPException(status_code=400, detail="Nothing to update -- provide alias, note, and/or status")
+    return updated
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str, remove_files: bool = False):
+    """Command Center 'Delete' action (real RELION 'Delete' job action).
+    remove_files=true also removes the job's own output directory -- see
+    job_runner.JobRunManager.delete_run's docstring for the safety checks."""
+    ok, reason = run_manager.delete_run(run_id, remove_files=remove_files)
+    if not ok:
+        status_code = 404 if reason == "Unknown run_id" else 409
+        raise HTTPException(status_code=status_code, detail=reason)
+    return {"ok": True, "message": reason}
+
+
+@app.get("/api/runs/{run_id}/files")
+def list_run_files(run_id: str, harsh: bool | None = None):
+    """Outputs tab file listing. Pass `harsh` (true/false) to get the Clean
+    / Harsh Clean review list instead (each file annotated with a
+    `suggested` bool for the pre-checked selection -- see
+    JobRunManager.cleanup_candidates' docstring for exactly what that
+    means and why it's a suggestion, not RELION's own per-job-type rule)."""
+    if harsh is None:
+        files = run_manager.list_output_files(run_id)
+    else:
+        files = run_manager.cleanup_candidates(run_id, harsh=harsh)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return {"files": files}
+
+
+@app.get("/api/runs/{run_id}/files/download")
+def download_run_file(run_id: str, path: str):
+    """Single-file download for the Outputs tab (star/mrc/mrcs/etc -- any
+    file actually present in the job's output directory)."""
+    resolved = run_manager.resolve_output_file(run_id, path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="File not found in this job's output directory")
+    return FileResponse(resolved, filename=resolved.name)
+
+
+class DeleteFilesRequest(BaseModel):
+    relative_paths: list[str]
+
+
+@app.post("/api/runs/{run_id}/files/delete")
+def delete_run_files(run_id: str, req: DeleteFilesRequest):
+    """Executes a user-confirmed Clean / Harsh Clean selection (or any
+    manual file selection from the Outputs tab) -- see
+    JobRunManager.delete_output_files' docstring."""
+    if not req.relative_paths:
+        raise HTTPException(status_code=400, detail="relative_paths is empty -- nothing to delete")
+    return run_manager.delete_output_files(run_id, req.relative_paths)
+
+
+@app.get("/api/runs/{run_id}/files/zip")
+def download_run_files_zip(run_id: str, path: list[str] = Query(...)):
+    """'Download selected as .zip' for the Outputs tab -- bounded to
+    whatever the user checked (not a recursive zip of the whole output
+    directory, which for cryo-EM/tomography outputs can be many GB): built
+    to a temp file rather than in memory, and cleaned up after the response
+    is sent via FastAPI's BackgroundTask."""
+    resolved_paths = []
+    for rel in path:
+        resolved = run_manager.resolve_output_file(run_id, rel)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail=f"File not found in this job's output directory: {rel}")
+        resolved_paths.append((rel, resolved))
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    tmp_path = Path(tmp.name)
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel, resolved in resolved_paths:
+            zf.write(resolved, arcname=rel)
+
+    def _cleanup():
+        tmp_path.unlink(missing_ok=True)
+
+    return FileResponse(
+        tmp_path, filename=f"{run_id}_outputs.zip", media_type="application/zip",
+        background=BackgroundTask(_cleanup),
+    )
 
 
 class ProjectPathRequest(BaseModel):
@@ -302,6 +498,74 @@ async def run_websocket(websocket: WebSocket, run_id: str):
     finally:
         if queue in run.subscribers:
             run.subscribers.remove(queue)
+
+
+# --------------------------------------------------------------------------
+# Tomogram / particle-pick visualizer (a plain tool, NOT a RELION job — it
+# never appears in the Command Center and writes nothing). See viz.py.
+# --------------------------------------------------------------------------
+
+
+class VizInspectRequest(BaseModel):
+    path: str
+    particles_path: str | None = None
+
+
+@app.post("/api/viz/inspect")
+def viz_inspect(req: VizInspectRequest):
+    try:
+        return viz.inspect(run_manager.project_dir, req.path, req.particles_path)
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/viz/volume-info")
+def viz_volume_info(mrc_path: str = Query(...)):
+    try:
+        return viz.volume_info(run_manager.project_dir, mrc_path)
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/viz/slice")
+def viz_slice(
+    mrc_path: str = Query(...),
+    axis: str = Query("z"),
+    index: int = Query(0),
+    lo: float | None = Query(None),
+    hi: float | None = Query(None),
+):
+    try:
+        png = viz.render_slice_png(run_manager.project_dir, mrc_path, axis, index, lo, hi)
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(content=png, media_type="image/png")
+
+
+class VizPicksRequest(BaseModel):
+    particles_path: str
+    tomo_name: str | None = None
+    # volume dims + voxel size, needed only to place centred-Angstrom coords
+    volume: dict | None = None
+
+
+@app.post("/api/viz/picks")
+def viz_picks(req: VizPicksRequest):
+    try:
+        return viz.load_picks(
+            run_manager.project_dir, req.particles_path, req.tomo_name, req.volume
+        )
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Browsers request this automatically on every page load; without a
+    route it's a spurious 404 in server logs and in browser-automation
+    error collectors (Playwright, etc.). No icon file yet, so just answer
+    with an empty 204 instead of a 404."""
+    return Response(status_code=204)
 
 
 # Serve the frontend last, so /api/* and /ws/* above take precedence.

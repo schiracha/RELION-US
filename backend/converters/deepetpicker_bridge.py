@@ -38,7 +38,19 @@ COORDS_COLUMNS = ("class_id", "x", "y", "z")
 
 
 def read_coords(path: PathLike) -> pd.DataFrame:
-    """Read a DeepETPicker .coords file (class_id, x, y, z; whitespace-separated)."""
+    """
+    Read a DeepETPicker .coords file into a class_id/x/y/z DataFrame.
+
+    DeepETPicker's own converter (utils/coords_to_relion4.py in
+    github.com/cbmi-group/DeepETPicker, verified 2026-08-14) reads the X/Y/Z
+    from the LAST three columns and only treats column 0 as class_id when
+    the row has exactly 4 columns — i.e. it accepts BOTH the 4-column
+    `class_id x y z` form and a bare 3-column `x y z` form (assigning
+    class_id = 1 in the latter). We match that tolerance here rather than
+    hard-requiring 4 columns, so a 3-column .coords that DeepETPicker itself
+    would accept doesn't get rejected. Coordinates are voxels of the
+    tomogram DeepETPicker was run on.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
@@ -48,12 +60,16 @@ def read_coords(path: PathLike) -> pd.DataFrame:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) != 4:
+        if len(parts) == 4:
+            class_id, x, y, z = parts
+        elif len(parts) == 3:
+            # bare `x y z` — DeepETPicker defaults class_id to 1 here
+            class_id, (x, y, z) = 1, parts
+        else:
             raise ValueError(
-                f"{path}:{lineno}: expected 'class_id x y z', got {len(parts)} "
-                f"field(s): {line!r}"
+                f"{path}:{lineno}: expected 'class_id x y z' (4 cols) or "
+                f"'x y z' (3 cols), got {len(parts)} field(s): {line!r}"
             )
-        class_id, x, y, z = parts
         rows.append((int(float(class_id)), float(x), float(y), float(z)))
     return pd.DataFrame(rows, columns=list(COORDS_COLUMNS))
 
@@ -63,6 +79,13 @@ def coords_to_relion_particles(
     tomo_name: str,
     binning_factor: float = 1.0,
     keep_class_id: bool = True,
+    swap_yz: bool = False,
+    flip_x: bool = False,
+    flip_y: bool = False,
+    flip_z: bool = False,
+    tomo_size_x: Optional[float] = None,
+    tomo_size_y: Optional[float] = None,
+    tomo_size_z: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Convert DeepETPicker coordinates (a .coords path, or an already-loaded
@@ -82,13 +105,24 @@ def coords_to_relion_particles(
     out = pd.DataFrame(
         {
             "rlnTomoName": [tomo_name] * len(df),
-            "rlnCoordinateX": df["x"] * binning_factor,
-            "rlnCoordinateY": df["y"] * binning_factor,
-            "rlnCoordinateZ": df["z"] * binning_factor,
+            "rlnCoordinateX": df["x"].to_numpy() * binning_factor,
+            "rlnCoordinateY": df["y"].to_numpy() * binning_factor,
+            "rlnCoordinateZ": df["z"].to_numpy() * binning_factor,
         }
     )
+    # Optional axis flips/swap, applied AFTER binning (so tomo_size_* are in
+    # the same rescaled units as the coordinates).
+    if swap_yz or flip_x or flip_y or flip_z:
+        from .coord_transform import apply_coordinate_transform
+
+        out = apply_coordinate_transform(
+            out,
+            swap_yz=swap_yz,
+            flip_x=flip_x, flip_y=flip_y, flip_z=flip_z,
+            tomo_size_x=tomo_size_x, tomo_size_y=tomo_size_y, tomo_size_z=tomo_size_z,
+        )
     if keep_class_id:
-        out["rlnClassNumber"] = df["class_id"].astype(int)
+        out["rlnClassNumber"] = df["class_id"].astype(int).to_numpy()
     return out
 
 

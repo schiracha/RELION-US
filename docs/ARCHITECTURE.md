@@ -5,7 +5,7 @@ RELION — not a fork or patch of RELION itself, and not a wrapper around
 RELION's own compiled GUI. It's a separate front end that reads RELION's
 own source to build accurate job forms, then drives RELION's real
 command-line programs as subprocesses, with format-conversion bridges for
-IMOD, Warp/M, and DeepETPicker folded in as three more entries in the same
+IMOD, Warp/M, DeepETPicker, and AreTomo2 folded in as four more entries in the same
 Jobs list.
 
 ## Why a companion tool instead of patching RELION itself
@@ -71,12 +71,16 @@ relion_us/
 │   │                        #   per-project run history persistence
 │   ├── project_manager.py   # RELION-project detection, project switching,
 │   │                        #   history load/save (see "Change Project" below)
-│   ├── custom_jobs.py       # wires the 3 converters in as Job types
+│   ├── custom_jobs.py       # wires the 4 converters in as Job types
+│   ├── viz.py               # tomogram/pick VIEWER (not a job): mrcfile mmap ->
+│   │                        #   PNG slices + pick JSON (see "Visualizer" below)
 │   ├── converters/          # pure-Python + subprocess format bridges
 │   │   ├── star_io.py           # thin wrapper over `starfile`, RELION-5 tomo aware
+│   │   ├── coord_transform.py   # shared axis swap/mirror for coordinate importers
 │   │   ├── imod_bridge.py       # IMOD .xf/.tlt/.mod <-> RELION tilt-series STAR
 │   │   ├── warp_bridge.py       # Warp/M metadata <-> RELION-5 STAR
-│   │   └── deepetpicker_bridge.py  # DeepETPicker coordinates -> particles.star
+│   │   ├── deepetpicker_bridge.py  # DeepETPicker coordinates -> particles.star
+│   │   └── aretomo_bridge.py    # AreTomo2 .aln -> IMOD .xf/.tlt for RELION import
 │   └── tests/                # pytest: job_registry regression suite (against
 │                              #   real extracted data) + converter unit tests
 ├── frontend/                 # vanilla JS/HTML/CSS, no build step; WinBox.js
@@ -119,6 +123,76 @@ reimplemented — fields without a literal matching flag are left out of the
 draft and listed as "unmapped," rather than guessed at, and the job's real
 RELION C++ source is one tab away for cross-checking. See the main
 `README.md`'s "How the draft command is built" for the full explanation.
+
+#### Draft-command overlays for RELION-5's Python tomo tools
+
+The `--<key>`-matches-the-flag rule holds for the ~27 core RELION programs,
+whose CLI flag names equal their internal option keys. It breaks for
+RELION-5's newer **Python tomo tools** (`relion_python_tomo_import`,
+`_pick`, `_denoise`, `_exclude_tilt_images`) and DynaMight, which use
+hyphenated multi-word flags (`--tilt-image-movie-pattern`,
+`--nominal-pixel-size`, `--output-directory`) that share no spelling with
+the snake_case option key (`movie_files`, `angpix`). Two bugs resulted, both
+found in an August 2026 audit of the import commands:
+
+1. **Truncated flags.** `extract_job_definitions.py`'s flag regex
+   (`--[A-Za-z0-9_]+`) stopped at the first hyphen, so `flags_used` recorded
+   `--tilt`, `--nominal`, `--dose` instead of the real flags. Fixed the
+   regex to allow hyphens inside a flag body and re-extracted; the change
+   touched only those 5 jobs' `flags_used`.
+
+2. **Wrong program + unmappable flags for `TomoImport`.** The extractor's
+   `program_guess` picked the first `command = "..."` literal in
+   `getCommandsTomoImportJob()`, which is the `do_coords == true`
+   coordinate-importer (`relion_tomo_import_coordinates`) — even though
+   `do_coords` **defaults to false** and the real default program is the
+   SerialEM tilt-series importer (`relion_python_tomo_import SerialEM`). So
+   the default draft was the wrong program plus two stray coordinate-branch
+   flags.
+
+The fix is a small, **source-verified data overlay** in `job_catalog.py`
+(`DRAFT_PROGRAM_OVERRIDE`, `DRAFT_FLAG_MAP`, `DRAFT_SUPPRESS`), transcribed
+verbatim from `getCommandsTomoImportJob()` / `getCommandsTomoExcludeTiltImagesJob()`
+and cited by source line — the same "curated overlay verified against RELION
+source" pattern as `JOB_DIRNAME`. A mapped flag is authoritative (always
+emitted, bypassing the unreliable `flags_used` test); `DRAFT_SUPPRESS` keeps
+the non-default (`do_coords`) branch's options out of the default draft. This
+is deliberately **not** a reimplementation of RELION's per-job command
+branching: jobs with genuinely multi-command / mode-branched builders
+(`TomoPickTomograms`, `TomoDenoiseTomograms`) are left as program-name-only
+drafts with every field flagged unmapped and the real source shown, rather
+than risk a subtly-wrong reconstruction. `TomoImport` and
+`TomoExcludeTiltImages`, whose default builders are single clean commands,
+now draft correct, complete commands.
+
+#### Execution model: run from the project root (matches RELION)
+
+The runner executes the approved command with `cwd` set to the **project
+root**, exactly like RELION — so project-root-relative inputs (`frames/*.mrc`)
+and the command's `--o <JobDir>/jobNNN/` output path resolve the same way
+RELION's own GUI resolves them. To make that work, the draft now includes the
+RELION-style output flag: `--o <JobDir>/jobNNN/` for most programs,
+`--output-directory` for the RELION-5 Python tomo tools (per-job table
+`job_catalog.DRAFT_OUTPUT_FLAG`, verified against source — e.g.
+TomoAlignTiltSeries/TomoReconstructTomograms were checked and use plain `--o`,
+so they are *not* in the override list). `run.cwd` stays the job's own output
+directory (what the Outputs tab / clean / delete / download operate on); only
+the process's working directory is the project root.
+
+The prospective `jobNNN` is computed when the popup opens (from the shared job
+counter, RELION's `rlnPipeLineJobCounter` convention) and shown in the draft.
+At Run time the authoritative number is finalized; if another job was recorded
+in between, the runner allocates the next free number, creates that directory,
+and rewrites the command's output path to match — surfaced as a single note in
+the run's live output, so the command and the created directory never
+disagree. Custom (in-process) importers resolve their input paths against the
+project root too (`custom_jobs._resolve_in`), and continue to write outputs
+relative to the project root.
+
+This keeps RELION-US faithful to RELION's own contract (`getCommands*Job()`
+appends `--o outputname`, working directory = project root), which is the
+stated goal: when RELION changes, the overlays and the extraction pipeline are
+the small, well-marked places to update.
 
 ### Change Project
 
@@ -223,6 +297,111 @@ couldn't be verified — send a real `.tomostar`/particle STAR export or
 DeepETPicker run to get an exact, verified mapping instead of the current
 pass-through/diff behavior.
 
+### August 2026 import-bridge audit (verified against upstream)
+
+Each external format was checked against its own docs/source; findings and
+the resulting code changes:
+
+- **IMOD** (bio3d.colorado.edu/imod/doc): `.xf` (`A11 A12 A21 A22 DX DY`,
+  one line per tilt image) and `.tlt` (one angle/deg per line) formats
+  **confirmed correct**. `model2point`/`point2model` accept `-input`/`-output`
+  (PIP programs) and `-scat` — the flags the bridge uses are **valid**;
+  default `model2point` output is `X Y Z` only, which is what
+  `model_to_coordinates` parses. **Caveat surfaced (real):** IMOD tomograms
+  exist in "rotated" (depth = Z, correct for RELION) vs "flipped" (`trimvol
+  -yz`, Y↔Z swapped, handedness inverted) orientations, and a model on a raw
+  `tilt` reconstruction has depth in Y. The bridge copies X,Y,Z verbatim and
+  does not guess orientation; this is now documented in
+  `imod_bridge.model_to_coordinates` and the `ImodImport` field help. IMOD
+  model coords are 0-based; Z carries a -0.5 half-pixel offset.
+
+- **DeepETPicker** (github.com/cbmi-group/DeepETPicker): `.coords` column
+  order `class_id x y z` (4 cols, voxels) **confirmed correct**, and the
+  paper citation (PMID 38453943) **verified**. Its own
+  `utils/coords_to_relion4.py` also accepts a bare 3-column `x y z` file
+  (class_id defaults to 1); `read_coords` was **too strict** (required 4
+  cols) and now matches that tolerance.
+
+- **Warp/M** (warpem.github.io): the conservative empty `DEFAULT_COLUMN_MAP`
+  is **vindicated**. There are two Warp→RELION paths: `ts_export_particles`
+  already writes a RELION-5 optimisation set (native `rln*`, no bridge
+  needed), while `.tomostar` and older particle exports use Warp's own `wrp*`
+  columns that genuinely need mapping. The "Warp and RELION converged"
+  framing is true only for the export path; docstrings and the `WarpImport`
+  help now state the distinction and the reconstruction-vs-export pixel-size
+  caveat.
+
+- **AreTomo2** (`aretomo_bridge.py`, new): reads AreTomo2's `.aln` global
+  alignment block (`SEC ROT GMAG TX TY SMEAN SFIT SCALE BASE TILT`, verified
+  against teamtomo/alnfile + the AreTomo manual) and converts it to IMOD
+  `.xf` + `.tlt`, which RELION-5's IMOD tilt-series import consumes. This
+  hand-off (rather than writing RELION's tilt-series STAR directly) is a
+  deliberate safety choice: the `.xf` mapping (`θ = -ROT`, negated shift
+  rotated into the transformed frame) is verified by working community code
+  and AreTomo's own `-OutImod` export, whereas the exact sign conventions for
+  RELION's `rlnTomoZRot`/`XShiftAngst`/etc. are not something we could verify
+  to the standard this project holds ("don't hallucinate"). Only ROT/TX/TY/
+  TILT/SEC are consumed; dark frames are reported. TX/TY are in pixels of the
+  aligned stack (the `.aln` has no pixel size), noted in the field help.
+
+**Coordinate flips (`coord_transform.py`, new):** the IMOD and DeepETPicker
+importers gained shared, tested options to swap Y/Z (the IMOD flipped-vs-
+rotated fix) and mirror any axis about a supplied tomogram dimension. One
+implementation, routed through `apply_coordinate_transform`, so the two
+importers can't drift. A mirror requested without its dimension raises rather
+than silently producing wrong coordinates. (Contrast inversion was considered
+but deliberately not added: these are coordinate/alignment importers, not
+density importers, so there's nothing to invert — it belongs on a future
+tomogram/map importer.)
+
+**Command Center lineage:** `list_runs` now attaches `input_links` — each run's
+detected inputs that live under an earlier job's output directory are linked
+to that producing job, and the timeline view renders them as clickable
+"↳ from jobNNN" chips. Still best-effort (not RELION's real pipeline graph),
+consistent with `_detect_inputs`.
+
+## Tomogram / particle-pick visualizer
+
+A viewer, launched from the "🔍 Visualize" topbar button — **not a RELION
+job**: it never appears in the Command Center and writes nothing. napari and
+DeepETPicker's own picker GUI are desktop Qt/pyqtgraph apps that can't run in
+a browser at usable speed, so `backend/viz.py` reproduces DeepETPicker's
+*interaction model* in a browser-native way (verified against
+github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
+2026-08-15):
+
+- **Slice browsing.** `mrcfile.mmap` memory-maps the volume so a slice request
+  touches only that slice's bytes; the server contrast-stretches it to 8-bit
+  and returns a PNG. The volume is never loaded whole. An XY/XZ/YZ axis toggle
+  covers the three orthogonal planes (DeepETPicker shows all three at once via
+  a linked tri-view; we use one pane with a toggle).
+- **Pick overlay.** Picks are sent once as JSON (voxel coords); the browser
+  draws them on a `<canvas>` using DeepETPicker's exact rule — a particle
+  appears on every slice within ±(diameter/2) of its centre, with radius
+  `√(r² − Δ²)` (the spherical cross-section), diameter and outline width as
+  separate controls. Scrubbing Z is one small PNG fetch per slice, no per-slice
+  pick round-trip.
+- **Contrast.** DeepETPicker's base display is a global min/max stretch with an
+  optional 1–99% percentile clip. Raw cryo-ET min/max is usually washed out, so
+  the default here is a robust 0.5–99.5% percentile estimated from a strided
+  slice sample at open time; black/white-point sliders override it.
+- **Inputs.** Accepts an MRC (+ optional particles STAR), or a STAR that is an
+  optimisation set (→ resolves tomograms.star + particles.star), a
+  tomograms.star, or a particles/coords STAR. Multiple tomograms populate a
+  selector (one loaded at a time). Coords use `rlnCoordinateX/Y/Z` (voxels),
+  with a best-effort conversion for `rlnCenteredCoordinate*Angst` using the
+  volume dims + pixel size.
+- **Filename-mismatch warning.** If the chosen tomogram's name doesn't
+  correspond to any `rlnTomoName` in the picks file, the viewer warns and
+  offers **Load anyway / Reload files / Cancel** (the user asked for cancel or
+  reload; "load anyway" is added so a legitimate naming difference isn't a dead
+  end). Cancel loads the volume without the mismatched picks.
+- **Safety.** Every path is resolved against the active project directory and
+  must stay inside it; the viewer only ever reads.
+
+Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
+`GET /api/viz/slice`, `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
+
 ## References
 
 - Burt A, Toader B, Warshamanage R, von Kügelgen A, Pyle E, Zivanov J,
@@ -243,6 +422,16 @@ pass-through/diff behavior.
   supervised deep learning.* Nat Commun. 2024;15:2090.
   PMID: [38453943](https://pubmed.ncbi.nlm.nih.gov/38453943/) · DOI: [10.1038/s41467-024-46041-0](https://doi.org/10.1038/s41467-024-46041-0)
 - RELION source and GUI code: https://github.com/3dem/relion
+- IMOD documentation (Boulder Lab): https://bio3d.colorado.edu/imod/doc/
+  (`model2point`, `point2model`, `tilt`, `trimvol` man pages; `.xf`/`.tlt`
+  formats; binary model coordinate spec)
+- DeepETPicker: https://github.com/cbmi-group/DeepETPicker
+  (`.coords` format, `utils/coords_to_relion4.py`)
+- Warp/WarpTools/M documentation: https://warpem.github.io
+  (`.tomostar` `wrp*` fields, `ts_export_particles` optimisation-set output)
+- AreTomo2: https://github.com/czimaginginstitute/AreTomo2 and the AreTomo
+  user manual; `.aln` parsing + IMOD `.xf` mapping cross-checked against
+  teamtomo/alnfile: https://github.com/teamtomo/alnfile
   (`src/apps/maingui.cpp`, `src/pipeline_jobs.h`, `src/gui_jobwindow.cpp`)
 - RELION documentation: https://relion.readthedocs.io/
 - IMOD tomogram import reference:

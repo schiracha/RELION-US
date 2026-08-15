@@ -37,7 +37,16 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from job_catalog import CATEGORIES, CUSTOM_JOBS, JOB_CATALOG, pipeline_type
+from job_catalog import (
+    CATEGORIES,
+    CUSTOM_JOBS,
+    JOB_CATALOG,
+    draft_flag_for,
+    draft_is_suppressed,
+    draft_output_flag,
+    draft_program_override,
+    pipeline_type,
+)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -82,17 +91,39 @@ def _field_default_value(option: dict) -> Any:
     return option.get("default", "")
 
 
-def _build_draft_command(raw_job: dict, field_values: dict[str, Any]) -> tuple[str, list[str]]:
+def _build_draft_command(
+    raw_job: dict,
+    field_values: dict[str, Any],
+    internal_name: str = "",
+    output_subdir: str = "",
+) -> tuple[str, list[str]]:
     """
     Returns (draft_command_string, unmapped_field_keys).
     See module docstring for the rule this follows.
+
+    Two curated, source-verified overlays (job_catalog.DRAFT_PROGRAM_OVERRIDE
+    and DRAFT_FLAG_MAP) correct the handful of jobs the generic rule gets
+    wrong — RELION-5's Python tomo tools, whose hyphenated CLI flags
+    (`--tilt-image-movie-pattern`) don't match their snake_case option keys
+    (`movie_files`), and TomoImport, whose extracted program was the wrong
+    (do_coords) branch. A mapped flag is authoritative: it's always emitted,
+    bypassing the flags_used membership test (unreliable for these jobs).
+
+    output_subdir: if given (e.g. "Import/job005"), the RELION-style output
+    flag (`--o <subdir>/`, or `--output-directory` for the Python tomo
+    tools) is inserted right after the program — matching RELION, which runs
+    from the project root and passes the job's output directory as a
+    project-root-relative path. Omitted for exe-placeholder jobs
+    (DynaMight/ModelAngelo/External), whose output conventions differ and
+    which this app doesn't try to guess.
     """
-    program = raw_job.get("program_guess") or "<unknown_program>"
+    program = draft_program_override(internal_name) or raw_job.get("program_guess") or "<unknown_program>"
     # A few jobs (DynaMight, ModelAngelo, External) don't hard-code a
     # binary — they run whatever executable path the user configured in a
     # JobOption (e.g. "Location of DynaMight executable:"). extract_job_
     # definitions.py surfaces that as the placeholder "{joboptions.<key>}";
     # resolve it against the actual field values here.
+    is_exe_placeholder = bool(re.match(r"^\{joboptions\.[A-Za-z0-9_]+\}$", program))
     placeholder_match = re.match(r"^\{joboptions\.([A-Za-z0-9_]+)\}$", program)
     if placeholder_match:
         exe_key = placeholder_match.group(1)
@@ -101,16 +132,33 @@ def _build_draft_command(raw_job: dict, field_values: dict[str, Any]) -> tuple[s
     options_by_key = {o["key"]: o for o in raw_job.get("options", [])}
 
     parts = [program]
+    # RELION-style output directory (project-root-relative), inserted right
+    # after the program name — mirrors how getCommands*Job() appends it.
+    if output_subdir and not is_exe_placeholder:
+        subdir_arg = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+        parts.append(draft_output_flag(internal_name))
+        parts.append(shlex.quote(subdir_arg))
     unmapped = []
 
     for key, value in field_values.items():
         option = options_by_key.get(key)
         if option is None:
             continue
-        flag = f"--{key}"
-        if flag not in flags_used:
-            unmapped.append(key)
+        # Options belonging to a non-default branch are omitted from the
+        # default draft entirely (and not counted as unmapped).
+        if draft_is_suppressed(internal_name, key):
             continue
+        # A verified per-job flag override wins and is always emitted; only
+        # fall back to the generic `--<key>` rule (gated on flags_used) when
+        # no override exists for this key.
+        mapped = draft_flag_for(internal_name, key)
+        if mapped is not None:
+            flag = mapped
+        else:
+            flag = f"--{key}"
+            if flag not in flags_used:
+                unmapped.append(key)
+                continue
 
         ft = option["field_type"]
         if ft == "boolean":
@@ -126,7 +174,7 @@ def _build_draft_command(raw_job: dict, field_values: dict[str, Any]) -> tuple[s
     return " ".join(parts), unmapped
 
 
-def build_job_definition(internal_name: str) -> dict:
+def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
     raw = _load_raw()[internal_name]
     meta = JOB_CATALOG[internal_name]  # (label_new, display_name, category, description)
     label_new, display_name, category, description = meta
@@ -134,7 +182,9 @@ def build_job_definition(internal_name: str) -> dict:
     standard_keys, advanced_groups = _split_standard_advanced(raw)
     options_by_key = {o["key"]: o for o in raw.get("options", [])}
     default_values = {k: _field_default_value(o) for k, o in options_by_key.items()}
-    draft_command, unmapped = _build_draft_command(raw, default_values)
+    draft_command, unmapped = _build_draft_command(
+        raw, default_values, internal_name, output_subdir
+    )
 
     return {
         "internal_name": internal_name,
@@ -151,6 +201,7 @@ def build_job_definition(internal_name: str) -> dict:
         "commands_source": raw.get("commands_source", ""),
         "draft_command": draft_command,
         "unmapped_fields": unmapped,
+        "output_subdir": output_subdir,
         "is_custom": False,
         "pipeline_type": pipeline_type(internal_name),
     }

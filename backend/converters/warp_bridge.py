@@ -2,15 +2,32 @@
 warp_bridge.py — bridge between Warp/M tilt-series and particle metadata and
 RELION-5 tomography STAR files.
 
-Important honesty note (see docs/ARCHITECTURE.md): recent Warp/M versions
-are being developed specifically to interoperate with RELION-5's STAR
-conventions (both tools converging on the same `rlnTomo*` column set), so
-for a current Warp/M install this bridge may need to do very little beyond
-validation and path harmonization. But Warp's column set has changed across
-versions historically, and I don't have a verified-current sample file from
-your install to hard-code exact source column names against — hard-coding a
-guessed mapping would risk silently mis-mapping a column, which is worse
-than making you confirm it once.
+Important honesty note (see docs/ARCHITECTURE.md), refined against the
+Warp docs (warpem.github.io, verified 2026-08-14) — there are two distinct
+Warp→RELION paths and only one of them needs this bridge:
+
+  1. `ts_export_particles` (Warp 2.0 / WarpTools / M) already writes a
+     RELION-5 tomography OPTIMISATION SET directly — matching_optimisation_
+     set.star + matching.star + matching_tomograms.star, using native
+     `rln*`/`rlnTomo*` columns — meant to be opened straight in the
+     `relion --tomo` GUI. For that output you do NOT need this bridge.
+  2. Warp's own per-tilt-series metadata (`.tomostar`) and older/particle
+     STAR exports use Warp's `wrp*` columns (e.g. wrpMovieName, wrpAngleTilt,
+     wrpAxisAngle, wrpDose) and genuinely DO need a wrp*→rln* mapping. That
+     is what this bridge is for.
+
+So the "Warp and RELION-5 converged on the same rlnTomo* set" claim is true
+only for the optimisation-set export, and an oversimplification for
+`.tomostar`. Warp's column set has also changed across versions, and I don't
+have a verified-current sample from your install to hard-code exact source
+column names against — hard-coding a guessed mapping would risk silently
+mis-mapping a column, which is worse than making you confirm it once.
+
+Pixel-size caveat: Warp separates reconstruction pixel size (--angpix, used
+for the tomogram/picking) from export pixel size (--output_angpix, the
+resampled particle box). Coordinates live in the tomogram's (unbinned) pixel
+space; get the binning/scale wrong and the STAR parses cleanly but particles
+land in the wrong place. Set the scale accordingly when harmonizing.
 
 So this module is built around three genuinely version-independent
 operations, plus a *configurable* mapping step:

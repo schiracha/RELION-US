@@ -384,7 +384,16 @@ def extract_program_guess(func_body: str) -> str | None:
 
 
 def extract_flags_used(func_body: str) -> list[str]:
-    flags = re.findall(r'"\s*(--[A-Za-z0-9_]+)', func_body)
+    # Allow hyphens INSIDE a flag body, not just underscores. RELION's newer
+    # Python tomo tools (relion_python_tomo_import / _pick / _denoise /
+    # _exclude_tilt_images) and DynaMight build hyphenated multi-word flags
+    # like `--tilt-image-movie-pattern`, `--nominal-pixel-size`,
+    # `--output-directory`. The old pattern `--[A-Za-z0-9_]+` stopped at the
+    # first hyphen and captured a truncated, wrong flag (`--tilt`, `--nominal`,
+    # `--output`), which then never matched any snake_case option key and
+    # produced misleading draft commands. A flag starts with a letter after
+    # the `--`, then allows letters/digits/underscores/hyphens.
+    flags = re.findall(r'"\s*(--[A-Za-z][A-Za-z0-9_-]*)', func_body)
     # preserve order, dedupe
     seen = set()
     out = []
