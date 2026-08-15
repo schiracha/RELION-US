@@ -1,6 +1,6 @@
 # RELION-US — architecture & scope
 
-RELION-US ("RELION - User Sourced") is a browser-based companion to
+RELION-US ("RELION - User Supported Frontend") is a browser-based companion to
 RELION — not a fork or patch of RELION itself, and not a wrapper around
 RELION's own compiled GUI. It's a separate front end that reads RELION's
 own source to build accurate job forms, then drives RELION's real

@@ -1,7 +1,8 @@
 # RELION-US
 
-**RELION - User Sourced** — a browser-based, portable job manager for
-RELION, built as a *companion* to RELION, not a modified RELION GUI. It
+**RELION - User Supported Frontend** — a browser-based, portable job
+manager for RELION, built as a *companion* to RELION, not a modified
+RELION GUI. It
 reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
 to build accurate forms for every RELION job type (32 of them, single-
 particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
@@ -15,8 +16,9 @@ The main panel is a **Command Center** showing every job you've run (a
 sortable table or a timeline that links each job to its inputs); iterative
 jobs get a **live Progress tab** with charts and class images; and the top
 bar has a **🔍 Visualize** button that opens a tomogram / particle-pick
-viewer plus a **dark/light theme** switch. Jobs run **from the project directory**, exactly like RELION, so
-project-root-relative paths behave the way RELION's own GUI expects.
+viewer plus a **dark/light theme** switch. Jobs run **from the project
+directory**, exactly like RELION, so project-root-relative paths behave the
+way RELION's own GUI expects.
 
 ## Why this exists
 
@@ -135,7 +137,7 @@ internet access.
 - **Scale slider** (top right): zooms the whole UI — useful on a small
   laptop screen or a large shared display.
 
-## How the draft command is built (read this before trusting it blindly)
+## How the draft command is built
 
 For each active field, if a `--<field_key>` flag literally appears in that
 job's real `getCommands<Job>Job()` source (extracted, not guessed), the
@@ -171,12 +173,13 @@ trusting the output:
   on the cluster); everything else (`.xf`/`.tlt` I/O) is unit-tested
   directly and doesn't need IMOD installed.
 - **Warp/M bridge**: the column-diffing and mapping machinery is
-  implemented and tested, but `DEFAULT_COLUMN_MAP` is intentionally empty
-  — recent Warp/M versions are moving toward RELION-5's own STAR
-  conventions, so you may need little to no renaming, but column names
-  weren't hard-coded without verification against a real file. Send a real
-  `.tomostar` or particle STAR export and the mapping can be filled in and
-  verified.
+  implemented and tested, but `DEFAULT_COLUMN_MAP` is intentionally empty.
+  Warp 2.0's `ts_export_particles` already writes a RELION-5 optimisation
+  set with native `rln*` columns, so that output needs no renaming at all;
+  `.tomostar` and older particle exports use Warp's `wrp*` columns and do
+  need a mapping. Rather than guess at column names that have changed
+  across Warp versions, run the job once to see the column diff, then fill
+  in `DEFAULT_COLUMN_MAP` for your version.
 - **DeepETPicker bridge**: verified against the DeepETPicker README *and*
   its own `utils/coords_to_relion4.py` (`.coords` = `class_id x y z` in
   voxels; a bare 3-column `x y z` file is also accepted, matching what
@@ -189,12 +192,13 @@ trusting the output:
   AreTomo manual and the teamtomo/alnfile parser) and writes IMOD-style
   `.xf` + `.tlt`, which RELION-5's IMOD tilt-series import reads. It
   deliberately hands off through IMOD files rather than writing RELION's
-  tilt-series STAR directly, because RELION's sign conventions for
-  `rlnTomoZRot`/`XShiftAngst` couldn't be verified to this project's
-  standard. Dark (excluded) frames are reported. `TX`/`TY` are in pixels of
-  the aligned stack — the `.aln` records no pixel size, so supply it
-  downstream. If you still have AreTomo's own `-OutImod` output, prefer it;
-  validate against a real `-OutImod` `.xf` if exactness matters.
+  tilt-series STAR directly: the sign conventions for RELION's
+  `rlnTomoZRot`/`XShiftAngst` aren't documented well enough to reproduce
+  with confidence, whereas the `.xf` mapping is corroborated by AreTomo's
+  own `-OutImod` export. Dark (excluded) frames are reported. `TX`/`TY` are
+  in pixels of the aligned stack — the `.aln` records no pixel size, so
+  supply it downstream. If you still have AreTomo's own `-OutImod` output,
+  prefer it; validate against a real `-OutImod` `.xf` if exactness matters.
 
 **Coordinate flips.** The IMOD and DeepETPicker importers have
 `Swap Y and Z` and per-axis `Mirror` options (`backend/converters/
@@ -221,8 +225,8 @@ RELION reuses a pipeline job slot), **Abort** (kills the whole process
 group, not just the shell), Mark finished / Mark failed, **Delete**, and
 **Clean** / **Harsh Clean**. Clean is a *review* flow, not a silent sweep:
 it lists every file with its size, pre-checks a suggestion, and deletes only
-what you confirm. (RELION's own cleanup uses per-job-type glob patterns in
-C++; that dispatch table is deliberately not reimplemented here.)
+what you confirm. (RELION's own cleanup uses per-job-type glob patterns
+hard-coded in C++, which this doesn't try to mirror.)
 
 ## Tomogram / particle-pick viewer
 
@@ -237,8 +241,8 @@ time:
   min/max is usually washed out);
 - picks are overlaid using DeepETPicker's own model — a particle is drawn on
   every slice within ±(diameter/2) of its centre, with radius
-  `sqrt(r² − Δ²)` so the marker grows toward the particle's centre slice —
-  with diameter and line-width controls;
+  `sqrt(r² − Δ²)` so the marker grows toward the particle's centre
+  slice — with diameter and line-width controls;
 - if the tomogram's name doesn't match any `rlnTomoName` in the picks file,
   you get a warning with **Load anyway / Reload files / Cancel**.
 
@@ -302,9 +306,8 @@ way.
 `slurm/template_relion_job.sbatch`, `slurm/template_python_job.sbatch`, and
 `slurm/submit.py` are a standalone command-line path for running a RELION
 job or a converter as a proper batch job — **not yet wired into the job
-popups themselves** (v1 scope: direct subprocess execution only, an
-explicit choice, see `docs/ARCHITECTURE.md`'s Open follow-ups for what
-adding a "Run on cluster" button would look like). These templates are
+popups themselves**; see `docs/ARCHITECTURE.md` for what adding a "Run on
+cluster" button would involve. These templates are
 intentionally generic, not written for any specific site: partition names,
 account/allocation syntax, and module names all vary between clusters, so
 `ACCOUNT_NAME`/`PARTITION_NAME` are placeholders you fill in for your own
@@ -329,10 +332,9 @@ python3 data/extract_job_definitions.py \
     data/job_definitions_raw.json
 ```
 
-Then re-run the test suite (`cd backend && python3 -m pytest -v`) — it's
-written as a regression suite against the *real* extracted data (not
-synthetic fixtures), so it will catch new parsing gaps the same way it
-caught the bugs listed below during development.
+Then re-run the test suite (`cd backend && python3 -m pytest -v`). It runs
+against the *real* extracted data rather than synthetic fixtures, so
+parsing gaps introduced by a new RELION release show up as failures.
 
 ## Known limitations / what to double check
 
@@ -341,48 +343,44 @@ caught the bugs listed below during development.
   which is the whole point of the editable box.
 - `External`'s "Params" tab exposes RELION's generic
   `param1_label`/`param1_value` ... `param10_label`/`param10_value` slots
-  verbatim (that's genuinely how RELION's own External job works — you
-  name your own flags there).
+  verbatim, which is how RELION's own External job works — you name your
+  own flags there.
 - Warp/M column names in the custom import job are unverified against your
   specific install (see "The four custom import jobs" above).
-- This extraction pipeline was built and tested against one specific
-  RELION checkout; job internals do change across releases, so re-running
-  the extractor (above) periodically is worth doing, and the test suite
-  will flag most breakage immediately.
+- The job definitions come from one specific RELION checkout. Job internals
+  change across releases, so re-run the extractor (above) after a RELION
+  upgrade; the test suite flags most breakage immediately.
 - Job history persists run *summaries* (command, status, timestamps) per
   project, not full stdout/stderr transcripts — reopening a job from
   history after the backend has restarted shows its last known status but
   not its old live output. Runs from the current backend session stream
   normally either way.
 - No SLURM integration in the job popups yet (see "SLURM templates" above)
-  — direct subprocess execution only, by explicit choice for this version.
+  — jobs run as direct subprocesses.
 
-## What was caught by the test suite during development
+## Testing
 
-`backend/tests/` (137 tests: 136 passing + 1 auto-skipped when IMOD's
-`point2model`/`model2point` aren't on PATH, which they won't be until
-`module load imod` on the cluster) is a regression suite against *real*
-extracted RELION data and real converter behavior, not synthetic fixtures
-— it caught five real bugs before they shipped:
+```bash
+cd backend && python3 -m pytest -q          # backend unit + regression tests
+```
 
-1. `std::string("")`-style default values leaking raw C++ into a draft
-   command (`test_no_leftover_cpp_syntax_in_draft_or_defaults`).
-2. Five tomography jobs (TomoSubtomo, TomoReconPart, TomoAlign,
-   TomoCtfRefine, TomoAlignTiltSeries) losing their entire "standard" tab
-   because their fields are added via a shared `addTomoInputOptions()` /
-   `placeTomoInput()` helper rather than inline — fixed by expanding those
-   helper calls using their own real definitions
-   (`test_standard_and_advanced_fields_are_disjoint_and_known`).
-3. Three jobs (DynaMight, ModelAngelo, External) with no hard-coded
-   binary — RELION runs a user-configured executable path instead — fixed
-   by resolving a `{joboptions.<key>}` placeholder against real field
-   values (`test_executable_path_placeholder_resolves_from_field_values`).
-4. `POST /api/project/switch` initially 404'd on a project path that
-   doesn't exist yet, instead of routing to the same "start new project /
-   pick different folder" prompt used for an existing-but-not-a-project
-   folder — caught by the Playwright Change Project smoke test, fixed by
-   treating "doesn't exist" and "exists but isn't a project" the same way.
-5. (Carried over from the standalone converter test suite, still enforced
-   here) IMOD `.mod` round-trip, Warp/M column diffing, and DeepETPicker
-   `.coords` parsing edge cases — see `backend/tests/test_imod_bridge.py`,
-   `test_warp_bridge.py`, `test_deepetpicker_bridge.py`.
+The backend suite runs against real extracted RELION data and real
+converter behaviour rather than synthetic fixtures, so a change in RELION's
+job definitions or a regression in a format bridge shows up as a failure.
+One test auto-skips unless IMOD's `point2model`/`model2point` are on PATH
+(the `.mod` round-trip).
+
+Browser tests use Playwright against a running instance and an empty
+project:
+
+```bash
+./run.sh &                                   # or point them at an existing instance
+python3 test_frontend.py                     # job list, popups, SPA/Tomo toggle
+python3 test_frontend_project.py             # Change Project, Create Folder
+python3 test_command_center.py               # history table/timeline, Outputs tab
+python3 test_command_center_abort_overwrite.py
+python3 test_progress_and_theme.py           # Progress tab, theme, file pickers
+```
+
+Point them at a different host/port with a first argument, e.g.
+`python3 test_command_center.py http://127.0.0.1:8420`.
