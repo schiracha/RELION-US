@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+#
+# Part of RELION-US. Copyright (C) 2026 the RELION-US authors.
+# Licensed under the GNU General Public License v2 or later; see LICENSE.
+#
+# The JSON this script produces embeds material copied verbatim from RELION
+# (C) MRC Laboratory of Molecular Biology, GPL-2.0-or-later. See NOTICE.md.
+#
 """
 extract_job_definitions.py — parse RELION's own src/pipeline_jobs.cpp to build
 a ground-truth JSON description of every job type: its JobOptions (the fields

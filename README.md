@@ -388,3 +388,20 @@ python3 test_progress_and_theme.py           # Progress tab, theme, file pickers
 
 Point them at a different host/port with a first argument, e.g.
 `python3 test_command_center.py http://127.0.0.1:8420`.
+
+## License
+
+RELION-US is released under the **GNU General Public License, version 2 or
+later** (`LICENSE`).
+
+That license follows the material this repository redistributes:
+`data/job_definitions_raw.json` embeds the verbatim `getCommands<Job>Job()`
+C++ source and the field defaults and help strings for all 32 job types,
+extracted from RELION (© MRC Laboratory of Molecular Biology, GPL-2.0-or-later)
+— the same data the RELION Source tab shows you. `frontend/vendor/` bundles
+WinBox.js under Apache-2.0.
+
+`NOTICE.md` has the full attribution, what was taken from where, and the
+third-party format/dependency situation. RELION-US is an independent project,
+not endorsed by or affiliated with the RELION authors or the developers of any
+other software named here.

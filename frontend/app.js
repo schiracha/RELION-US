@@ -1,8 +1,8 @@
 // app.js — RELION-US frontend. Vanilla JS, no build step.
 // Each job opened from the sidebar (or reopened from the Command Center)
-// becomes an independent WinBox popup (draggable/resizable/minimizable,
-// cryoSPARC-style) mounted with a form built from the job definition the
-// backend serves. See style.css for the popup's internal layout (standard
+// becomes an independent WinBox popup — draggable, resizable, minimizable,
+// several open at once — mounted with a form built from the job definition
+// the backend serves. See style.css for the popup's internal layout (standard
 // fields on top, tabs, editable command box, live output at the bottom).
 
 

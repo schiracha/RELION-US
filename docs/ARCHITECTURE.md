@@ -101,8 +101,8 @@ relion_us/
 
 An earlier iteration of this project (`relion_tomo_bridge`) used Streamlit
 for a quick browser-rendered front end. That was replaced once the actual
-requirements became clear: draggable/resizable popup windows per job
-(cryoSPARC-style), a hideable job list, UI-wide zoom, and a live-streaming
+requirements became clear: several draggable, resizable job windows open at
+once, a hideable job list, UI-wide zoom, and a live-streaming
 output pane alongside an editable command box — all things Streamlit's
 rerun-the-whole-script execution model can't do cleanly. RELION-US's
 frontend is instead a small vanilla JS app using WinBox.js for the popup
