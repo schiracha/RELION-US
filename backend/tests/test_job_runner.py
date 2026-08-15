@@ -138,7 +138,7 @@ def test_stale_prospective_job_number_is_renumbered_and_command_rewritten(tmp_pa
     assert Path(r2.cwd).name == "job002"
     assert "Import/job002/y.txt" in r2.command
     assert "Import/job001" not in r2.command
-    assert getattr(r2, "_rewrite_note", None) and "job002" in r2._rewrite_note
+    assert r2.rewrite_note and "job002" in r2.rewrite_note
     assert (Path(r2.cwd) / "y.txt").is_file()
 
 
@@ -185,3 +185,53 @@ def test_list_runs_merges_persisted_history_from_a_prior_session(tmp_path):
     fresh_manager = JobRunManager(tmp_path)  # nothing in .runs
     runs = fresh_manager.list_runs()
     assert any(r["run_id"] == "old123" for r in runs)
+
+
+def test_abort_before_process_exists_does_not_orphan(tmp_path):
+    """Aborting in the window between start_subprocess_job() returning and the
+    launcher task spawning the process used to return False and leave the job
+    running. It must now abort cleanly, with no process spawned at all."""
+    import subprocess
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    marker = "relion_us_pending_abort_test"
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", f"sleep 30 # {marker}", subdir="Import/job001"
+        )
+        # no await in between -> the launcher hasn't run, run.proc is None
+        aborted = await manager.abort_run(run.run_id)
+        await asyncio.sleep(1.0)
+        return run, aborted
+
+    run, aborted = asyncio.run(go())
+    assert aborted is True
+    assert run.status == "aborted"
+    leftover = subprocess.run(["pgrep", "-fc", marker], capture_output=True, text=True)
+    assert (leftover.stdout.strip() or "0") == "0", "abort left an orphaned process"
+
+
+def test_abort_kills_the_whole_process_group(tmp_path):
+    """A shell command's children must die too, not just the /bin/sh wrapper."""
+    import subprocess
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    marker = "relion_us_group_abort_test"
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", f"sleep 30 # {marker}", subdir="Import/job001"
+        )
+        await asyncio.sleep(0.8)
+        before = subprocess.run(["pgrep", "-fc", marker], capture_output=True, text=True)
+        aborted = await manager.abort_run(run.run_id)
+        await asyncio.sleep(1.2)
+        after = subprocess.run(["pgrep", "-fc", marker], capture_output=True, text=True)
+        return run, aborted, before.stdout.strip(), (after.stdout.strip() or "0")
+
+    run, aborted, before, after = asyncio.run(go())
+    assert aborted is True
+    assert int(before) >= 1, "test process never started"
+    assert after == "0", f"{after} process(es) survived the abort"
+    assert run.status == "aborted"

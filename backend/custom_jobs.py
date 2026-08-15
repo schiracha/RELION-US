@@ -1,7 +1,7 @@
 """
-custom_jobs.py — wires the IMOD / Warp-M / DeepETPicker import bridges
+custom_jobs.py — wires the IMOD / Warp-M / DeepETPicker / AreTomo2 import bridges
 (backend/converters/, built earlier in this project and unit-tested there)
-into this app's Jobs list as three more job types, run the same way as
+into this app's Jobs list as four more job types, run the same way as
 every RELION job: a popup with standard inputs, an Advanced tab, live
 output, and an Errors tab.
 
@@ -20,7 +20,7 @@ from converters.star_io import backup_before_overwrite, write_particles
 
 
 def _resolve_in(project_dir: Path, value: str) -> str:
-    """Resolve a user-supplied input path against the project directory when
+    """Resolve a user-supplied INPUT path against the project directory when
     it's relative — matching RELION, where paths are project-root-relative.
     Absolute paths and empty values pass through unchanged."""
     if not value:
@@ -29,13 +29,25 @@ def _resolve_in(project_dir: Path, value: str) -> str:
     return str(p if p.is_absolute() else project_dir / p)
 
 
+def _resolve_out(job_dir: Path, value: str, default: str) -> Path:
+    """Resolve an OUTPUT path against this job's own output directory, the
+    way a RELION job writes into its `--o <JobDir>/jobNNN/`. That keeps the
+    Outputs tab, Clean and Delete (which all operate on the job dir) honest,
+    and stops successive imports from silently overwriting one shared
+    `particles.star` at the project root. An absolute path is still honoured
+    verbatim, for the rare case someone wants output elsewhere."""
+    raw = (value or "").strip() or default
+    p = Path(raw)
+    return p if p.is_absolute() else job_dir / p
+
+
 def _opt_float(value) -> float | None:
     """Parse an optional numeric field (blank -> None)."""
     if value is None or str(value).strip() == "":
         return None
     return float(value)
 
-# Field definitions for the three custom jobs, in the same shape
+# Field definitions for the custom jobs, in the same shape
 # job_registry.build_job_definition() produces for real RELION jobs, so the
 # frontend renders them identically. All fields are "standard" (no advanced
 # tab needed — these are already small, focused jobs).
@@ -52,13 +64,13 @@ CUSTOM_JOB_DEFINITIONS = {
             {"key": "tomo_name", "field_type": "text", "label": "Tomogram name (rlnTomoName):", "default": "", "help": "Value to write into rlnTomoName for every particle from this .mod file."},
             {"key": "scale", "field_type": "slider", "label": "Coordinate scale factor:", "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01, "help": "Multiply IMOD model coordinates by this factor (e.g. to correct for a binning mismatch between the .mod and the RELION tomogram). IMOD model coords are 0-based pixels; Z carries IMOD's -0.5 half-pixel offset."},
             {"key": "swap_yz", "field_type": "boolean", "label": "Swap Y and Z:", "default": False, "help": "Swap the Y and Z coordinates. Use this when the .mod was built on a 'flipped' (trimvol -yz) or raw-tilt tomogram whose depth axis is Y, to move into RELION's depth-in-Z convention (see the .mod field note above). Handedness-changing."},
-            {"key": "flip_x", "field_type": "boolean", "label": "Mirror X (needs X size):", "default": False, "help": "Mirror the X axis: x -> (tomogram X size - x). Requires the tomogram X dimension below."},
-            {"key": "flip_y", "field_type": "boolean", "label": "Mirror Y (needs Y size):", "default": False, "help": "Mirror the Y axis: y -> (tomogram Y size - y). Requires the tomogram Y dimension below."},
-            {"key": "flip_z", "field_type": "boolean", "label": "Mirror Z (needs Z size):", "default": False, "help": "Mirror the Z axis: z -> (tomogram Z size - z). Requires the tomogram Z dimension below."},
+            {"key": "flip_x", "field_type": "boolean", "label": "Mirror X (needs X size):", "default": False, "help": "Mirror the X axis about the tomogram centre: x -> (X size - 1) - x, for 0-based coordinates. Requires the tomogram X dimension below."},
+            {"key": "flip_y", "field_type": "boolean", "label": "Mirror Y (needs Y size):", "default": False, "help": "Mirror the Y axis about the tomogram centre: y -> (Y size - 1) - y, for 0-based coordinates. Requires the tomogram Y dimension below."},
+            {"key": "flip_z", "field_type": "boolean", "label": "Mirror Z (needs Z size):", "default": False, "help": "Mirror the Z axis about the tomogram centre: z -> (Z size - 1) - z, for 0-based coordinates. Requires the tomogram Z dimension below."},
             {"key": "tomo_size_x", "field_type": "text", "label": "Tomogram X size (px, for mirroring):", "default": "", "help": "Tomogram X dimension in the SAME (scaled) pixels as the coordinates. Only needed if 'Mirror X' is checked."},
             {"key": "tomo_size_y", "field_type": "text", "label": "Tomogram Y size (px, for mirroring):", "default": "", "help": "Tomogram Y dimension in the SAME (scaled) pixels as the coordinates. Only needed if 'Mirror Y' is checked."},
             {"key": "tomo_size_z", "field_type": "text", "label": "Tomogram Z size (px, for mirroring):", "default": "", "help": "Tomogram Z dimension in the SAME (scaled) pixels as the coordinates. Only needed if 'Mirror Z' is checked. NB: this is the size along the axis BEFORE any Y/Z swap."},
-            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file (relative paths are resolved against the project directory, like RELION)."},
+            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file. Relative paths land in this job's own output directory (<JobDir>/jobNNN/), the way a RELION job writes into its --o directory; an absolute path is honoured as given."},
         ],
         "standard_fields": ["mod_path", "tomo_name", "scale", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"],
         "advanced_groups": {},
@@ -76,7 +88,7 @@ CUSTOM_JOB_DEFINITIONS = {
         "options": [
             {"key": "warp_star_path", "field_type": "filename", "label": "Warp/M STAR file:", "default": "", "pattern": "*.star;*.tomostar", "directory": ".", "help": "A particle STAR file exported from Warp/M. NOTE: modern Warp 2.0 / WarpTools 'ts_export_particles' already writes a RELION-5 tomography optimisation set (matching_optimisation_set.star + matching.star + matching_tomograms.star) that RELION-5 opens directly — for that output you don't need this bridge. This bridge is for older/particle STARs that still need wrp*→rln* column harmonization. A .tomostar is per-tilt-series geometry (wrp* columns, no particle coordinates), not a particle file — the diff below will show every required particle column missing for a .tomostar, which is expected."},
             {"key": "block_name", "field_type": "text", "label": "STAR block name (optional):", "default": "", "help": "Leave blank to auto-detect if the file has only one block."},
-            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the harmonized RELION particles STAR file (only written if all required columns are already present or mapped)."},
+            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the harmonized RELION particles STAR file (only written if all required columns are already present or mapped). Relative paths land in this job's own output directory."},
         ],
         "standard_fields": ["warp_star_path", "block_name", "out_path"],
         "advanced_groups": {},
@@ -96,13 +108,13 @@ CUSTOM_JOB_DEFINITIONS = {
             {"key": "tomo_name", "field_type": "text", "label": "Tomogram name (rlnTomoName):", "default": "", "help": "Value to write into rlnTomoName for every particle from this .coords file."},
             {"key": "binning_factor", "field_type": "slider", "label": "Binning factor:", "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01, "help": "relion_coord = deepet_coord * binning_factor."},
             {"key": "swap_yz", "field_type": "boolean", "label": "Swap Y and Z:", "default": False, "help": "Swap Y and Z coordinates (handedness-changing). Use if DeepETPicker's tomogram axis convention differs from your RELION tomogram's depth-in-Z."},
-            {"key": "flip_x", "field_type": "boolean", "label": "Mirror X (needs X size):", "default": False, "help": "Mirror X: x -> (tomogram X size - x). Requires the X dimension below."},
-            {"key": "flip_y", "field_type": "boolean", "label": "Mirror Y (needs Y size):", "default": False, "help": "Mirror Y: y -> (tomogram Y size - y). Requires the Y dimension below."},
-            {"key": "flip_z", "field_type": "boolean", "label": "Mirror Z (needs Z size):", "default": False, "help": "Mirror Z: z -> (tomogram Z size - z). Requires the Z dimension below."},
+            {"key": "flip_x", "field_type": "boolean", "label": "Mirror X (needs X size):", "default": False, "help": "Mirror X about the tomogram centre: x -> (X size - 1) - x, for 0-based coordinates. Requires the X dimension below."},
+            {"key": "flip_y", "field_type": "boolean", "label": "Mirror Y (needs Y size):", "default": False, "help": "Mirror Y about the tomogram centre: y -> (Y size - 1) - y, for 0-based coordinates. Requires the Y dimension below."},
+            {"key": "flip_z", "field_type": "boolean", "label": "Mirror Z (needs Z size):", "default": False, "help": "Mirror Z about the tomogram centre: z -> (Z size - 1) - z, for 0-based coordinates. Requires the Z dimension below."},
             {"key": "tomo_size_x", "field_type": "text", "label": "Tomogram X size (px, for mirroring):", "default": "", "help": "Tomogram X dimension in the SAME (binned) voxels as the coordinates. Only needed if 'Mirror X' is checked."},
             {"key": "tomo_size_y", "field_type": "text", "label": "Tomogram Y size (px, for mirroring):", "default": "", "help": "Tomogram Y dimension in the SAME (binned) voxels as the coordinates. Only needed if 'Mirror Y' is checked."},
             {"key": "tomo_size_z", "field_type": "text", "label": "Tomogram Z size (px, for mirroring):", "default": "", "help": "Tomogram Z dimension in the SAME (binned) voxels as the coordinates. Only needed if 'Mirror Z' is checked (size along the axis before any Y/Z swap)."},
-            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file (relative paths resolved against the project directory)."},
+            {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file. Relative paths land in this job's own output directory (<JobDir>/jobNNN/), like a RELION job's --o directory; an absolute path is honoured as given."},
         ],
         "standard_fields": ["coords_path", "tomo_name", "binning_factor", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"],
         "advanced_groups": {},
@@ -132,7 +144,7 @@ CUSTOM_JOB_DEFINITIONS = {
 }
 
 
-async def run_imod_import(project_dir: Path, values: dict) -> str:
+async def run_imod_import(project_dir: Path, values: dict, job_dir: Path) -> str:
     def work():
         df = imod_bridge.model_to_coordinates(
             _resolve_in(project_dir, values["mod_path"]),
@@ -146,7 +158,7 @@ async def run_imod_import(project_dir: Path, values: dict) -> str:
             tomo_size_y=_opt_float(values.get("tomo_size_y")),
             tomo_size_z=_opt_float(values.get("tomo_size_z")),
         )
-        out_path = project_dir / values["out_path"]
+        out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
         if out_path.exists():
             backup = backup_before_overwrite(out_path)
             note = f" (existing file backed up to {backup})"
@@ -158,7 +170,7 @@ async def run_imod_import(project_dir: Path, values: dict) -> str:
     return await asyncio.to_thread(work)
 
 
-async def run_warp_import(project_dir: Path, values: dict) -> str:
+async def run_warp_import(project_dir: Path, values: dict, job_dir: Path) -> str:
     def work():
         block = values.get("block_name") or None
         df = warp_bridge.load_warp_star(_resolve_in(project_dir, values["warp_star_path"]), block=block)
@@ -175,15 +187,19 @@ async def run_warp_import(project_dir: Path, values: dict) -> str:
                 "correct source column names."
             )
         else:
-            out_path = project_dir / values["out_path"]
+            out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
+            note = ""
+            if out_path.exists():
+                backup = backup_before_overwrite(out_path)
+                note = f" (existing file backed up to {backup})"
             write_particles(df, out_path, overwrite=True)
-            lines.append(f"Wrote {out_path}")
+            lines.append(f"Wrote {out_path}{note}")
         return "\n".join(lines)
 
     return await asyncio.to_thread(work)
 
 
-async def run_deepetpicker_import(project_dir: Path, values: dict) -> str:
+async def run_deepetpicker_import(project_dir: Path, values: dict, job_dir: Path) -> str:
     def work():
         df = deepetpicker_bridge.coords_to_relion_particles(
             _resolve_in(project_dir, values["coords_path"]),
@@ -197,7 +213,7 @@ async def run_deepetpicker_import(project_dir: Path, values: dict) -> str:
             tomo_size_y=_opt_float(values.get("tomo_size_y")),
             tomo_size_z=_opt_float(values.get("tomo_size_z")),
         )
-        out_path = project_dir / values["out_path"]
+        out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
         if out_path.exists():
             backup = backup_before_overwrite(out_path)
             note = f" (existing file backed up to {backup})"
@@ -209,12 +225,12 @@ async def run_deepetpicker_import(project_dir: Path, values: dict) -> str:
     return await asyncio.to_thread(work)
 
 
-async def run_aretomo_import(project_dir: Path, values: dict) -> str:
+async def run_aretomo_import(project_dir: Path, values: dict, job_dir: Path) -> str:
     def work():
         aln_path = _resolve_in(project_dir, values["aln_path"])
         prefix = values.get("out_prefix") or "aligned"
-        out_xf = project_dir / f"{prefix}.xf"
-        out_tlt = project_dir / f"{prefix}.tlt"
+        out_xf = _resolve_out(job_dir, f"{prefix}.xf", "aligned.xf")
+        out_tlt = _resolve_out(job_dir, f"{prefix}.tlt", "aligned.tlt")
         summary = aretomo_bridge.aln_to_imod(aln_path, out_xf, out_tlt)
         lines = [
             f"Read AreTomo2 alignment: {values['aln_path']}",

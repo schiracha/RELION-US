@@ -91,3 +91,59 @@ def test_render_slice_respects_contrast_override(tmp_path):
     # a degenerate lo>hi is corrected, not crashed
     png = viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 0, lo=50.0, hi=50.0)
     assert png[:4] == b"\x89PNG"
+
+
+# --- regression: tomogram-name matching must not be a bare substring test ---
+
+def test_names_match_rejects_numeric_prefix_collision():
+    """TS_1 must NOT match TS_10 -- a bare `in` test silently overlaid one
+    tomogram's particles onto another, and TS_1/TS_10/TS_11 naming is normal."""
+    assert viz._names_match("TS_1", "TS_1") is True
+    assert viz._names_match("TS_1.mrc", "TS_1") is True
+    assert viz._names_match("Tomograms/job005/TS_01.mrc", "TS_01") is True
+    assert viz._names_match("rec_TS_01", "TS_01") is True      # separator boundary
+    assert viz._names_match("TS_1", "TS_10") is False
+    assert viz._names_match("TS_10", "TS_1") is False
+    assert viz._names_match("TS_01", "TS_010") is False
+
+
+def test_load_picks_returns_nothing_when_no_tomogram_matches(tmp_path):
+    """A no-match used to fall back to the WHOLE DataFrame, drawing every
+    tomogram's picks on one tomogram -- indistinguishable from a correct
+    overlay."""
+    _make_project(tmp_path)
+    df = pd.DataFrame({
+        "rlnTomoName": ["AAA", "BBB", "CCC"],
+        "rlnCoordinateX": [1.0, 2.0, 3.0],
+        "rlnCoordinateY": [1.0, 2.0, 3.0],
+        "rlnCoordinateZ": [1.0, 2.0, 3.0],
+    })
+    starfile.write({"particles": df}, tmp_path / "unrelated.star", overwrite=True)
+    out = viz.load_picks(tmp_path, "unrelated.star", tomo_name="TS_01.mrc")
+    assert out["matched"] is False
+    assert out["picks"] == []
+
+
+def test_slice_honours_lo_without_hi(tmp_path):
+    """lo and hi are independent query params; supplying only one used to
+    discard it and re-derive both."""
+    _make_project(tmp_path)
+    dark = viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 5, lo=0.0, hi=1e6)
+    bright = viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 5, lo=0.0)
+    assert dark != bright, "lo-only request produced the same image as a full-range one"
+
+
+def test_slice_survives_nan_voxels(tmp_path):
+    """NaN voxels are real in cryo-ET; a plain percentile made lo/hi NaN, the
+    `hi <= lo` guard silently didn't fire, and the slice rendered all black."""
+    (tmp_path / ".relion_us").mkdir()
+    vol = (np.random.rand(8, 16, 16) * 100).astype(np.float32)
+    vol[0, 0, 0] = np.nan
+    with mrcfile.new(tmp_path / "nan.mrc", overwrite=True) as m:
+        m.set_data(vol)
+        m.voxel_size = 1.0
+    png = viz.render_slice_png(tmp_path, "nan.mrc", "z", 0)
+    assert png[:4] == b"\x89PNG"
+    info = viz.volume_info(tmp_path, "nan.mrc")
+    assert info["contrast_hi"] > info["contrast_lo"]
+    assert np.isfinite(info["contrast_lo"]) and np.isfinite(info["contrast_hi"])

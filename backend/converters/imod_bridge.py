@@ -37,6 +37,8 @@ from typing import Optional, Union
 
 import pandas as pd
 
+from .coord_transform import apply_coordinate_transform
+
 PathLike = Union[str, Path]
 
 
@@ -153,11 +155,12 @@ def model_to_coordinates(
     A model built on a raw `tilt` reconstruction (perpendicular slices) has
     depth in Y, not Z. So if your .mod was drawn on a flipped or raw-tilt
     volume, the Z you get here is actually Y (and vice-versa) relative to a
-    RELION tomogram — you must swap them yourself (or re-orient the volume
-    with trimvol -rx before picking). Additionally, IMOD model coordinates
-    are 0-based pixel positions and the Z value carries a -0.5 half-pixel
-    offset by IMOD's convention. This bridge deliberately does not guess
-    which orientation your .mod used; confirm it before trusting Z.
+    RELION tomogram — pass `swap_yz=True` to correct it (or re-orient the
+    volume with trimvol -rx before picking). Additionally, IMOD model
+    coordinates are 0-based pixel positions and the Z value carries a -0.5
+    half-pixel offset by IMOD's convention. This bridge deliberately does NOT
+    guess which orientation your .mod used — confirm it yourself and set
+    swap_yz accordingly; the default (False) copies X, Y, Z verbatim.
     """
     model2point = _require_binary("model2point")
     mod_path = Path(mod_path)
@@ -193,8 +196,6 @@ def model_to_coordinates(
     # the same scaled pixel units as the coordinates). See
     # coord_transform.apply_coordinate_transform and the Y/Z caveat above.
     if swap_yz or flip_x or flip_y or flip_z:
-        from .coord_transform import apply_coordinate_transform
-
         df = apply_coordinate_transform(
             df,
             swap_yz=swap_yz,

@@ -402,6 +402,110 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
 Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
 `GET /api/viz/slice`, `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
 
+## Code-quality audit (August 2026)
+
+A full review of the codebase (mechanical linting + line-by-line review of the
+backend, converters, and frontend). Fixes worth knowing about, because several
+were silent-wrong-data bugs rather than style issues:
+
+**Scientific correctness**
+
+- **Tomogram-name matching was a bare substring test.** `TS_1` matched `TS_10`,
+  so the viewer would happily overlay one tomogram's particles onto another —
+  and `TS_1`/`TS_10`/`TS_11` naming is completely normal. Now
+  `viz._names_match()` compares filename stems and only accepts a substring at
+  a separator boundary.
+- **A no-match returned every pick.** When no `rlnTomoName` matched, `load_picks`
+  fell back to the whole table, drawing all tomograms' particles on one
+  tomogram — visually indistinguishable from a correct overlay. It now returns
+  an empty list.
+- **The axis mirror was off by one voxel.** `coord -> size - coord` sends
+  coordinate 0 to `size`, one voxel outside the volume. Reflection about the
+  centre of a 0-based axis is `(size - 1) - coord`; the code, docstrings, field
+  help and tests now all say so.
+- **NaN voxels rendered an all-black slice.** `np.percentile` returned NaN, the
+  `hi <= lo` guard silently didn't fire (NaN comparisons are always False), and
+  the user concluded the tomogram was broken. Now `nanpercentile` + an explicit
+  finite check.
+- **AreTomo2 silently dropped unparseable `.aln` rows.** IMOD and RELION pair
+  `.xf` line N with stack image N positionally, so one dropped row mis-pairs
+  every subsequent transform — a corrupted reconstruction that still looks
+  plausible. `aln_to_imod` now cross-checks the row count against the header's
+  `RawSize` minus dark frames and refuses to write on a mismatch.
+- **RELION help text was mojibake.** The extractor encoded UTF-8 then decoded
+  latin-1 via `unicode_escape`, so RELION's `−4 to −7` displayed as `â4 to â7`.
+  Fixed and re-extracted (only those 5 help strings changed).
+
+**Data loss**
+
+- **Custom-job outputs went to the project root**, not the job directory the
+  Outputs tab / Clean / Delete operate on — so the tracked directory was always
+  empty and successive imports silently overwrote one shared `particles.star`.
+  Runners now receive their job dir (`custom_jobs._resolve_out`).
+- **The backup clobbered itself.** A second run copied the *generated* output
+  over `particles.star.bak`, destroying the hand-curated original the backup
+  exists to protect. It now falls back to `.bak2`, `.bak3`, …
+- **`StarDocument.write()` dropped block names** for single-block files, writing
+  an anonymous `data_` header that RELION-5 can't look up by name.
+- **Warp was the only importer overwriting with no backup**; it now matches the
+  others.
+
+**Correctness / robustness**
+
+- **Custom jobs had no `default_values`**, so every field opened blank — a blank
+  numeric parses to `NaN`, a blank output path resolved to the job directory
+  itself. Derived once in `main._custom_job_definition()` from each option's
+  declared `default`.
+- **A job aborted before its process existed kept running.** `abort_run` rejected
+  `pending` runs, and cancelling the launcher mid-spawn could orphan a process
+  group. There's now an `abort_requested` flag the launcher honours (it declines
+  to spawn at all), and abort accepts `pending`.
+- **A raising output pump stranded a run as "running" forever**, leaked its
+  sibling and never reaped the child. `_run_subprocess` now has the same
+  `try/finally` `_run_custom` always had.
+- **The run websocket never observed a disconnect** (Starlette raises only from
+  `receive()`, never `send()`), so it parked on `queue.get()` forever — leaking
+  a task and a subscriber per popup opened. It now races a reader task.
+- **The temp zip leaked** on any failure inside the archive loop.
+- **`PATCH /api/runs/{id}` validated after writing** — an invalid status was
+  rejected only after the alias/note edits had already hit disk. Now validated
+  up front.
+
+**Frontend**
+
+- Double-clicking **Run** started a second job and orphaned the first
+  websocket; the button now stays disabled once a run exists.
+- The **download arrows in the Clean review list were dead** — that view
+  rendered them but never wired the click handler.
+- **Overwrite closed the popup before the request**, so a failure destroyed the
+  user's edited command with no way back.
+- The project's **auto-detected pipeline hint overwrote the user's saved
+  SPA/Tomo/All choice** (same `localStorage` key); it no longer persists.
+- The visualizer **committed `state.mrc` before the volume loaded**, so a failed
+  load left it requesting slices of the new volume with the old one's index
+  range.
+- Slice/contrast sliders now **debounce** (a drag fired ~60 server-side
+  mmap+PNG encodes per second).
+- **13 native `alert()` calls** contradicted the file's own documented rule
+  (they block the page, including Playwright); all now use the custom
+  `errorDialog`.
+- Removed dead state (`openPopups`, which retained every popup ever opened,
+  plus `jobCounter`, `vizCounter`, `outputsLoaded`, `withCheckboxes`).
+
+**Performance**
+
+- `job_definitions_raw.json` (~500 KB) was re-read and re-parsed on every job
+  open *and* every draft recompute — the latter fires as the user types. Now
+  `lru_cache`d.
+- `viz.load_picks` used `.iterrows()` (which boxes each row as a Series) on up
+  to 10⁵ particles; now vectorized.
+- The contrast sample fancy-indexed 24 full-resolution slices (~1.6 GB for an
+  unbinned 4096² tomogram, against this module's "never load the volume"
+  premise); it now strides in-plane and takes both percentiles in one pass.
+
+Backend tests: **204 passed, 1 skipped** (up from 183). Both Playwright suites
+pass with zero console errors.
+
 ## References
 
 - Burt A, Toader B, Warshamanage R, von Kügelgen A, Pyle E, Zivanov J,

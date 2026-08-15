@@ -5,8 +5,6 @@
 // backend serves. See style.css for the popup's internal layout (standard
 // fields on top, tabs, editable command box, live output at the bottom).
 
-const openPopups = {}; // internal_name+instance -> winbox instance, for future multi-instance support
-let jobCounter = 0;
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -52,12 +50,26 @@ function formatDuration(startedAt, endedAt) {
 }
 
 // --- Lightweight custom confirm/prompt dialogs -----------------------------
-// Deliberately never native confirm()/prompt() (or alert()): those are
+// Deliberately never native confirm()/prompt() (or errorDialog()): those are
 // modal at the OS/browser level and block the whole page, including
 // anything driving it programmatically (e.g. Playwright) -- this app
-// already avoids native alert() for project-switch errors for the same
+// already avoids native errorDialog() for project-switch errors for the same
 // reason (see the #projectModalError/#notAProjectError banners). These
 // build a throwaway overlay, resolve a promise, and remove themselves.
+
+function statusLineClass(status) {
+  if (status === "completed") return "status-line ok";
+  if (status === "failed" || status === "aborted") return "status-line failed";
+  return "status-line";
+}
+
+// Error reporting matches the confirm/prompt dialogs below. Native errorDialog() is
+// deliberately avoided everywhere in this file (see the note on confirmDialog):
+// it blocks the whole page at the browser level, including anything driving
+// the UI programmatically, which is exactly what the Playwright suites do.
+function errorDialog(message) {
+  return confirmDialog(message, { confirmLabel: "OK", danger: false });
+}
 
 function confirmDialog(message, { confirmLabel = "OK", danger = false } = {}) {
   return new Promise((resolve) => {
@@ -188,12 +200,18 @@ function applyJobFilters() {
   });
 }
 
-function setPipelineFilter(value) {
+function setPipelineFilter(value, { persist = true } = {}) {
+  // persist=false is used for the project's auto-detected pipeline hint. That
+  // hint is a convenience, not a preference: writing it to localStorage
+  // overwrote the user's own deliberate choice (it shares the same key), so
+  // picking "All" in a tomo project was silently undone on the next reload.
   pipelineFilter = value;
-  try {
-    localStorage.setItem(PIPELINE_STORAGE_KEY, value);
-  } catch (e) {
-    // Non-fatal — the toggle just won't be remembered across reloads.
+  if (persist) {
+    try {
+      localStorage.setItem(PIPELINE_STORAGE_KEY, value);
+    } catch (e) {
+      // Non-fatal — the toggle just won't be remembered across reloads.
+    }
   }
   document.querySelectorAll(".pipeline-toggle-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.pipeline === value);
@@ -308,15 +326,13 @@ function buildFieldRow(key, option, value) {
 // run rather than a fresh draft, so reopening history shows history.
 
 async function openJobPopup(internalName, displayName, existingRun) {
-  jobCounter += 1;
-  const popupId = `${internalName}-${jobCounter}`;
   const isReopen = !!existingRun;
 
   let def;
   try {
     def = await api(`/api/jobs/${internalName}`);
   } catch (err) {
-    alert(`Could not load job definition for ${internalName}: ${err.message}`);
+    errorDialog(`Could not load job definition for ${internalName}: ${err.message}`);
     return;
   }
 
@@ -471,7 +487,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
             resp.unmapped_fields.join(", ");
         }
       } catch (err) {
-        alert("Could not recompute draft: " + err.message);
+        errorDialog("Could not recompute draft: " + err.message);
       }
     });
   }
@@ -548,14 +564,14 @@ async function openJobPopup(internalName, displayName, existingRun) {
       refreshToolbarState();
       refreshCommandCenter();
     } catch (err) {
-      alert("Could not rename job: " + err.message);
+      errorDialog("Could not rename job: " + err.message);
     }
   }
   jobNameDisplay.addEventListener("click", renameJob);
 
   noteBtn.addEventListener("click", async () => {
     if (!currentRun) {
-      alert("Run this job first, then add a note.");
+      errorDialog("Run this job first, then add a note.");
       return;
     }
     const newNote = await promptDialog("Note for this job:", currentRun.note || "");
@@ -570,45 +586,30 @@ async function openJobPopup(internalName, displayName, existingRun) {
       refreshNoteRow();
       refreshCommandCenter();
     } catch (err) {
-      alert("Could not save note: " + err.message);
+      errorDialog("Could not save note: " + err.message);
     }
   });
 
-  markFinishedBtn.addEventListener("click", async () => {
+  // Mark Finished / Mark Failed differ only in the status they set.
+  async function markStatus(status) {
     if (!currentRun) return;
     try {
       const updated = await api(`/api/runs/${currentRun.run_id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "completed" }),
+        body: JSON.stringify({ status }),
       });
       currentRun = { ...currentRun, ...updated };
-      statusLine.textContent = "Status: completed (manually marked)";
-      statusLine.className = "status-line ok";
+      statusLine.textContent = `Status: ${status} (manually marked)`;
+      statusLine.className = statusLineClass(status);
       refreshToolbarState();
       refreshCommandCenter();
     } catch (err) {
-      alert("Could not update status: " + err.message);
+      errorDialog("Could not update status: " + err.message);
     }
-  });
-
-  markFailedBtn.addEventListener("click", async () => {
-    if (!currentRun) return;
-    try {
-      const updated = await api(`/api/runs/${currentRun.run_id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "failed" }),
-      });
-      currentRun = { ...currentRun, ...updated };
-      statusLine.textContent = "Status: failed (manually marked)";
-      statusLine.className = "status-line failed";
-      refreshToolbarState();
-      refreshCommandCenter();
-    } catch (err) {
-      alert("Could not update status: " + err.message);
-    }
-  });
+  }
+  markFinishedBtn.addEventListener("click", () => markStatus("completed"));
+  markFailedBtn.addEventListener("click", () => markStatus("failed"));
 
   abortBtn.addEventListener("click", async () => {
     if (!currentRun) return;
@@ -617,7 +618,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
     try {
       await api(`/api/runs/${currentRun.run_id}/abort`, { method: "POST" });
     } catch (err) {
-      alert("Could not abort: " + err.message);
+      errorDialog("Could not abort: " + err.message);
     }
   });
 
@@ -638,7 +639,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       win.close();
       refreshCommandCenter();
     } catch (err) {
-      alert("Could not delete job: " + err.message);
+      errorDialog("Could not delete job: " + err.message);
     }
   });
 
@@ -654,30 +655,32 @@ async function openJobPopup(internalName, displayName, existingRun) {
       const payload = { internal_name: internalName, overwrite_run_id: currentRun.run_id };
       if (def.is_custom) payload.field_values = collectValues();
       else { payload.command = cmdToRun; payload.field_values = collectValues(); }
-      win.close();
       const run = await api("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      // Only close once the run actually started -- closing first meant a
+      // failed overwrite destroyed the user's edited command and field values
+      // with nothing but an error message left behind.
+      win.close();
       openJobPopup(internalName, displayName, run);
       refreshCommandCenter();
     } catch (err) {
-      alert("Could not start overwrite run: " + err.message);
+      errorDialog("Could not start overwrite run: " + err.message);
     }
   });
 
   // --- Outputs tab: file listing, download, Clean / Harsh Clean --------
   const outputsContent = body.querySelector('[data-tab-content="outputs"]');
-  let outputsLoaded = false;
 
-  function renderOutputsList(files, { withCheckboxes = false } = {}) {
+  function renderOutputsList(files) {
     if (!files.length) {
       return '<div class="outputs-empty">No output files yet.</div>';
     }
     return `<div class="outputs-list">${files.map((f) => `
       <div class="outputs-row" data-path="${escapeHtml(f.path)}">
-        ${withCheckboxes ? `<input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />` : ""}
+        <input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />
         <span class="out-path">${escapeHtml(f.path)}</span>
         <span class="out-size">${formatBytes(f.size)}</span>
         <span class="out-download" data-role="download" title="Download">⬇</span>
@@ -705,14 +708,14 @@ async function openJobPopup(internalName, displayName, existingRun) {
           <button class="btn danger" data-role="harsh-clean-btn">🔥 Harsh Clean</button>
           <button class="btn" data-role="download-selected-btn">⬇ Download selected as .zip</button>
         </div>
-        ${renderOutputsList(files, { withCheckboxes: true })}
+        ${renderOutputsList(files)}
       `;
       wireDownloadClicks(outputsContent);
 
       outputsContent.querySelector('[data-role="download-selected-btn"]').addEventListener("click", () => {
         const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
           .map((cb) => cb.closest(".outputs-row").dataset.path);
-        if (!paths.length) { alert("Check at least one file first."); return; }
+        if (!paths.length) { errorDialog("Check at least one file first."); return; }
         const qs = paths.map((p) => `path=${encodeURIComponent(p)}`).join("&");
         window.open(`/api/runs/${currentRun.run_id}/files/zip?${qs}`, "_blank");
       });
@@ -725,17 +728,18 @@ async function openJobPopup(internalName, displayName, existingRun) {
             (generic housekeeping patterns${harsh ? " + files over 100 MB" : ""}; see the Outputs
             tab docs). Nothing is deleted until you review and confirm below.
           </p>
-          ${renderOutputsList(candidates, { withCheckboxes: true })}
+          ${renderOutputsList(candidates)}
           <div class="outputs-toolbar" style="margin-top:8px;">
             <button class="btn danger" data-role="confirm-delete-btn">Delete checked files</button>
             <button class="btn" data-role="cancel-clean-btn">Cancel</button>
           </div>
         `;
+        wireDownloadClicks(outputsContent);   // the review list has ⬇ links too
         outputsContent.querySelector('[data-role="cancel-clean-btn"]').addEventListener("click", loadOutputsTab);
         outputsContent.querySelector('[data-role="confirm-delete-btn"]').addEventListener("click", async () => {
           const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
             .map((cb) => cb.closest(".outputs-row").dataset.path);
-          if (!paths.length) { alert("Nothing checked — nothing to delete."); return; }
+          if (!paths.length) { errorDialog("Nothing checked — nothing to delete."); return; }
           const ok = await confirmDialog(`Delete ${paths.length} file(s)? This cannot be undone.`, { confirmLabel: "Delete", danger: true });
           if (!ok) return;
           try {
@@ -745,7 +749,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
               body: JSON.stringify({ relative_paths: paths }),
             });
           } catch (err) {
-            alert("Could not delete files: " + err.message);
+            errorDialog("Could not delete files: " + err.message);
           }
           loadOutputsTab();
         });
@@ -765,6 +769,8 @@ async function openJobPopup(internalName, displayName, existingRun) {
   // --- Run / live status -------------------------------------------------
 
   function connectWebSocket(runId) {
+    // Close any socket already attached to this popup before opening another.
+    if (ws) { try { ws.close(); } catch (e) { /* already closed */ } ws = null; }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws/runs/${runId}`);
     ws.onmessage = (evt) => {
@@ -774,7 +780,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       else if (msg.type === "status") {
         statusLine.textContent = `Status: ${msg.status}` +
           (msg.exit_code !== undefined && msg.exit_code !== null ? ` (exit ${msg.exit_code})` : "");
-        statusLine.className = "status-line " + (msg.status === "completed" ? "ok" : (msg.status === "failed" || msg.status === "aborted") ? "failed" : "");
+        statusLine.className = statusLineClass(msg.status);
         if (currentRun) currentRun.status = msg.status;
         refreshToolbarState();
         refreshCommandCenter();
@@ -793,10 +799,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
     const commandRow = body.querySelector('[data-role="command-row"]');
     if (commandRow) commandRow.querySelector('[data-role="run-btn"]').style.display = "none";
     statusLine.textContent = `Status: ${currentRun.status}`;
-    statusLine.className = "status-line " + (currentRun.status === "completed" ? "ok" : (currentRun.status === "failed" || currentRun.status === "aborted") ? "failed" : "");
+    statusLine.className = statusLineClass(currentRun.status);
     connectWebSocket(currentRun.run_id);
   } else {
     runBtn.addEventListener("click", async () => {
+      if (currentRun) return;   // already started; re-running is Overwrite's job
       runBtn.disabled = true;
       statusLine.textContent = "Starting…";
       statusLine.className = "status-line";
@@ -822,7 +829,9 @@ async function openJobPopup(internalName, displayName, existingRun) {
         refreshCommandCenter();
       } catch (err) {
         appendOutputLine("Failed to start run: " + err.message, true);
-      } finally {
+        // Only re-enable on failure -- leaving it enabled after a successful
+        // start let a second click launch a whole second job (new jobNNN) and
+        // orphan the first job's websocket.
         runBtn.disabled = false;
       }
     });
@@ -838,7 +847,6 @@ async function openJobPopup(internalName, displayName, existingRun) {
     class: ["no-full"],
     onclose: () => { if (ws) try { ws.close(); } catch (e) { /* noop */ } return false; },
   });
-  openPopups[popupId] = win;
 }
 
 loadCatalog().catch((err) => {
@@ -1045,7 +1053,9 @@ async function refreshProjectLabel() {
     // no default_pipeline.star to read yet) leave the toggle exactly where
     // it was — manual switching is the correct fallback there, per request.
     if (proj.pipeline_hint === "tomo" || proj.pipeline_hint === "spa") {
-      setPipelineFilter(proj.pipeline_hint);
+      // persist:false — an auto-detected hint must not overwrite the user's
+      // own remembered choice (same localStorage key).
+      setPipelineFilter(proj.pipeline_hint, { persist: false });
     }
   } catch (err) {
     projectDirLabel.textContent = "(unknown project)";
@@ -1220,8 +1230,6 @@ document.getElementById("pickDifferentFolderBtn").addEventListener("click", () =
 // of its centre, with radius sqrt(r^2 - delta^2). See backend/viz.py.
 // ==========================================================================
 
-let vizCounter = 0;
-
 function choiceDialog(message, choices) {
   // choices: [{key,label,danger?}] -> resolves to key (or null if dismissed)
   return new Promise((resolve) => {
@@ -1246,7 +1254,6 @@ function choiceDialog(message, choices) {
 }
 
 async function openVisualizer() {
-  vizCounter += 1;
   const body = document.createElement("div");
   body.className = "viz-popup";
   body.innerHTML = `
@@ -1342,6 +1349,14 @@ async function openVisualizer() {
     }
   }
 
+  let sliceTimer = null;
+  function renderSliceSoon() {
+    // Coalesce rapid slider input (a drag fires ~60 events/sec) into one
+    // request; the label/overlay still update immediately.
+    if (sliceTimer) clearTimeout(sliceTimer);
+    sliceTimer = setTimeout(() => { sliceTimer = null; renderSlice(); }, 60);
+  }
+
   function renderSlice() {
     if (!state.mrc || !state.vinfo) return;
     const img = q('[data-role="viz-img"]');
@@ -1370,12 +1385,17 @@ async function openVisualizer() {
   async function loadVolume(mrcPath) {
     statusEl.textContent = "Loading volume…";
     try {
+      // Fetch FIRST, commit after: assigning state.mrc up front meant a failed
+      // load left state.mrc pointing at the new volume while state.vinfo still
+      // described the old one, so the next slider nudge requested slices of the
+      // new MRC using the old volume's index range.
+      const info = await api(`/api/viz/volume-info?mrc_path=${encodeURIComponent(mrcPath)}`);
       state.mrc = mrcPath;
-      state.vinfo = await api(`/api/viz/volume-info?mrc_path=${encodeURIComponent(mrcPath)}`);
-      // contrast sliders map 0..100 -> value_min..value_max
+      state.vinfo = info;
+      // contrast sliders map 0..100 -> the sampled intensity range
       state.lo = state.vinfo.contrast_lo;
       state.hi = state.vinfo.contrast_hi;
-      const vmin = state.vinfo.value_min, vmax = state.vinfo.value_max, span = (vmax - vmin) || 1;
+      const vmin = state.vinfo.sample_min, vmax = state.vinfo.sample_max, span = (vmax - vmin) || 1;
       q('[data-role="viz-lo"]').value = String(Math.round(((state.lo - vmin) / span) * 100));
       q('[data-role="viz-hi"]').value = String(Math.round(((state.hi - vmin) / span) * 100));
       q('[data-role="viz-controls"]').style.display = "";
@@ -1464,7 +1484,7 @@ async function openVisualizer() {
     state.index = parseInt(e.target.value, 10);
     const dims = axisDims();
     q('[data-role="viz-slice-label"]').textContent = `Slice ${state.index}/${dims.depth - 1}`;
-    renderSlice();
+    renderSliceSoon();
   });
   body.querySelectorAll(".viz-axis").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1477,12 +1497,12 @@ async function openVisualizer() {
   });
   function contrastFromSliders() {
     const v = state.vinfo; if (!v) return;
-    const vmin = v.value_min, span = (v.value_max - v.value_min) || 1;
+    const vmin = v.sample_min, span = (v.sample_max - v.sample_min) || 1;
     let lo = vmin + (parseInt(q('[data-role="viz-lo"]').value, 10) / 100) * span;
     let hi = vmin + (parseInt(q('[data-role="viz-hi"]').value, 10) / 100) * span;
     if (hi <= lo) hi = lo + span * 0.01;
     state.lo = lo; state.hi = hi;
-    renderSlice();
+    renderSliceSoon();
   }
   q('[data-role="viz-lo"]').addEventListener("input", contrastFromSliders);
   q('[data-role="viz-hi"]').addEventListener("input", contrastFromSliders);

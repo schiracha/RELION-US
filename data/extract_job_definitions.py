@@ -217,7 +217,15 @@ def unquote(s: str) -> str:
         s = func_match.group(1).strip()  # strip e.g. std::string("") -> ""
     if s.startswith('"') and s.endswith('"') and len(s) >= 2:
         inner = s[1:-1]
-        return inner.encode().decode("unicode_escape", errors="replace")
+        # `unicode_escape` decodes LATIN-1, so encoding as UTF-8 first mangles
+        # every non-ASCII character in RELION's help text (U+2212 MINUS became
+        # "\xe2\x88\x92", U+2013 EN DASH became "\xe2\x80\x93" -- both were
+        # present in the shipped JSON). Encoding latin-1 with backslashreplace
+        # keeps the C escapes (\n, \t, \") interpreted while letting real
+        # non-ASCII characters survive the round trip intact.
+        return inner.encode("latin-1", "backslashreplace").decode(
+            "unicode_escape", errors="replace"
+        )
     return s
 
 
@@ -446,7 +454,6 @@ def extract_tab_layout(gui_text: str) -> dict[str, dict]:
     # order, for each boolean flag) rather than hard-coding the field list,
     # so this stays correct if a future RELION version changes which flags
     # are passed at each call site.
-    placetomoinput_def_fields = ["in_optimisation", "use_direct_entries"]
     # conditional fields in the order placeTomoInput's body adds them,
     # keyed by (arg_index, joboption_key) — see the has_particles/
     # has_tomograms/has_trajectories/has_manifolds parameter order and the
@@ -466,7 +473,7 @@ def extract_tab_layout(gui_text: str) -> dict[str, dict]:
         # order has_particles, has_tomograms, has_trajectories, has_manifolds
         # (see gui_jobwindow.cpp) — map positionally by the declared
         # parameter order, then emit in body order.
-        param_order = ["has_tomograms", "has_particles", "has_trajectories", "has_manifolds"]
+        param_order = TOMO_INPUT_PARAM_ORDER  # single source of truth (see module scope)
         values = dict(zip(param_order, args))
         for param_name, field_key in placetomoinput_conditional:
             if values.get(param_name, "false").strip() == "true":
@@ -535,9 +542,9 @@ def main() -> int:
     header_path = Path(sys.argv[2])
     gui_path = Path(sys.argv[3])
     out_path = Path(sys.argv[4])
-    text = strip_comments(strip_line_splices(src_path.read_text()))
-    header_text = strip_comments(strip_line_splices(header_path.read_text()))
-    gui_text = strip_comments(strip_line_splices(gui_path.read_text()))
+    text = strip_comments(strip_line_splices(src_path.read_text(encoding="utf-8")))
+    header_text = strip_comments(strip_line_splices(header_path.read_text(encoding="utf-8")))
+    gui_text = strip_comments(strip_line_splices(gui_path.read_text(encoding="utf-8")))
     option_vectors = extract_static_option_vectors(header_text)
     tab_layouts = extract_tab_layout(gui_text)
     tomo_input_template = extract_add_tomo_input_options_template(text)
@@ -594,7 +601,7 @@ def main() -> int:
         canonical = GUI_TO_JOB_NAME_ALIASES.get(job_name, job_name)
         jobs.setdefault(canonical, {})["tab_layout"] = layout
 
-    out_path.write_text(json.dumps(jobs, indent=2))
+    out_path.write_text(json.dumps(jobs, indent=2, ensure_ascii=False), encoding="utf-8")
     n_options = sum(len(j.get("options", [])) for j in jobs.values())
     print(f"Extracted {len(jobs)} job types, {n_options} total JobOptions -> {out_path}")
     for name, j in jobs.items():

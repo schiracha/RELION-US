@@ -29,8 +29,19 @@ def test_mirror_needs_dimension():
 
 
 def test_mirror_about_dimension():
+    # 0-based mirror about the volume centre: (size-1) - coord
     out = apply_coordinate_transform(_df(), flip_x=True, tomo_size_x=100)
-    assert out.iloc[0]["rlnCoordinateX"] == 90.0
+    assert out.iloc[0]["rlnCoordinateX"] == 89.0
+
+
+def test_mirror_keeps_coordinates_inside_the_volume():
+    """The endpoints must map onto each other, not off the end: 0 -> size-1."""
+    import pandas as pd
+    edge = pd.DataFrame({
+        "rlnCoordinateX": [0.0, 99.0], "rlnCoordinateY": [0.0, 0.0], "rlnCoordinateZ": [0.0, 0.0],
+    })
+    out = apply_coordinate_transform(edge, flip_x=True, tomo_size_x=100)
+    assert list(out["rlnCoordinateX"]) == [99.0, 0.0]
 
 
 def test_mirror_then_swap_order():
@@ -39,8 +50,8 @@ def test_mirror_then_swap_order():
         _df(), swap_yz=True, flip_y=True, tomo_size_y=100
     )
     row = out.iloc[0]
-    # original Y=20 mirrored about 100 -> 80, then swapped into Z
-    assert row["rlnCoordinateZ"] == 80.0
+    # original Y=20 mirrored about a 100-voxel axis -> (100-1)-20 = 79, then swapped into Z
+    assert row["rlnCoordinateZ"] == 79.0
     assert row["rlnCoordinateY"] == 5.0  # original Z
 
 

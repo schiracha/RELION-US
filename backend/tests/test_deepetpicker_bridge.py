@@ -78,11 +78,11 @@ def test_coords_to_relion_particles_swap_yz_and_class_preserved(tmp_path):
 def test_coords_to_relion_particles_mirror_after_binning(tmp_path):
     path = tmp_path / "TS_01.coords"
     path.write_text(SAMPLE_COORDS)
-    # binning 2 -> x0 = 200; mirror about 1000 -> 800
+    # binning 2 -> x0 = 200; mirror about a 1000-voxel axis -> (1000-1)-200 = 799
     out = coords_to_relion_particles(
         path, tomo_name="TS_01", binning_factor=2.0, flip_x=True, tomo_size_x=1000
     )
-    assert out.loc[0, "rlnCoordinateX"] == pytest.approx(800.0)
+    assert out.loc[0, "rlnCoordinateX"] == pytest.approx(799.0)
 
 
 def test_batch_directory(tmp_path):

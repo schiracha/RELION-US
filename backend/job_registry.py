@@ -31,6 +31,7 @@ the class of bug this whole app exists to get away from. Instead:
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shlex
@@ -50,9 +51,19 @@ from job_catalog import (
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+# Jobs that run a user-configured executable (DynaMight/ModelAngelo/External)
+# rather than a hard-coded relion_* binary; see extract_job_definitions.py.
+_EXE_PLACEHOLDER_RE = re.compile(r"^\{joboptions\.([A-Za-z0-9_]+)\}$")
 
+
+@functools.lru_cache(maxsize=1)
 def _load_raw() -> dict[str, Any]:
-    with open(DATA_DIR / "job_definitions_raw.json") as f:
+    """Parsed job_definitions_raw.json. Cached: it's ~500 KB (32 jobs, each
+    embedding RELION's verbatim C++ command source) and is re-read for every
+    job definition AND every draft recompute, which the frontend fires as the
+    user edits a form. The file only changes when the extractor is re-run,
+    which requires a restart anyway."""
+    with open(DATA_DIR / "job_definitions_raw.json", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -123,11 +134,16 @@ def _build_draft_command(
     # JobOption (e.g. "Location of DynaMight executable:"). extract_job_
     # definitions.py surfaces that as the placeholder "{joboptions.<key>}";
     # resolve it against the actual field values here.
-    is_exe_placeholder = bool(re.match(r"^\{joboptions\.[A-Za-z0-9_]+\}$", program))
-    placeholder_match = re.match(r"^\{joboptions\.([A-Za-z0-9_]+)\}$", program)
+    placeholder_match = _EXE_PLACEHOLDER_RE.match(program)
+    is_exe_placeholder = placeholder_match is not None
     if placeholder_match:
         exe_key = placeholder_match.group(1)
-        program = field_values.get(exe_key) or f"<set the '{exe_key}' field to this job's executable path>"
+        configured = field_values.get(exe_key)
+        # quoted like every other value below -- an executable path with a
+        # space would otherwise produce a broken draft
+        program = shlex.quote(str(configured)) if configured else (
+            f"<set the '{exe_key}' field to this job's executable path>"
+        )
     flags_used = set(raw_job.get("flags_used", []))
     options_by_key = {o["key"]: o for o in raw_job.get("options", [])}
 

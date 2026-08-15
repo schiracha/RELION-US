@@ -11,7 +11,6 @@ Usage: python3 test_command_center_abort_overwrite.py [base_url]
 """
 import subprocess
 import sys
-import time
 
 from playwright.sync_api import sync_playwright
 

@@ -39,8 +39,7 @@ from pathlib import Path
 def fill_template(template_path: Path, account: str, job_name: str) -> str:
     text = template_path.read_text()
     text = text.replace("ACCOUNT_NAME", account)
-    text = text.replace("relion_tomo_job", job_name).replace("tomo_bridge_py_job", job_name)
-    return text
+    return text.replace("relion_tomo_job", job_name).replace("tomo_bridge_py_job", job_name)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -151,7 +151,9 @@ def read_aln(path: PathLike) -> AlnData:
             f"{len(ALN_GLOBAL_COLUMNS)} columns ({' '.join(ALN_GLOBAL_COLUMNS)})."
         )
 
-    df = pd.DataFrame(rows, columns=list(ALN_GLOBAL_COLUMNS))
+    # Sorted once here: SEC order is canonical for both the .xf and the .tlt,
+    # so neither accessor needs to re-sort.
+    df = pd.DataFrame(rows, columns=list(ALN_GLOBAL_COLUMNS)).sort_values("sec").reset_index(drop=True)
     return AlnData(
         path=path, df=df, raw_size=raw_size, num_patches=num_patches, dark_frames=dark_frames
     )
@@ -174,15 +176,13 @@ def aln_to_xf_records(aln: Union[PathLike, AlnData]) -> list[XfRecord]:
     """Build one IMOD .xf transform per surviving (non-dark) image, in SEC
     order, from an AreTomo2 `.aln`."""
     data = aln if isinstance(aln, AlnData) else read_aln(aln)
-    df = data.df.sort_values("sec")
-    return [_row_to_xf(r.rot, r.tx, r.ty) for r in df.itertuples()]
+    return [_row_to_xf(r.rot, r.tx, r.ty) for r in data.df.itertuples()]
 
 
 def aln_tilt_angles(aln: Union[PathLike, AlnData]) -> list[float]:
     """Refined per-image tilt angles (TILT column), SEC order — the `.tlt`."""
     data = aln if isinstance(aln, AlnData) else read_aln(aln)
-    df = data.df.sort_values("sec")
-    return [float(r.tilt) for r in df.itertuples()]
+    return [float(r.tilt) for r in data.df.itertuples()]
 
 
 def aln_to_imod(
@@ -205,6 +205,23 @@ def aln_to_imod(
 
     records = aln_to_xf_records(data)
     angles = aln_tilt_angles(data)
+
+    # Cross-check against the header before writing anything. IMOD and RELION
+    # pair .xf line N with stack image N *positionally*, so a single silently
+    # dropped row would mis-pair every subsequent tilt image with the wrong
+    # transform -- a corrupted reconstruction that still looks plausible.
+    # Better to refuse than to emit a quietly wrong alignment.
+    if data.raw_size is not None:
+        expected = data.raw_size[2] - len(data.dark_frames)
+        if expected > 0 and len(records) != expected:
+            raise ValueError(
+                f"{data.path}: parsed {len(records)} alignment rows but the header "
+                f"implies {expected} ({data.raw_size[2]} images minus "
+                f"{len(data.dark_frames)} dark). Refusing to write a .xf/.tlt that "
+                f"would mis-pair transforms with tilt images -- check the file for "
+                f"rows this parser didn't recognise."
+            )
+
     write_xf(records, xf_path)
     write_tlt(angles, tlt_path)
 

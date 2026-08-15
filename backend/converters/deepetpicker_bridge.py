@@ -32,6 +32,8 @@ from typing import Optional, Union
 
 import pandas as pd
 
+from .coord_transform import apply_coordinate_transform
+
 PathLike = Union[str, Path]
 
 COORDS_COLUMNS = ("class_id", "x", "y", "z")
@@ -113,8 +115,6 @@ def coords_to_relion_particles(
     # Optional axis flips/swap, applied AFTER binning (so tomo_size_* are in
     # the same rescaled units as the coordinates).
     if swap_yz or flip_x or flip_y or flip_z:
-        from .coord_transform import apply_coordinate_transform
-
         out = apply_coordinate_transform(
             out,
             swap_yz=swap_yz,

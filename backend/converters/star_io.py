@@ -61,9 +61,8 @@ class StarDocument:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"STAR file not found: {path}")
-        raw = starfile.read(path, always_dict=True)
-        blocks = {name: df for name, df in raw.items()}
-        return cls(path=path, blocks=blocks)
+        # always_dict=True already returns a dict of name -> DataFrame.
+        return cls(path=path, blocks=starfile.read(path, always_dict=True))
 
     def block(self, name: Optional[str] = None) -> pd.DataFrame:
         """Return a specific block, or the only block if the file has one."""
@@ -90,11 +89,16 @@ class StarDocument:
             )
 
     def write(self, path: PathLike, overwrite: bool = False) -> Path:
+        """Write every block back out, PRESERVING block names.
+
+        Note the single-block case is not special-cased: handing `starfile`
+        a bare DataFrame writes an anonymous `data_` header, losing the
+        `data_particles`/`data_tomograms` name that RELION-5 looks blocks up
+        by. Passing the dict keeps the name in both cases."""
         path = Path(path)
         if path.exists() and not overwrite:
             raise FileExistsError(f"{path} exists; pass overwrite=True to replace it")
-        payload = self.blocks if len(self.blocks) != 1 else next(iter(self.blocks.values()))
-        starfile.write(payload, path, overwrite=overwrite)
+        starfile.write(self.blocks, path, overwrite=overwrite)
         return path
 
 
@@ -152,5 +156,17 @@ def backup_before_overwrite(path: PathLike) -> Optional[Path]:
     if not path.exists():
         return None
     backup = path.with_suffix(path.suffix + ".bak")
+    # Never overwrite an existing backup: a second import run would otherwise
+    # copy the FIRST run's generated output over the .bak, destroying the
+    # original hand-curated file this function exists to protect. Fall back to
+    # .bak2, .bak3, ... so every previous version survives.
+    if backup.exists():
+        n = 2
+        while True:
+            candidate = path.with_suffix(f"{path.suffix}.bak{n}")
+            if not candidate.exists():
+                backup = candidate
+                break
+            n += 1
     shutil.copy2(path, backup)
     return backup

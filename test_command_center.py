@@ -10,7 +10,6 @@ are deterministic.
 Usage: python3 test_command_center.py [base_url]
 """
 import sys
-import time
 
 from playwright.sync_api import sync_playwright
 

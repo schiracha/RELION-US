@@ -11,8 +11,9 @@ The two that actually bite in practice:
     built on a raw `tilt` reconstruction has depth in Y. See
     imod_bridge.model_to_coordinates for the full, sourced explanation.
   * Axis mirror — packages differ on whether an axis origin is at the top or
-    bottom of the volume, so a coordinate sometimes needs `coord -> (dim -
-    coord)` about the tomogram's size along that axis.
+    bottom of the volume, so a coordinate sometimes needs reflecting about
+    the tomogram's centre along that axis: `coord -> (dim - 1) - coord` for
+    0-based coordinates (see the note in the code for why the -1 matters).
 
 Rather than re-implement these per importer (and risk them drifting apart),
 every coordinate importer routes through `apply_coordinate_transform` here.
@@ -57,13 +58,14 @@ def apply_coordinate_transform(
 
     swap_yz:      swap the Y and Z coordinate columns (handedness-changing;
                   the usual fix for an IMOD flipped/raw-tilt tomogram).
-    flip_{x,y,z}: mirror that axis: coord -> (tomo_size_axis - coord).
+    flip_{x,y,z}: mirror that axis about the volume centre:
+                  coord -> (tomo_size_axis - 1) - coord (0-based coords).
                   Requires the matching tomo_size_* (raises ValueError if a
                   flip is requested without it).
     """
-    required = {c for c in (X, Y, Z) if c not in df.columns}
-    if required:
-        raise KeyError(f"apply_coordinate_transform needs columns {sorted(required)} present")
+    missing = [c for c in (X, Y, Z) if c not in df.columns]
+    if missing:
+        raise KeyError(f"apply_coordinate_transform needs columns {missing} present")
 
     out = df.copy()
 
@@ -74,13 +76,25 @@ def apply_coordinate_transform(
     ):
         if not do_flip:
             continue
-        if size is None or float(size) <= 0:
+        axis_lower = axisname.lower()
+        if size is None:
             raise ValueError(
-                f"flip_{axisname.lower()} requested but tomo_size_{axisname.lower()} "
-                f"was not given (need the tomogram's {axisname} dimension, in the "
-                f"same units as the coordinates, to mirror about it)"
+                f"flip_{axis_lower} requested but tomo_size_{axis_lower} was not "
+                f"given (need the tomogram's {axisname} dimension, in the same "
+                f"units as the coordinates, to mirror about it)"
             )
-        out[col] = float(size) - out[col]
+        if float(size) <= 0:
+            raise ValueError(
+                f"tomo_size_{axis_lower} must be a positive tomogram dimension, "
+                f"got {size!r}"
+            )
+        # Mirror about the volume's CENTRE for 0-based coordinates: the centre
+        # of a `size`-voxel axis is at (size-1)/2, so the reflection of c is
+        # 2*((size-1)/2) - c == (size-1) - c. This maps 0 -> size-1 and
+        # size-1 -> 0, i.e. it stays inside the volume. (A plain `size - c`
+        # would send 0 to `size`, one voxel outside the volume, and shift
+        # every coordinate by a full voxel.)
+        out[col] = (float(size) - 1.0) - out[col]
 
     if swap_yz:
         out[Y], out[Z] = out[Z].copy(), out[Y].copy()

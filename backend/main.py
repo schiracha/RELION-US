@@ -121,7 +121,7 @@ import job_registry
 import project_manager
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
-from job_runner import JobRunManager
+from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PROJECT_DIR = APP_DIR.parent / "relion_project"
@@ -162,10 +162,26 @@ def get_catalog():
     return {"categories": job_registry.categories(), "jobs": job_registry.list_catalog()}
 
 
+def _custom_job_definition(internal_name: str) -> dict:
+    """A custom job's definition, with `default_values` derived from its own
+    options. Real RELION jobs get this key from
+    job_registry.build_job_definition(); without it the frontend's
+    `def.default_values || {}` fell back to an empty dict, so every custom
+    job's popup opened with EVERY field blank -- a blank numeric field parses
+    to NaN and a blank output path resolves to the job directory itself.
+    Derived here rather than hand-written per job so the declared `default`
+    on each option stays the single source of truth."""
+    definition = dict(CUSTOM_JOB_DEFINITIONS[internal_name])
+    definition["default_values"] = {
+        opt["key"]: opt.get("default", "") for opt in definition.get("options", [])
+    }
+    return definition
+
+
 @app.get("/api/jobs/{internal_name}")
 def get_job_definition(internal_name: str):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
-        return CUSTOM_JOB_DEFINITIONS[internal_name]
+        return _custom_job_definition(internal_name)
     try:
         # Prospective RELION-style output dir (<JobDir>/jobNNN) for the draft's
         # --o, matching RELION's run-from-project-root convention. Finalized at
@@ -218,11 +234,13 @@ async def start_run(req: StartRunRequest):
         display_name = CUSTOM_JOB_DEFINITIONS[req.internal_name]["display_name"]
         values = req.field_values or {}
 
-        async def factory():
+        async def factory(job_dir):
             # Use run_manager.project_dir (not the startup PROJECT_DIR
             # constant) so a project switched *after* this popup was opened
             # but *before* Run was clicked lands in the right place.
-            return await runner(run_manager.project_dir, values)
+            # job_dir is this run's own <JobDir>/jobNNN, so converter outputs
+            # land where the Outputs tab / Clean / Delete look for them.
+            return await runner(run_manager.project_dir, values, job_dir)
 
         try:
             run = await run_manager.start_custom_job(
@@ -276,7 +294,26 @@ def update_run(run_id: str, req: RunUpdateRequest):
     """Command Center 'Alias' / 'Edit Note' / 'Mark as finished'/'Mark as
     failed' actions, combined into one endpoint since they're all small,
     independent metadata edits. Any combination of fields may be given in
-    one call; each is applied in turn."""
+    one call; each is applied in turn.
+
+    Everything is validated BEFORE anything is written: an invalid status
+    used to be rejected only after the alias/note edits had already been
+    persisted, so the caller got an error while two of three changes had
+    silently landed on disk."""
+    if req.alias is None and req.note is None and req.status is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to update -- provide alias, note, and/or status",
+        )
+    if req.status is not None and req.status not in MANUALLY_SETTABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"status must be one of {sorted(MANUALLY_SETTABLE_STATUSES)} "
+                f"(got {req.status!r})"
+            ),
+        )
+
     updated: dict | None = None
     if req.alias is not None:
         updated = run_manager.set_alias(run_id, req.alias)
@@ -293,8 +330,6 @@ def update_run(run_id: str, req: RunUpdateRequest):
             raise HTTPException(status_code=400, detail=str(exc))
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown run_id")
-    if updated is None:
-        raise HTTPException(status_code=400, detail="Nothing to update -- provide alias, note, and/or status")
     return updated
 
 
@@ -367,9 +402,16 @@ def download_run_files_zip(run_id: str, path: list[str] = Query(...)):
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
     tmp_path = Path(tmp.name)
-    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel, resolved in resolved_paths:
-            zf.write(resolved, arcname=rel)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for rel, resolved in resolved_paths:
+                zf.write(resolved, arcname=rel)
+    except Exception:
+        # Only the success path gets a BackgroundTask cleanup, so without this
+        # a failed zip (disk full, file removed mid-write) would leave the temp
+        # file behind permanently -- and these are cryo-EM sized.
+        tmp_path.unlink(missing_ok=True)
+        raise
 
     def _cleanup():
         tmp_path.unlink(missing_ok=True)
@@ -489,13 +531,33 @@ async def run_websocket(websocket: WebSocket, run_id: str):
 
     queue: asyncio.Queue = asyncio.Queue()
     run.subscribers.append(queue)
+
+    async def watch_for_disconnect() -> None:
+        # Starlette only raises WebSocketDisconnect from receive*(), never
+        # from send*(). Without this reader the send loop below would park on
+        # queue.get() forever once the run finished -- leaking a task, a queue
+        # and a subscribers entry for every popup the user ever opened.
+        try:
+            while True:
+                await websocket.receive_text()
+        except Exception:  # noqa: BLE001 - any disconnect/protocol error ends it
+            pass
+
+    reader = asyncio.create_task(watch_for_disconnect())
     try:
         while True:
-            message = await queue.get()
-            await websocket.send_json(message)
-    except WebSocketDisconnect:
+            get_next = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {get_next, reader}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if reader in done:          # client went away
+                get_next.cancel()
+                break
+            await websocket.send_json(get_next.result())
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        reader.cancel()
         if queue in run.subscribers:
             run.subscribers.remove(queue)
 

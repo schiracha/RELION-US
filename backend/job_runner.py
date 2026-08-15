@@ -58,6 +58,11 @@ STATUS_ABORTED = "aborted"
 # actually stop the process.
 MANUALLY_SETTABLE_STATUSES = {STATUS_COMPLETED, STATUS_FAILED}
 
+# Placeholder "command" recorded for custom (in-process converter) jobs, which
+# never spawn a subprocess. Kept as one constant so the marker and the check
+# that recognises it can't drift apart.
+IN_PROCESS_COMMAND_PREFIX = "<in-process: "
+
 # Extensions this module will look for when best-effort-detecting a job's
 # *inputs* (see _detect_inputs) for the Command Center timeline view's
 # "connects jobs to their inputs" box, and when listing/downloading a job's
@@ -162,6 +167,21 @@ class JobRun:
     # long gone anyway.
     proc: Any = field(default=None, repr=False, compare=False)
     task: Any = field(default=None, repr=False, compare=False)
+    # One-off note emitted into the live output at start (currently: the
+    # output directory was renumbered because the prospective jobNNN was
+    # taken). Declared here rather than set ad hoc so both start paths and
+    # the reader agree it exists.
+    rewrite_note: Optional[str] = field(default=None, repr=False, compare=False)
+    # Set when Abort arrives before the subprocess handle exists (see
+    # abort_run + _run_subprocess); the launcher honours it as soon as it
+    # has a process to signal.
+    abort_requested: bool = field(default=False, repr=False, compare=False)
+
+    @property
+    def is_custom_job(self) -> bool:
+        """True for an in-process converter job (no subprocess to signal);
+        see custom_jobs.py and start_custom_job()."""
+        return self.command.startswith(IN_PROCESS_COMMAND_PREFIX)
 
     @property
     def job_name(self) -> str:
@@ -435,13 +455,18 @@ class JobRunManager:
             field_values=field_values,
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
         )
-        run._rewrite_note = rewrite_note
+        run.rewrite_note = rewrite_note
         self.runs[run_id] = run
         self._persist(run)
         run.task = asyncio.create_task(self._run_subprocess(run))
         return run
 
     async def _run_subprocess(self, run: JobRun) -> None:
+        if run.abort_requested:
+            # Aborted before we even got scheduled -- don't spawn a process
+            # just to kill it. abort_run() already set the status, persisted
+            # and broadcast it.
+            return
         run.status = STATUS_RUNNING
         run.started_at = time.time()
         self._persist(run)
@@ -450,10 +475,9 @@ class JobRunManager:
         # If start_subprocess_job had to advance the output directory to
         # avoid a job-number collision, surface that one adjustment in the
         # live output before anything else.
-        note = getattr(run, "_rewrite_note", None)
-        if note:
-            run.stdout_lines.append(note)
-            await run.broadcast({"type": "stdout", "line": note})
+        if run.rewrite_note:
+            run.stdout_lines.append(run.rewrite_note)
+            await run.broadcast({"type": "stdout", "line": run.rewrite_note})
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -489,31 +513,63 @@ class JobRunManager:
             return
 
         run.proc = proc
+        if run.abort_requested:
+            # Abort arrived while this process was still being spawned.
+            self._terminate_process_group(run)
 
         async def pump(stream, sink: list[str], msg_type: str):
             while True:
-                line = await stream.readline()
+                try:
+                    line = await stream.readline()
+                except ValueError as exc:
+                    # StreamReader raises on a single line longer than its
+                    # 64 KiB limit -- real for tools that emit one huge line.
+                    # Report it and stop pumping rather than letting it
+                    # escape and strand the run in "running" forever.
+                    msg = f"[RELION-US] output stream error: {exc}"
+                    run.stderr_lines.append(msg)
+                    await run.broadcast({"type": "stderr", "line": msg})
+                    break
                 if not line:
                     break
                 decoded = line.decode(errors="replace").rstrip("\n")
                 sink.append(decoded)
                 await run.broadcast({"type": msg_type, "line": decoded})
 
-        await asyncio.gather(
-            pump(proc.stdout, run.stdout_lines, "stdout"),
-            pump(proc.stderr, run.stderr_lines, "stderr"),
-        )
-        exit_code = await proc.wait()
-        run.exit_code = exit_code
-        # abort_run() may already have set this to STATUS_ABORTED (and
-        # requested termination) -- don't let the process's exit code
-        # (non-zero after a SIGTERM) overwrite that with STATUS_FAILED.
-        if run.status != STATUS_ABORTED:
-            run.status = STATUS_COMPLETED if exit_code == 0 else STATUS_FAILED
-        run.ended_at = time.time()
-        run.proc = None
-        self._persist(run)
-        await run.broadcast({"type": "status", "status": run.status, "exit_code": exit_code})
+        # try/finally so the run ALWAYS reaches a terminal status and is
+        # persisted -- otherwise an unexpected error here leaves the Command
+        # Center showing a job that runs forever, with an unreaped child.
+        # (_run_custom already had this; the two paths now match.)
+        exit_code = None
+        try:
+            await asyncio.gather(
+                pump(proc.stdout, run.stdout_lines, "stdout"),
+                pump(proc.stderr, run.stderr_lines, "stderr"),
+            )
+            exit_code = await proc.wait()
+        except Exception as exc:  # noqa: BLE001
+            msg = f"[RELION-US] error while streaming output: {type(exc).__name__}: {exc}"
+            run.stderr_lines.append(msg)
+            await run.broadcast({"type": "stderr", "line": msg})
+        finally:
+            if exit_code is None:
+                # never got a clean wait() -- make sure the child is reaped
+                try:
+                    exit_code = await proc.wait()
+                except Exception:  # noqa: BLE001
+                    exit_code = proc.returncode
+            run.exit_code = exit_code
+            # abort_run() may already have set this to STATUS_ABORTED (and
+            # requested termination) -- don't let the process's exit code
+            # (non-zero after a SIGTERM) overwrite that with STATUS_FAILED.
+            if run.status != STATUS_ABORTED:
+                run.status = STATUS_COMPLETED if exit_code == 0 else STATUS_FAILED
+            run.ended_at = time.time()
+            run.proc = None
+            self._persist(run)
+            await run.broadcast(
+                {"type": "status", "status": run.status, "exit_code": exit_code}
+            )
 
     async def start_custom_job(
         self,
@@ -524,11 +580,15 @@ class JobRunManager:
         overwrite_run_id: Optional[str] = None,
     ) -> JobRun:
         """
-        runner_coro_factory: a zero-arg callable returning a coroutine that
-        does the actual work and returns a human-readable summary string
-        (or raises). Used by custom_jobs.py for the IMOD/Warp/DeepETPicker
-        bridges, which call converters/ directly instead of spawning a
-        subprocess.
+        runner_coro_factory: a callable taking the job's own output directory
+        and returning a coroutine that does the actual work and returns a
+        human-readable summary string (or raises). Used by custom_jobs.py for
+        the IMOD/Warp/DeepETPicker/AreTomo2 bridges, which call converters/
+        directly instead of spawning a subprocess. It receives the job dir so
+        its outputs land in `<JobDir>/jobNNN/` -- the same directory the
+        Outputs tab, Clean and Delete operate on -- rather than the project
+        root, which would leave the tracked job dir empty and let successive
+        runs silently overwrite each other's results.
 
         overwrite_run_id: same "Overwrite" semantics as
         start_subprocess_job() -- reuses the original run's run_id/cwd/
@@ -556,7 +616,7 @@ class JobRunManager:
             run_id=run_id,
             internal_name=internal_name,
             display_name=display_name,
-            command=f"<in-process: {internal_name}>",
+            command=f"{IN_PROCESS_COMMAND_PREFIX}{internal_name}>",
             cwd=str(cwd),
             alias=alias,
             note=note,
@@ -567,16 +627,18 @@ class JobRunManager:
         )
         self.runs[run_id] = run
         self._persist(run)
-        run.task = asyncio.create_task(self._run_custom(run, runner_coro_factory))
+        run.task = asyncio.create_task(self._run_custom(run, runner_coro_factory, cwd))
         return run
 
-    async def _run_custom(self, run: JobRun, runner_coro_factory) -> None:
+    async def _run_custom(self, run: JobRun, runner_coro_factory, job_dir: Path) -> None:
+        if run.abort_requested:
+            return  # aborted before this task got scheduled; see _run_subprocess
         run.status = STATUS_RUNNING
         run.started_at = time.time()
         self._persist(run)
         await run.broadcast({"type": "status", "status": run.status})
         try:
-            result = await runner_coro_factory()
+            result = await runner_coro_factory(job_dir)
             for line in str(result).splitlines() or ["(no output)"]:
                 run.stdout_lines.append(line)
                 await run.broadcast({"type": "stdout", "line": line})
@@ -604,6 +666,25 @@ class JobRunManager:
     # finished, Mark as failed, Delete. "Edit Note" is real RELION too
     # (a free-text annotation per job) -- exposed here as set_note().
 
+    @staticmethod
+    def _terminate_process_group(run: JobRun) -> None:
+        """Signal the whole process group (see start_new_session=True in
+        _run_subprocess), not just the /bin/sh wrapper -- a plain terminate()
+        only reaches the shell itself and can leave its actual child (the real
+        relion_* command) running orphaned. Falls back to terminate() if the
+        process somehow isn't its own group leader (shouldn't happen given
+        start_new_session=True, but a crashed/reaped process could make
+        getpgid raise)."""
+        if run.proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(run.proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                run.proc.terminate()
+            except ProcessLookupError:
+                pass
+
     async def abort_run(self, run_id: str) -> bool:
         """Real RELION 'Abort running' (gui_mainwindow.cpp's cb_abort ->
         pipeline's kill-the-running-process path). Returns False if the run
@@ -614,7 +695,12 @@ class JobRunManager:
         stop, so the UI reflects the abort right away rather than racing
         the process's own shutdown."""
         run = self.get(run_id)
-        if run is None or run.status != STATUS_RUNNING:
+        # PENDING counts: there is a real window between start_*_job() creating
+        # the run and its task setting status to RUNNING, and a fast click
+        # landing in that window used to return False while the job carried on
+        # running. The abort_requested flag below covers the process handle not
+        # existing yet.
+        if run is None or run.status not in (STATUS_PENDING, STATUS_RUNNING):
             return False
         run.status = STATUS_ABORTED
         run.ended_at = time.time()
@@ -622,23 +708,20 @@ class JobRunManager:
         await run.broadcast({"type": "stderr", "line": "Aborted by user."})
         await run.broadcast({"type": "status", "status": run.status})
         if run.proc is not None:
-            try:
-                # Signal the whole process group (see start_new_session=True
-                # in _run_subprocess), not just the /bin/sh wrapper -- a
-                # plain terminate() only reaches the shell itself and can
-                # leave its actual child (the real relion_* command) running
-                # orphaned. Falls back to terminate() if the process somehow
-                # isn't its own group leader (shouldn't happen given
-                # start_new_session=True, but a crashed/reaped process could
-                # make getpgid raise).
-                os.killpg(os.getpgid(run.proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    run.proc.terminate()
-                except ProcessLookupError:
-                    pass
-        elif run.task is not None:
-            run.task.cancel()
+            self._terminate_process_group(run)
+        elif run.is_custom_job:
+            # In-process converter job: the task IS the work, so cancelling it
+            # is the abort.
+            if run.task is not None:
+                run.task.cancel()
+        else:
+            # Subprocess job whose handle doesn't exist YET -- we're inside the
+            # short window between "status = running" and create_subprocess_shell
+            # returning. Cancelling the launcher here could kill it mid-spawn and
+            # leave a process group running with nothing tracking it (exactly what
+            # start_new_session=True + killpg exist to prevent). Record the intent
+            # instead; _run_subprocess signals the group the moment it has one.
+            run.abort_requested = True
         return True
 
     def _update_persisted_only(self, run_id: str, **fields: Any) -> Optional[dict]:
