@@ -1225,6 +1225,7 @@ function clearModalError(el) {
 async function refreshProjectLabel() {
   try {
     const proj = await api("/api/project");
+    cachedProjectPath = proj.path;   // used by the file picker
     projectDirLabel.textContent = proj.path;
     projectDirLabel.title = proj.path;
     // Optional auto-switch: only act on an unambiguous hint ('tomo' or
@@ -1438,10 +1439,16 @@ async function openVisualizer() {
   body.innerHTML = `
     <div class="viz-inputs">
       <label>STAR (optimiser/tomograms/particles) or MRC:
-        <input type="text" data-role="viz-path" placeholder="e.g. Tomograms/job012/tomograms.star or TS_01.mrc" />
+        <span class="viz-input-row">
+          <input type="text" data-role="viz-path" placeholder="e.g. Tomograms/job012/tomograms.star or TS_01.mrc" />
+          <button type="button" class="btn" data-role="viz-browse-main" title="Browse for a STAR or MRC file on the machine running the backend">Browse…</button>
+        </span>
       </label>
       <label>Particles/coords STAR (optional, if separate):
-        <input type="text" data-role="viz-particles" placeholder="e.g. particles.star" />
+        <span class="viz-input-row">
+          <input type="text" data-role="viz-particles" placeholder="e.g. particles.star" />
+          <button type="button" class="btn" data-role="viz-browse-particles" title="Browse for a particles/coordinates STAR file">Browse…</button>
+        </span>
       </label>
       <div class="viz-inputs-row">
         <button class="btn primary" data-role="viz-load">Load</button>
@@ -1616,6 +1623,26 @@ async function openVisualizer() {
     }
   }
 
+  // --- Browse buttons ---------------------------------------------------
+  // Extension lists mirror what viz.py accepts (VOLUME_SUFFIXES/STAR_SUFFIXES).
+  q('[data-role="viz-browse-main"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({
+      title: "Select a tomogram or STAR file",
+      extensions: [".star", ".mrc", ".mrcs", ".rec", ".st", ".ali"],
+      startPath: currentDirOf(q('[data-role="viz-path"]').value),
+    });
+    if (picked) q('[data-role="viz-path"]').value = picked;
+  });
+  q('[data-role="viz-browse-particles"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({
+      title: "Select a particles / coordinates STAR file",
+      extensions: [".star"],
+      startPath: currentDirOf(q('[data-role="viz-particles"]').value)
+        || currentDirOf(q('[data-role="viz-path"]').value),
+    });
+    if (picked) q('[data-role="viz-particles"]').value = picked;
+  });
+
   // --- Load button: inspect -> populate tomograms -> load volume+picks ---
   q('[data-role="viz-load"]').addEventListener("click", async () => {
     const path = q('[data-role="viz-path"]').value.trim();
@@ -1704,6 +1731,150 @@ async function openVisualizer() {
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", openVisualizer);
+
+// ==========================================================================
+// Server-side FILE picker.
+// Reuses POST /api/project/browse (which already returns files alongside
+// folders) rather than an <input type="file">: the backend may be on a
+// different machine than the browser — an HPC login node, typically — so the
+// browser's own filesystem is not the one holding the data. Returns a path
+// relative to the project when the pick is inside it (what the viewer's API
+// expects), or an absolute path otherwise.
+// ==========================================================================
+
+let cachedProjectPath = null;
+
+// Where a Browse button should open: the folder holding whatever is already
+// typed in that field, so re-browsing resumes where you left off. Returns null
+// (meaning "start at the project directory") when the field is empty or has no
+// folder part.
+function currentDirOf(value) {
+  const v = (value || "").trim();
+  if (!v) return null;
+  const idx = v.lastIndexOf("/");
+  if (idx < 0) return null;                    // a bare filename -> project dir
+  const dir = v.slice(0, idx);
+  if (!dir) return "/";
+  if (dir.startsWith("/")) return dir;         // already absolute
+  return cachedProjectPath ? `${cachedProjectPath.replace(/\/+$/, "")}/${dir}` : dir;
+}
+
+function pickFileDialog({ title = "Select a file", extensions = [], startPath = null } = {}) {
+  const exts = extensions.map((e) => e.toLowerCase());
+  const matches = (name) => !exts.length || exts.some((e) => name.toLowerCase().endsWith(e));
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    // Own class so this is unambiguous: the Change Project modal is always in
+    // the DOM (hidden) and also carries .modal-overlay/.project-browser.
+    overlay.className = "modal-overlay file-picker";
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>${escapeHtml(title)}</h3>
+        <p class="modal-hint">
+          Listing files on the machine running the backend${
+            exts.length ? ` — showing ${exts.map(escapeHtml).join(", ")}` : ""
+          }. Click a folder to open it, or a file to choose it.
+        </p>
+        <div class="modal-row">
+          <input type="text" data-role="pick-path" placeholder="/path/to/folder" />
+          <button class="btn" data-role="pick-go">Go</button>
+        </div>
+        <div class="picker-current" data-role="pick-current"></div>
+        <div class="project-browser" data-role="pick-list"></div>
+        <div class="modal-actions">
+          <button class="btn" data-role="pick-cancel">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const listEl = overlay.querySelector('[data-role="pick-list"]');
+    const currentEl = overlay.querySelector('[data-role="pick-current"]');
+    const pathInput = overlay.querySelector('[data-role="pick-path"]');
+
+    function finish(value) {
+      overlay.remove();
+      resolve(value);
+    }
+
+    // Prefer a project-relative path: the viewer resolves relative paths
+    // against the project directory, and that's also what RELION itself
+    // stores, so it keeps typed and picked paths in the same idiom.
+    function toProjectRelative(fullPath) {
+      if (!cachedProjectPath) return fullPath;
+      const root = cachedProjectPath.replace(/\/+$/, "");
+      if (fullPath === root) return fullPath;
+      if (fullPath.startsWith(root + "/")) return fullPath.slice(root.length + 1);
+      return fullPath;
+    }
+
+    async function show(path) {
+      let listing;
+      try {
+        listing = await api("/api/project/browse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path || "" }),
+        });
+      } catch (err) {
+        listEl.innerHTML = `<div class="browser-entry picker-note">Could not open: ${escapeHtml(err.message)}</div>`;
+        return;
+      }
+      currentEl.textContent = listing.path;
+      pathInput.value = listing.path;
+      listEl.innerHTML = "";
+
+      if (listing.parent) {
+        const up = document.createElement("div");
+        up.className = "browser-entry";
+        up.textContent = "⬆ ..";
+        up.addEventListener("click", () => show(listing.parent));
+        listEl.appendChild(up);
+      }
+      const base = listing.path.replace(/\/+$/, "");
+      const dirs = listing.entries.filter((e) => e.is_dir);
+      const files = listing.entries.filter((e) => !e.is_dir && matches(e.name));
+
+      dirs.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = "browser-entry";
+        row.textContent = "📁 " + entry.name;
+        row.addEventListener("click", () => show(`${base}/${entry.name}`));
+        listEl.appendChild(row);
+      });
+      files.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = "browser-entry picker-file";
+        row.textContent = "📄 " + entry.name;
+        row.addEventListener("click", () => finish(toProjectRelative(`${base}/${entry.name}`)));
+        listEl.appendChild(row);
+      });
+      if (!dirs.length && !files.length) {
+        const none = document.createElement("div");
+        none.className = "browser-entry picker-note";
+        none.textContent = exts.length
+          ? `(no subfolders, and no ${exts.join(" / ")} files here)`
+          : "(empty)";
+        listEl.appendChild(none);
+      }
+    }
+
+    overlay.querySelector('[data-role="pick-cancel"]').addEventListener("click", () => finish(null));
+    overlay.querySelector('[data-role="pick-go"]').addEventListener("click", () => show(pathInput.value.trim()));
+    pathInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); show(pathInput.value.trim()); }
+    });
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) finish(null); });
+    document.addEventListener("keydown", function onEsc(e) {
+      if (e.key === "Escape" && document.body.contains(overlay)) {
+        document.removeEventListener("keydown", onEsc);
+        finish(null);
+      }
+    });
+
+    show(startPath || cachedProjectPath || "");
+  });
+}
 
 // Job types with a live Progress tab. Must match backend progress.PROGRESS_JOBS
 // (the backend is authoritative — it returns supported:false and the tab hides

@@ -400,6 +400,14 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
   end). Cancel loads the volume without the mismatched picks.
 - **Safety.** Every path is resolved against the active project directory and
   must stay inside it; the viewer only ever reads.
+- **Browse buttons.** Both inputs have a server-side file picker
+  (`pickFileDialog()` in `app.js`) rather than an `<input type="file">` — the
+  backend often runs on a different machine than the browser (an HPC login
+  node), so the browser's own filesystem is the wrong one. It reuses the
+  existing `POST /api/project/browse` endpoint, which already returns files
+  alongside folders, filters by the extensions `viz.py` accepts, resumes in the
+  folder the field currently points at, and returns a project-relative path
+  (what the viewer's API expects, and the idiom RELION itself stores).
 
 Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
 `GET /api/viz/slice`, `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.

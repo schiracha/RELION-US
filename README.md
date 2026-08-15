@@ -229,7 +229,8 @@ C++; that dispatch table is deliberately not reimplemented here.)
 The **🔍 Visualize** button opens a viewer — it is *not* a job, so it never
 appears in the Command Center and writes nothing. Give it an optimiser
 STAR, a `tomograms.star`, or an MRC (with or without a particles/coords
-STAR) and it loads one tomogram at a time:
+STAR) — type a path or hit **Browse…** — and it loads one tomogram at a
+time:
 
 - browse slices along **XY / XZ / YZ**, with black/white-point contrast
   sliders (default is a robust 0.5–99.5% percentile, since raw cryo-ET
@@ -240,6 +241,13 @@ STAR) and it loads one tomogram at a time:
   with diameter and line-width controls;
 - if the tomogram's name doesn't match any `rlnTomoName` in the picks file,
   you get a warning with **Load anyway / Reload files / Cancel**.
+
+Both inputs have a **Browse…** button. It lists files on the *machine
+running the backend*, not your own — which is the point when the backend is
+on a cluster login node and a native file dialog would show you the wrong
+filesystem. It filters to the relevant extensions (STAR/MRC for the tomogram
+field, STAR only for the picks field), remembers the folder you were last
+in, and fills the field with a project-relative path.
 
 The volume is never loaded whole: the backend memory-maps the MRC and
 returns one slice at a time as a PNG, so scrubbing stays fast on large

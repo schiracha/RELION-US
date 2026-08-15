@@ -1,6 +1,6 @@
 """
-Playwright smoke test for the job Progress tab (live charts + class thumbnails)
-and the dark/light theme switch.
+Playwright smoke test for the job Progress tab (live charts + class thumbnails),
+the dark/light theme switch, and the visualizer's Browse file pickers.
 
 Needs a live backend on an EMPTY project, and writes a small helper script into
 the project that emits RELION-style per-iteration files (run_it###_model.star +
@@ -158,6 +158,71 @@ def main():
         win.locator('[data-role="prog-keepall"]').check()
         page.wait_for_timeout(2500)
         check("Keep-all groups thumbnails by iteration", win.locator(".thumb-iter").count() >= 1)
+
+        # ---------------- visualizer Browse buttons ----------------
+        # Fixture tree so the picker has folders + files to walk.
+        import numpy as np, mrcfile, starfile, pandas as pd  # noqa: E401
+        tomo_dir = PROJECT_DIR / "Tomograms" / "job099"
+        tomo_dir.mkdir(parents=True, exist_ok=True)
+        with mrcfile.new(tomo_dir / "TS_77.mrc", overwrite=True) as mrc:
+            mrc.set_data((np.random.rand(12, 24, 24) * 100).astype(np.float32))
+            mrc.voxel_size = 10.0
+        starfile.write(
+            {"particles": pd.DataFrame({
+                "rlnTomoName": ["TS_77"] * 2,
+                "rlnCoordinateX": [5.0, 9.0], "rlnCoordinateY": [5.0, 9.0],
+                "rlnCoordinateZ": [3.0, 6.0]})},
+            tomo_dir / "picks99.star", overwrite=True)
+        (PROJECT_DIR / "ignore_me.txt").write_text("must not appear in the picker")
+
+        page.locator("#visualizeBtn").click()
+        page.wait_for_selector(".viz-popup", timeout=5000)
+        # target the viewer window specifically -- the Class2D popup from the
+        # progress checks above is still open, so ".winbox".first is not it
+        viz = page.locator(".winbox.viz-winbox").first
+        check("Both visualizer inputs have a Browse button",
+              viz.locator('[data-role="viz-browse-main"]').count() == 1
+              and viz.locator('[data-role="viz-browse-particles"]').count() == 1)
+
+        viz.locator('[data-role="viz-browse-main"]').click()
+        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        root_entries = page.locator(".file-picker .browser-entry").all_inner_texts()
+        check("Picker hides files that don't match the extension filter",
+              not any("ignore_me.txt" in e for e in root_entries))
+        page.locator(".file-picker .browser-entry", has_text="Tomograms").click()
+        page.wait_for_timeout(400)
+        page.locator(".file-picker .browser-entry", has_text="job099").click()
+        page.wait_for_timeout(400)
+        page.locator(".file-picker .browser-entry", has_text="TS_77.mrc").click()
+        page.wait_for_timeout(400)
+        check("Picking a file closes the picker", page.locator(".file-picker").count() == 0)
+        check("Picked path is project-relative",
+              viz.locator('[data-role="viz-path"]').input_value() == "Tomograms/job099/TS_77.mrc")
+
+        viz.locator('[data-role="viz-browse-particles"]').click()
+        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        check("Second picker resumes in the same folder",
+              "job099" in page.locator(".file-picker .picker-current").inner_text())
+        star_only = page.locator(".file-picker .browser-entry.picker-file").all_inner_texts()
+        check("Particles picker offers only .star files",
+              star_only and all(e.strip().endswith(".star") for e in star_only))
+        page.locator(".file-picker .browser-entry", has_text="picks99.star").click()
+        page.wait_for_timeout(400)
+
+        viz.locator('[data-role="viz-load"]').click()
+        page.wait_for_selector('[data-role="viz-img"]', state="visible", timeout=8000)
+        page.wait_for_timeout(1500)
+        meta = viz.locator('[data-role="viz-meta"]').inner_text()
+        check(f"Browsed files load in the viewer ({meta})", "TS_77" in meta and "2 picks" in meta)
+
+        # Esc closes the picker without changing the field
+        viz.locator('[data-role="viz-browse-main"]').click()
+        page.wait_for_selector(".file-picker .project-browser", timeout=5000)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        check("Escape cancels the picker", page.locator(".file-picker").count() == 0)
+        check("Cancelling leaves the field unchanged",
+              viz.locator('[data-role="viz-path"]').input_value() == "Tomograms/job099/TS_77.mrc")
 
         browser.close()
 
