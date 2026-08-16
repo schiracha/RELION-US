@@ -573,13 +573,8 @@ html, body {
 .tab-content.active { display: block; }
 /* Advanced tab: options the program accepts that RELION's GUI never exposes,
    read from its own --help output. */
-.cli-note {
-  font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px;
-  padding: 8px; border-radius: 3px; background: var(--panel-alt);
-}
-.cli-note code { color: var(--text); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
-.cli-note strong { color: var(--text); font-weight: 600; }
-.cli-note em { color: var(--accent); font-style: normal; }
+.cli-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
+.cli-note code { color: var(--text); }
 .cli-search {
   width: 100%; box-sizing: border-box; margin-bottom: 8px;
   background: var(--panel-alt); border: 1px solid var(--border);
