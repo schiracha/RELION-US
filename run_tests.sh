@@ -10,6 +10,9 @@
 #   ./run_tests.sh              # backend pytest only (the default; seconds)
 #   ./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
 #   ./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
+#   ./run_tests.sh options      # + where a job's options live (top panel /
+#                               #   Advanced tab) and the MPI/threads/extra-args
+#                               #   wiring
 #   ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 #   ./run_tests.sh project      # + Change Project, recents, Create Folder
 #   ./run_tests.sh ui           # + every browser suite
@@ -22,6 +25,7 @@
 #   the tomogram viewer or the file picker ............... viewer
 #   the Progress tab or the theme ........................ progress
 #   job popups, run/abort/overwrite, Outputs ............. jobs
+#   job_registry / the extractor / the Advanced tab ...... options
 #   project_manager.py or the Change Project dialog ...... project
 #   frontend/app.js scaffolding shared by all popups ..... ui
 #
@@ -29,6 +33,11 @@
 # own port, torn down afterwards. Nothing is left running and no existing
 # project is touched -- a suite that asserts "no jobs yet" fails against a
 # project that has history, which is a false alarm, not a bug.
+#
+# The `options` suite needs a program on PATH answering to a RELION binary
+# name, so it can check what the Advanced tab lists. A stub printing RELION's
+# own --help format is generated for it -- point RELION_US_REAL_BINARIES at a
+# real RELION bin directory to run it against the genuine article instead.
 #
 # Environment:
 #   RELION_US_PYTHON    python to use (default: python3)
@@ -93,6 +102,32 @@ PY
   echo "$port"
 }
 
+# A stand-in for `relion_refine --help`, in RELION's own IOParser usage format
+# (src/args.cpp). The Advanced-tab suite needs *a* program to interrogate; this
+# keeps the test hermetic on a machine with no RELION install.
+make_stub_bin() {
+  local dir="$TMPROOT/stub-bin"
+  [[ -d "$dir" ]] && { echo "$dir"; return; }
+  mkdir -p "$dir"
+  cat > "$dir/relion_refine" <<'STUB'
+#!/usr/bin/env python3
+print("""+++ RELION: command line arguments (with defaults for optional ones between parantheses) +++
+====== General options ===== 
+                                --i : Input images (in a star-file)
+                                --o : Output rootname
+                     --angpix (1.0) : Pixel size in Angstroms
+                            --j (1) : Number of threads
+====== Expert options ===== 
+          --dont_check_norm (false) : Skip the check whether images are normalised
+                         --verb (1) : Verbosity (1=normal, 0=silent)
+           --onlyflipphases (false) : Only flip phases, do not correct amplitudes
+                          --pad (2) : Oversampling factor for the Fourier transforms
+                          --version : Print RELION version and exit""")
+STUB
+  chmod +x "$dir/relion_refine"
+  echo "$dir"
+}
+
 # start_backend <name>
 # Sets BACKEND_PORT / BACKEND_PROJ / BACKEND_PID. Deliberately not "echo the
 # port and capture it": a command substitution runs in a subshell, so the
@@ -114,9 +149,17 @@ start_backend() {
   # `exec` matters: without it, $! is the subshell's pid and killing the
   # subshell leaves uvicorn itself running -- the port stays busy and the next
   # run silently talks to a backend pointed at the wrong project.
+  local stub_path=""
+  if [[ -z "${RELION_US_REAL_BINARIES:-}" ]]; then
+    stub_path="$(make_stub_bin)"
+  else
+    stub_path="$RELION_US_REAL_BINARIES"
+  fi
+
   (
     cd "$proj" || exit 1
     export XDG_CONFIG_HOME="$TMPROOT/$name-config"
+    export PATH="$stub_path:$PATH"
     exec "$PYTHON" -m uvicorn main:app --host 127.0.0.1 --port "$port" \
       --app-dir "$PWD_APP/backend" > "$TMPROOT/$name.log" 2>&1
   ) &
@@ -198,6 +241,7 @@ fi
 
 wants viewer   && run_browser_suite test_viewer_and_recents.py yes
 wants progress && run_browser_suite test_progress_and_theme.py yes
+wants options  && run_browser_suite test_job_options_panel.py
 wants jobs     && run_browser_suite test_frontend.py
 wants jobs     && run_browser_suite test_command_center.py
 wants jobs     && run_browser_suite test_command_center_abort_overwrite.py

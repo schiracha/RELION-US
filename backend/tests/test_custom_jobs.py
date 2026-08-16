@@ -41,7 +41,8 @@ def test_api_serves_default_values_for_custom_jobs(internal_name):
 def test_custom_job_standard_fields_all_exist(internal_name):
     definition = CUSTOM_JOB_DEFINITIONS[internal_name]
     keys = {o["key"] for o in definition["options"]}
-    assert set(definition["standard_fields"]) <= keys
+    placed = {k for g in definition["standard_groups"] for k in g["fields"]}
+    assert placed <= keys
 
 
 def test_resolve_out_targets_the_job_dir_not_the_project_root(tmp_path):

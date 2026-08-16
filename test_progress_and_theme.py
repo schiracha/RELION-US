@@ -49,7 +49,7 @@ import sys, time, numpy as np, mrcfile, starfile, pandas as pd
 from pathlib import Path
 out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
 NC = 4
-for it in range(1, 5):
+for it in range(1, 13):
     stack = np.random.rand(NC, 48, 48).astype(np.float32) * 0.3
     yy, xx = np.mgrid[0:48, 0:48]
     for k in range(NC):
@@ -65,7 +65,7 @@ for it in range(1, 5):
           "rlnClassDistribution": dist,
           "rlnEstimatedResolution":[22.0-it + k for k in range(NC)]})},
       out/f"run_it{it:03d}_model.star", overwrite=True)
-    print(f"Iteration {it}/4", flush=True)
+    print(f"Iteration {it}/12", flush=True)
     time.sleep(1.5)
 print("done")
 '''
@@ -143,11 +143,22 @@ def main():
         status_text = win.locator('[data-role="prog-status"]').inner_text()
         check(f"Status line reports the iteration ({status_text})", "iteration" in status_text)
 
-        # polling advances while the job runs
+        # Polling advances while the job runs. Waiting for the text to change
+        # rather than sleeping a fixed 5 s: under load the poll interval and
+        # the job's own pace both stretch, and a fixed sleep turns that into a
+        # flaky failure rather than a slower pass.
         first_iter = status_text
-        page.wait_for_timeout(5000)
-        check("Iteration advances while running",
-              win.locator('[data-role="prog-status"]').inner_text() != first_iter)
+        advanced = True
+        try:
+            page.wait_for_function(
+                """prev => {
+                     const el = document.querySelector('[data-role="prog-status"]');
+                     return el && el.innerText.trim() && el.innerText !== prev;
+                   }""",
+                arg=first_iter, timeout=20000)
+        except Exception:
+            advanced = False
+        check(f"Iteration advances while running (from {first_iter!r})", advanced)
 
         # charts survive a theme switch (they're drawn with resolved colours)
         page.locator("#themeBtn").click()

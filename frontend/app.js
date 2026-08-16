@@ -402,50 +402,158 @@ async function openJobPopup(internalName, displayName, existingRun) {
     <div class="live-output" data-role="live-output"></div>
   `;
 
-  // Standard fields
+  // ---- Top panel: every option RELION's own GUI shows -------------------
+  // Grouped and ordered by RELION's own tab names (I/O, CTF, ..., Running) as
+  // collapsible sections, so a long job (Class3D has ~60 fields) stays
+  // navigable without hiding anything behind a second tab. The Advanced tab
+  // is NOT for these -- it lists command-line options the GUI never exposes.
   const standardForm = body.querySelector('[data-role="standard-form"]');
-  for (const key of def.standard_fields || []) {
-    const opt = optionsByKey[key];
-    if (!opt) continue;
-    const val = prefillValues[key];
-    standardForm.appendChild(buildFieldRow(key, opt, val));
+  const groups = def.standard_groups || [];
+  groups.forEach((group, index) => {
+    const fields = (group.fields || []).filter((k) => optionsByKey[k]);
+    if (!fields.length) return;
+
+    const section = document.createElement("details");
+    section.className = "opt-section";
+    // The first group (RELION's I/O tab, for every job that has one) is the
+    // one you always need; the rest open on click.
+    section.open = index === 0 || !group.name;
+    if (group.name) {
+      const summary = document.createElement("summary");
+      summary.className = "opt-section-head";
+      summary.innerHTML =
+        `<span class="opt-section-name">${escapeHtml(group.name)}</span>` +
+        `<span class="opt-section-count">${fields.length}</span>`;
+      section.appendChild(summary);
+    }
+    const grid = document.createElement("div");
+    grid.className = "opt-section-grid";
+    fields.forEach((key) => {
+      grid.appendChild(buildFieldRow(key, optionsByKey[key], prefillValues[key]));
+    });
+    section.appendChild(grid);
+    standardForm.appendChild(section);
+  });
+
+  // ---- Advanced tab: options the GUI does not expose ---------------------
+  // Read from the installed binary's own --help output (GET .../cli-options),
+  // not from the extracted definitions: the program accepts more than the GUI
+  // offers, and those extras are exactly what you would otherwise dig out of
+  // --help or the source. Loaded on first open, not on every popup.
+  const advancedContent = body.querySelector('[data-tab-content="advanced"]');
+  let advancedLoaded = false;
+
+  function renderAdvancedRows(host, options) {
+    const list = document.createElement("div");
+    list.className = "cli-option-list";
+    options.forEach((opt) => {
+      const row = document.createElement("div");
+      row.className = "cli-option";
+      row.dataset.flag = opt.flag;
+      row.dataset.search = (opt.flag + " " + (opt.help || "")).toLowerCase();
+      const value = opt.takes_value
+        ? `<input type="text" class="cli-option-value" placeholder="${escapeHtml(opt.default || "value")}" />`
+        : "";
+      row.innerHTML = `
+        <div class="cli-option-main">
+          <code class="cli-option-flag">${escapeHtml(opt.flag)}</code>
+          ${opt.default ? `<span class="cli-option-default">(${escapeHtml(opt.default)})</span>` : ""}
+          ${opt.section ? `<span class="cli-option-section">${escapeHtml(opt.section)}</span>` : ""}
+        </div>
+        <div class="cli-option-help">${escapeHtml(opt.help || "")}</div>
+        <div class="cli-option-actions">${value}
+          <button type="button" class="btn btn-sm" data-role="cli-add">Add</button>
+        </div>`;
+      row.querySelector('[data-role="cli-add"]').addEventListener("click", () => {
+        const box = body.querySelector('[data-role="command-box"]');
+        if (!box) return;
+        const input = row.querySelector(".cli-option-value");
+        const val = input ? input.value.trim() : "";
+        // Appended to the command box rather than applied invisibly: the box
+        // is what runs, and every other field in this app works the same way.
+        box.value = box.value.trimEnd() + " " + opt.flag + (val ? " " + val : "");
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      });
+      list.appendChild(row);
+    });
+    host.appendChild(list);
   }
 
-  // Advanced fields, grouped by RELION's own real tab names
-  const advancedContent = body.querySelector('[data-tab-content="advanced"]');
-  const advancedGroups = def.advanced_groups || {};
-  if (Object.keys(advancedGroups).length === 0) {
-    // custom jobs / jobs with no second tab: show any non-standard options here flat
-    const shown = new Set(def.standard_fields || []);
-    (def.options || []).forEach((opt) => {
-      if (shown.has(opt.key)) return;
-      const val = prefillValues[opt.key];
-      const row = document.createElement("div");
-      row.className = "job-standard-form";
-      row.style.borderBottom = "none";
-      row.style.maxHeight = "none";
-      row.appendChild(buildFieldRow(opt.key, opt, val));
-      advancedContent.appendChild(row);
-    });
-  } else {
-    for (const [groupName, keys] of Object.entries(advancedGroups)) {
-      const title = document.createElement("div");
-      title.className = "advanced-group-title";
-      title.textContent = groupName;
-      advancedContent.appendChild(title);
-      const grid = document.createElement("div");
-      grid.className = "job-standard-form";
-      grid.style.border = "none";
-      grid.style.maxHeight = "none";
-      grid.style.padding = "0";
-      for (const key of keys) {
-        const opt = optionsByKey[key];
-        if (!opt) continue;
-        const val = prefillValues[key];
-        grid.appendChild(buildFieldRow(key, opt, val));
-      }
-      advancedContent.appendChild(grid);
+  async function loadAdvancedTab({ force = false } = {}) {
+    if (advancedLoaded && !force) return;
+    advancedLoaded = true;
+    advancedContent.innerHTML = '<div class="cli-note">Asking the program for its options…</div>';
+    const nrMpi = parseInt(collectValues().nr_mpi, 10) || 1;
+    let data;
+    try {
+      data = await api(
+        `/api/jobs/${encodeURIComponent(internalName)}/cli-options?nr_mpi=${nrMpi}`
+      );
+    } catch (err) {
+      advancedContent.innerHTML =
+        `<div class="cli-note">Could not list options: ${escapeHtml(err.message)}</div>`;
+      return;
     }
+
+    advancedContent.innerHTML = "";
+    const intro = document.createElement("div");
+    intro.className = "cli-note";
+    if (!data.available) {
+      intro.innerHTML =
+        `${escapeHtml(data.message || "No extra options available.")}` +
+        `<br />Anything you need can still be typed straight into the command box, ` +
+        `or into <em>Additional arguments</em> in the Running section above.`;
+      advancedContent.appendChild(intro);
+      return;
+    }
+    intro.innerHTML =
+      `Options <code>${escapeHtml(data.path || data.program || "")}</code> accepts that ` +
+      `RELION's own form does not show — the ones you would otherwise find by running it ` +
+      `with <code>--help</code>. ` +
+      `<strong>${data.options.length}</strong> of ${data.total_program_options} ` +
+      `(${data.hidden_by_gui} are already fields above). ` +
+      `Adding one appends it to the command box, where you can still edit it.`;
+    advancedContent.appendChild(intro);
+
+    if (!data.parsed) {
+      const pre = document.createElement("pre");
+      pre.className = "source-pre";
+      pre.textContent = data.raw || "";
+      advancedContent.appendChild(
+        Object.assign(document.createElement("div"), {
+          className: "cli-note",
+          textContent:
+            "This program's help isn't in RELION's own format, so it isn't broken " +
+            "into individual options here — the raw output follows.",
+        })
+      );
+      advancedContent.appendChild(pre);
+      return;
+    }
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.className = "cli-search";
+    search.placeholder = "Filter options…";
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      advancedContent.querySelectorAll(".cli-option").forEach((row) => {
+        row.hidden = q && !row.dataset.search.includes(q);
+      });
+    });
+    advancedContent.appendChild(search);
+
+    if (!data.options.length) {
+      advancedContent.appendChild(
+        Object.assign(document.createElement("div"), {
+          className: "cli-note",
+          textContent: "Every option this program accepts is already a field above.",
+        })
+      );
+      return;
+    }
+    renderAdvancedRows(advancedContent, data.options);
   }
 
   // Tab switching
@@ -458,8 +566,15 @@ async function openJobPopup(internalName, displayName, existingRun) {
       body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
       if (btn.dataset.tab === "outputs") loadOutputsTab();
       if (btn.dataset.tab === "progress") refreshProgress();
+      if (btn.dataset.tab === "advanced") loadAdvancedTab();
     });
   });
+
+  // Advanced is the tab that's open when a popup appears, so fill it now
+  // rather than leaving an empty panel. The backend caches each binary's
+  // --help on (path, mtime, size), so this costs one subprocess per program
+  // per backend lifetime, not one per popup.
+  loadAdvancedTab();
 
   function collectValues() {
     const values = {};

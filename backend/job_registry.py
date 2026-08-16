@@ -2,11 +2,15 @@
 job_registry.py — combines job_catalog.py (curated display metadata) with
 data/job_definitions_raw.json (extracted verbatim from RELION source, see
 data/extract_job_definitions.py) into the structure the API and frontend
-consume: one JobDefinition per job type, with fields split into "standard"
-(RELION's own first GUI tab for that job — usually I/O) and "advanced"
-(every later tab, kept as named groups) per the user's request for
-"standard inputs the way relion does" plus "access to all the options via
-an advanced menu".
+consume: one JobDefinition per job type.
+
+Field placement follows one rule: **everything RELION's own GUI shows goes in
+the popup's top panel**, grouped under RELION's own tab names (I/O, CTF,
+Optimisation, ..., Running) and in RELION's own order — `standard_groups`.
+The popup's "Advanced" tab is for the opposite thing: command-line options the
+program accepts but the GUI never exposes, the ones you would otherwise find by
+running the binary with `--help` or reading the source. Those are discovered at
+runtime from the installed RELION (see program_help.py), not from this file.
 
 Also builds a best-effort DRAFT command per job. This is intentionally
 NOT a full reimplementation of RELION's getCommands<Job>Job() C++ logic —
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -67,25 +72,35 @@ def _load_raw() -> dict[str, Any]:
         return json.load(f)
 
 
-def _split_standard_advanced(raw_job: dict) -> tuple[list[str], dict[str, list[str]]]:
-    """
-    Returns (standard_field_keys, {advanced_tab_name: [field_keys]}).
-    Standard = RELION's own first tab for this job (tab_layout.tab_order[0]).
-    Advanced = every other real RELION tab, preserved as named groups.
-    Falls back to "all fields standard, no advanced" if this job has no
-    parsed tab_layout (shouldn't happen for the 32 real RELION jobs; will
-    happen for the 3 custom import jobs, which define their own layout).
+def _standard_groups(raw_job: dict) -> list[dict]:
+    """RELION's own GUI layout for this job, as ordered, named groups.
+
+    Every field RELION's GUI shows goes in the job popup's top panel, grouped
+    under RELION's own tab names (I/O, CTF, Optimisation, ..., Running) and in
+    RELION's own order. The popup's "Advanced" tab is NOT for these -- it is
+    for command-line options the GUI never exposes (see program_help.py).
+
+    Falls back to one unnamed group holding every field if this job has no
+    parsed tab_layout (the 3 custom import bridges, which define their own).
     """
     layout = raw_job.get("tab_layout")
+    all_keys = [o["key"] for o in raw_job.get("options", [])]
     if not layout or not layout.get("tab_order"):
-        all_keys = [o["key"] for o in raw_job.get("options", [])]
-        return all_keys, {}
+        return [{"name": "", "fields": all_keys}]
 
-    tab_order = layout["tab_order"]
     tab_fields = layout["tab_fields"]
-    standard = list(tab_fields.get(tab_order[0], []))
-    advanced = {name: tab_fields[name] for name in tab_order[1:] if tab_fields.get(name)}
-    return standard, advanced
+    groups = [
+        {"name": name, "fields": list(tab_fields[name])}
+        for name in layout["tab_order"]
+        if tab_fields.get(name)
+    ]
+    # Anything RELION defines as a JobOption but never places in a tab would
+    # otherwise be silently unreachable in the form.
+    placed = {k for g in groups for k in g["fields"]}
+    orphans = [k for k in all_keys if k not in placed]
+    if orphans:
+        groups.append({"name": "Other", "fields": orphans})
+    return groups
 
 
 def _field_default_value(option: dict) -> Any:
@@ -100,6 +115,40 @@ def _field_default_value(option: dict) -> Any:
         return opts[idx] if opts and 0 <= idx < len(opts) else (opts[0] if opts else "")
     # text / filename / inputnode
     return option.get("default", "")
+
+
+# RELION's own MPI wrapping, from RelionJob::prepareFinalCommand() in
+# pipeline_jobs.cpp: when "Number of MPI procs" > 1 and the command is a
+# relion_ program with an `_mpi` binary, it prefixes
+# `$RELION_MPIRUN -n <procs> `, defaulting to "mpirun" (DEFAULTMPIRUN in
+# pipeline_jobs.h). The binary itself is swapped by each job's own builder,
+# which is where program_mpi comes from -- not by appending "_mpi" here.
+DEFAULT_MPIRUN = "mpirun"
+
+
+def _mpirun_prefix(nr_mpi: int) -> list[str]:
+    mpirun = os.environ.get("RELION_MPIRUN") or DEFAULT_MPIRUN
+    return [mpirun, "-n", str(int(nr_mpi))]
+
+
+def _self_guarded(condition: str, key: str) -> bool:
+    """True if `condition` only tests this option's own value.
+
+    RELION guards many appends with the option itself --
+    `if (joboptions["scratch_dir"].getString() != "") command += " --scratch_dir "...`
+    -- which means nothing more than "emit when set", something the draft
+    already does by skipping empty values. Those are safe to emit. A condition
+    naming a *different* option is a real branch (Topaz vs LoG picking, EM vs
+    gradient refinement) and is left out of the draft instead of guessed at.
+    """
+    if not condition:
+        return True
+    referenced = set(re.findall(r'joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]', condition))
+    if referenced - {key}:
+        return False
+    # A condition with no joboptions reference at all (e.g. `!is_continue`)
+    # is about job state, not this field -- treat it as a real branch.
+    return bool(referenced)
 
 
 def _build_draft_command(
@@ -145,9 +194,24 @@ def _build_draft_command(
             f"<set the '{exe_key}' field to this job's executable path>"
         )
     flags_used = set(raw_job.get("flags_used", []))
+    option_flags = raw_job.get("option_flags", {})
     options_by_key = {o["key"]: o for o in raw_job.get("options", [])}
 
-    parts = [program]
+    # RELION's Running tab. nr_mpi and other_args are not ordinary flags:
+    # RELION handles both outside the per-option loop, and so does this.
+    try:
+        nr_mpi = int(float(field_values.get("nr_mpi", 1) or 1))
+    except (TypeError, ValueError):
+        nr_mpi = 1
+    program_mpi = raw_job.get("program_mpi")
+    prefix: list[str] = []
+    if nr_mpi > 1 and program_mpi and not is_exe_placeholder:
+        # Same two conditions RELION applies: an _mpi binary exists for this
+        # job, and more than one process was asked for.
+        program = program_mpi
+        prefix = _mpirun_prefix(nr_mpi)
+
+    parts = prefix + [program]
     # RELION-style output directory (project-root-relative), inserted right
     # after the program name — mirrors how getCommands*Job() appends it.
     if output_subdir and not is_exe_placeholder:
@@ -164,6 +228,9 @@ def _build_draft_command(
         # default draft entirely (and not counted as unmapped).
         if draft_is_suppressed(internal_name, key):
             continue
+        # Handled outside this loop, exactly as RELION handles them.
+        if key in ("nr_mpi", "other_args"):
+            continue
         # A verified per-job flag override wins and is always emitted; only
         # fall back to the generic `--<key>` rule (gated on flags_used) when
         # no override exists for this key.
@@ -173,8 +240,18 @@ def _build_draft_command(
         else:
             flag = f"--{key}"
             if flag not in flags_used:
-                unmapped.append(key)
-                continue
+                # Second chance: this job's own builder may append the option
+                # under a flag that isn't "--" + key (--i for input_star_mics,
+                # --Box for box, --j for nr_threads), extracted verbatim from
+                # the source. Only when it isn't inside a branch that depends
+                # on some *other* option -- those stay unmapped rather than
+                # producing a command with contradictory flags.
+                pair = option_flags.get(key)
+                if pair and _self_guarded(pair.get("condition", ""), key):
+                    flag = pair["flag"]
+                else:
+                    unmapped.append(key)
+                    continue
 
         ft = option["field_type"]
         if ft == "boolean":
@@ -187,7 +264,20 @@ def _build_draft_command(
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
 
+    # RELION appends this verbatim at the end of the command
+    # (`command += " " + joboptions["other_args"].getString();`) -- deliberately
+    # unquoted, since the whole point is to pass raw extra arguments.
+    extra = str(field_values.get("other_args") or "").strip()
+    if extra:
+        parts.append(extra)
+
     return " ".join(parts), unmapped
+
+
+def raw_job(internal_name: str) -> dict:
+    """The extracted RELION data for one job, as-is. Used by the Advanced tab,
+    which needs the job's program name and its already-exposed flags."""
+    return _load_raw()[internal_name]
 
 
 def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
@@ -195,7 +285,7 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
     meta = JOB_CATALOG[internal_name]  # (label_new, display_name, category, description)
     label_new, display_name, category, description = meta
 
-    standard_keys, advanced_groups = _split_standard_advanced(raw)
+    standard_groups = _standard_groups(raw)
     options_by_key = {o["key"]: o for o in raw.get("options", [])}
     default_values = {k: _field_default_value(o) for k, o in options_by_key.items()}
     draft_command, unmapped = _build_draft_command(
@@ -209,10 +299,10 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
         "category": category,
         "description": description,
         "options": raw.get("options", []),
-        "standard_fields": standard_keys,
-        "advanced_groups": advanced_groups,
+        "standard_groups": standard_groups,
         "default_values": default_values,
         "program_guess": raw.get("program_guess"),
+        "program_mpi": raw.get("program_mpi"),
         "flags_used": raw.get("flags_used", []),
         "commands_source": raw.get("commands_source", ""),
         "draft_command": draft_command,

@@ -12,6 +12,12 @@ Endpoints:
                                               standard/advanced split,
                                               draft command, real RELION
                                               source reference)
+  GET  /api/jobs/{internal_name}/cli-options
+                                          -> options the job's program accepts
+                                             that RELION's own form does not
+                                             expose (Advanced tab), read by
+                                             running the installed binary with
+                                             --help
   POST /api/jobs/{internal_name}/draft    -> recompute the draft command
                                               for a given set of field values
                                               (called live as you edit the
@@ -134,6 +140,7 @@ from starlette.background import BackgroundTask
 
 import job_registry
 import progress
+import program_help
 import project_manager
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
@@ -218,6 +225,49 @@ class DraftRequest(BaseModel):
     # definition's output_subdir). Kept stable across recomputes so the
     # command's --o doesn't jump job numbers while the user edits fields.
     output_subdir: str | None = None
+
+
+@app.get("/api/jobs/{internal_name}/cli-options")
+def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
+    """Options the job's program accepts that its RELION form does not offer —
+    the Advanced tab.
+
+    Discovered by running the installed binary with --help (see
+    program_help.py), not from the extracted job definitions: the GUI shows a
+    subset of what the program accepts, and the extra ones are precisely the
+    flags you would otherwise hunt for in `--help` output or the source.
+
+    nr_mpi picks which binary to ask, since RELION's parallel variant can
+    accept flags the serial one doesn't.
+    """
+    if internal_name in CUSTOM_JOB_DEFINITIONS:
+        return {
+            "available": False,
+            "reason": "custom_job",
+            "message": "This is a RELION-US import bridge, not a command-line "
+                       "program — it has no extra CLI options.",
+            "options": [],
+        }
+    try:
+        raw = job_registry.raw_job(internal_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
+
+    program = raw.get("program_mpi") if (nr_mpi > 1 and raw.get("program_mpi")) else raw.get("program_guess")
+    if not program:
+        return {
+            "available": False,
+            "reason": "no_program",
+            "message": "This job has no fixed program to ask — it runs the "
+                       "executable you configure in its own fields.",
+            "options": [],
+        }
+    try:
+        payload = program_help.extra_options_for_job(raw, program)
+    except program_help.ProgramHelpError as exc:
+        return {"available": False, "reason": "not_runnable", "message": str(exc),
+                "program": program, "options": []}
+    return {"available": True, **payload}
 
 
 @app.post("/api/jobs/{internal_name}/draft")

@@ -487,15 +487,49 @@ html, body {
   font-family: inherit;
 }
 .mini-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* The top panel: every option RELION's own GUI shows, in RELION's own tab
+   order, as collapsible sections. It gets the lion's share of the popup --
+   this is where the work happens; the tabs below are references. */
 .job-standard-form {
-  padding: 10px;
+  padding: 8px 10px;
   overflow-y: auto;
-  max-height: 38%;
+  max-height: 52%;
   border-bottom: 1px solid var(--border);
+}
+.opt-section { border-bottom: 1px solid var(--border); }
+.opt-section:last-child { border-bottom: none; }
+.opt-section-head {
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.opt-section-head::-webkit-details-marker { display: none; }
+.opt-section-head::before { content: "▸"; font-size: 10px; }
+.opt-section[open] > .opt-section-head::before { content: "▾"; }
+.opt-section[open] > .opt-section-head { color: var(--text); }
+.opt-section-head:hover { color: var(--text); }
+.opt-section-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--panel-alt);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+.opt-section-grid {
   display: grid;
   grid-template-columns: 220px 1fr;
   gap: 6px 10px;
   align-content: start;
+  padding: 4px 0 10px;
 }
 .field-label { align-self: center; color: var(--text-dim); }
 .field-label .req-help { cursor: help; color: var(--accent); margin-left: 4px; }
@@ -537,7 +571,37 @@ html, body {
    room than the text tabs (which only need a glance). */
 .tab-content[data-tab-content="progress"] { max-height: 58%; }
 .tab-content.active { display: block; }
-.advanced-group-title { color: var(--accent); font-size: 11px; text-transform: uppercase; margin: 8px 0 4px; }
+/* Advanced tab: options the program accepts that RELION's GUI never exposes,
+   read from its own --help output. */
+.cli-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
+.cli-note code { color: var(--text); }
+.cli-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 8px;
+  background: var(--panel-alt); border: 1px solid var(--border);
+  color: var(--text); padding: 4px 6px; border-radius: 3px; font-family: inherit;
+}
+.cli-option-list { display: flex; flex-direction: column; }
+.cli-option {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "main actions" "help actions";
+  gap: 2px 10px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.cli-option[hidden] { display: none; }
+.cli-option:last-child { border-bottom: none; }
+.cli-option-main { grid-area: main; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.cli-option-flag { color: var(--accent); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+.cli-option-default { color: var(--text-dim); }
+.cli-option-section { color: var(--text-dim); font-size: 10px; margin-left: auto; }
+.cli-option-help { grid-area: help; color: var(--text-dim); line-height: 1.4; }
+.cli-option-actions { grid-area: actions; display: flex; align-items: center; gap: 4px; }
+.cli-option-value {
+  width: 110px; background: var(--panel-alt); border: 1px solid var(--border);
+  color: var(--text); padding: 3px 5px; border-radius: 3px; font-family: inherit; font-size: 11px;
+}
 .source-pre, .errors-pre { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-dim); margin: 0; }
 .errors-pre.has-errors { color: var(--err); }
 

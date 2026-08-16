@@ -28,7 +28,8 @@ def test_every_relion_job_builds_without_error(internal_name):
     assert d["internal_name"] == internal_name
     assert d["program_guess"], f"{internal_name} has no program_guess"
     assert isinstance(d["options"], list) and len(d["options"]) > 0
-    assert isinstance(d["standard_fields"], list) and len(d["standard_fields"]) > 0
+    assert isinstance(d["standard_groups"], list) and d["standard_groups"]
+    assert any(g["fields"] for g in d["standard_groups"])
 
 
 @pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))
@@ -48,15 +49,34 @@ def test_no_leftover_cpp_syntax_in_draft_or_defaults(internal_name):
 
 
 @pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))
-def test_standard_and_advanced_fields_are_disjoint_and_known(internal_name):
+def test_standard_groups_cover_every_option_exactly_once(internal_name):
+    """Every field RELION's GUI defines is in the top panel, and only once.
+
+    This is the placement rule: the popup's top panel holds all of RELION's
+    own GUI options; its Advanced tab holds command-line options the GUI does
+    not expose (discovered from the binary, not from these definitions). A
+    field missing here is one the user cannot set at all.
+    """
     d = job_registry.build_job_definition(internal_name)
     known_keys = {o["key"] for o in d["options"]}
-    standard = set(d["standard_fields"])
-    assert standard <= known_keys, f"{internal_name} standard_fields reference unknown option keys"
-    for group, keys in d["advanced_groups"].items():
-        assert set(keys) <= known_keys, f"{internal_name}/{group} references unknown option keys"
-        overlap = standard & set(keys)
-        assert not overlap, f"{internal_name}: fields in both standard and '{group}': {overlap}"
+    placed = [k for g in d["standard_groups"] for k in g["fields"]]
+    assert set(placed) == known_keys, (
+        f"{internal_name}: fields not in the top panel: {known_keys - set(placed)}; "
+        f"unknown keys placed: {set(placed) - known_keys}"
+    )
+    assert len(placed) == len(set(placed)), f"{internal_name} places a field twice"
+
+
+@pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))
+def test_standard_groups_follow_relions_own_tab_order(internal_name):
+    """Group names and order come from RELION's own GUI layout, so someone who
+    knows the real GUI finds fields where they expect them."""
+    d = job_registry.build_job_definition(internal_name)
+    layout = job_registry.raw_job(internal_name).get("tab_layout") or {}
+    expected = [t for t in layout.get("tab_order", []) if layout["tab_fields"].get(t)]
+    actual = [g["name"] for g in d["standard_groups"]]
+    # "Other" is appended only for options RELION defines but never places.
+    assert actual[:len(expected)] == expected, f"{internal_name}: {actual} vs {expected}"
 
 
 def test_unmapped_fields_are_a_subset_of_all_fields():
@@ -218,3 +238,146 @@ def test_pipeline_type_unknown_name_defaults_to_shared():
     both filtered views) rather than disappearing -- the safer failure mode
     for a display-only convenience feature."""
     assert pipeline_type("SomeFutureJobTypeNotYetClassified") == "shared"
+
+
+# --------------------------------------------------------------------------
+# RELION's Running tab: MPI procs, threads, additional arguments.
+#
+# These are added by the shared tail of RelionJob::initialise(), not by any
+# job's own initialise<Name>Job(), so they were missing from every job until
+# the extractor was taught to pick them up. Two of the three change the
+# command in ways nothing else does.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))
+def test_every_job_offers_additional_arguments(internal_name):
+    """RELION appends this box verbatim to every command it builds."""
+    d = job_registry.build_job_definition(internal_name)
+    assert "other_args" in {o["key"] for o in d["options"]}
+
+
+@pytest.mark.parametrize("internal_name,has_mpi,has_thread", [
+    ("Import", False, False),        # RelionJob::initialise: has_mpi = has_thread = false
+    ("Ctffind", True, False),        # has_mpi = true; has_thread = false
+    ("Maskcreate", False, True),     # has_mpi = false; has_thread = true
+    ("Class2D", True, True),         # has_mpi = has_thread = true
+])
+def test_mpi_and_thread_fields_match_relions_own_table(internal_name, has_mpi, has_thread):
+    keys = {o["key"] for o in job_registry.build_job_definition(internal_name)["options"]}
+    assert ("nr_mpi" in keys) is has_mpi
+    assert ("nr_threads" in keys) is has_thread
+
+
+def test_default_program_is_the_serial_binary():
+    """nr_mpi defaults to 1, so the default draft must not name the _mpi
+    binary. Taking the first `command = "..."` literal in the builder got this
+    wrong for all 18 MPI-capable jobs."""
+    for name in ("Class2D", "Autorefine", "Motioncorr", "Extract"):
+        raw = job_registry.raw_job(name)
+        assert "_mpi" not in raw["program_guess"], name
+        assert "_mpi" in raw["program_mpi"], name
+
+
+def test_autopick_default_program_is_not_its_continue_branch():
+    """Autopick's first command literal sits inside its "continue manually"
+    branch (relion_manualpick) — not what a fresh Autopick job runs."""
+    assert "relion_autopick" in job_registry.raw_job("Autopick")["program_guess"]
+
+
+def test_mpi_greater_than_one_uses_relions_own_wrapping():
+    raw = job_registry.raw_job("Class2D")
+    values = {"nr_mpi": 4, "nr_threads": 2}
+    cmd, _ = job_registry._build_draft_command(raw, values, "Class2D", "Class2D/job001")
+    assert cmd.startswith("mpirun -n 4 ")
+    assert "relion_refine_mpi" in cmd
+
+
+def test_mpirun_command_honours_the_relion_env_var(monkeypatch):
+    """RELION reads RELION_MPIRUN and falls back to "mpirun" (DEFAULTMPIRUN)."""
+    monkeypatch.setenv("RELION_MPIRUN", "srun --mpi=pmix")
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(raw, {"nr_mpi": 8}, "Class2D", "")
+    assert cmd.startswith("srun --mpi=pmix -n 8 ")
+
+
+def test_mpi_of_one_leaves_the_command_serial():
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(raw, {"nr_mpi": 1}, "Class2D", "")
+    assert not cmd.startswith("mpirun")
+    assert "_mpi" not in cmd
+
+
+def test_job_without_an_mpi_variant_is_never_wrapped():
+    """Import has no _mpi binary; asking for MPI must not invent one."""
+    raw = job_registry.raw_job("Import")
+    assert raw["program_mpi"] is None
+    cmd, _ = job_registry._build_draft_command(raw, {"nr_mpi": 8}, "Import", "")
+    assert not cmd.startswith("mpirun")
+
+
+def test_additional_arguments_are_appended_verbatim_and_last():
+    """RELION does `command += " " + other_args` at the very end, unquoted —
+    the whole point is passing raw extra arguments through."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"other_args": '--dont_check_norm --verb 2'}, "Class2D", "Class2D/job001")
+    assert cmd.endswith("--dont_check_norm --verb 2")
+
+
+def test_empty_additional_arguments_add_nothing():
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(raw, {"other_args": "   "}, "Class2D", "")
+    assert not cmd.endswith(" ")
+
+
+def test_nr_mpi_is_not_emitted_as_a_flag():
+    """It is not a flag at all — RELION expresses it through the mpirun prefix."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, unmapped = job_registry._build_draft_command(raw, {"nr_mpi": 4}, "Class2D", "")
+    assert "--nr_mpi" not in cmd
+    assert "nr_mpi" not in unmapped
+
+
+# --------------------------------------------------------------------------
+# Source-verified option -> flag pairs
+# --------------------------------------------------------------------------
+
+
+def test_threads_use_the_flag_the_job_actually_emits():
+    """RELION writes threads as --j, not --nr_threads."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(raw, {"nr_threads": 12}, "Class2D", "")
+    assert "--j 12" in cmd
+
+
+def test_input_flag_comes_from_the_real_builder():
+    """Ctffind's input option is `input_star_mics` but the flag is --i."""
+    raw = job_registry.raw_job("Ctffind")
+    assert raw["option_flags"]["input_star_mics"]["flag"] == "--i"
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"input_star_mics": "mics.star"}, "Ctffind", "")
+    assert "--i mics.star" in cmd
+
+
+def test_branch_dependent_flags_stay_out_of_the_draft():
+    """Autopick emits --particle_diameter only in Topaz mode and --LoG_diam_min
+    only in LoG mode. Emitting both would be a self-contradicting command, so a
+    flag guarded by a *different* option is reported unmapped instead."""
+    raw = job_registry.raw_job("Autopick")
+    pair = raw["option_flags"].get("log_diam_min")
+    assert pair and pair["condition"], "expected LoG diameter to be branch-guarded"
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"log_diam_min": 150.0}, "Autopick", "")
+    assert "--LoG_diam_min" not in cmd
+    assert "log_diam_min" in unmapped
+
+
+def test_self_guarded_flags_are_still_emitted():
+    """`if (scratch_dir != "") command += " --scratch_dir "...` is only
+    "emit when set", which the draft already does by skipping empty values."""
+    raw = job_registry.raw_job("Class2D")
+    assert raw["option_flags"]["scratch_dir"]["condition"]
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"scratch_dir": "/ssd/scratch"}, "Class2D", "")
+    assert "--scratch_dir /ssd/scratch" in cmd

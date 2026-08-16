@@ -7,10 +7,10 @@ reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
 to build accurate forms for every RELION job type (32 of them, single-
 particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
 bridges as four more entries in the same Jobs list, and runs everything
-through one consistent popup-window UI: standard inputs on top, an Advanced
-tab with every other option, an Errors tab, live streaming output at the
-bottom — and, critically, **an editable command box you approve before
-anything runs.**
+through one consistent popup-window UI: every option RELION's own GUI shows
+in the top panel, an Advanced tab for the command-line options it doesn't, an
+Errors tab, live streaming output at the bottom — and, critically, **an
+editable command box you approve before anything runs.**
 
 The main panel is a **Command Center** showing every job you've run (a
 sortable table or a timeline that links each job to its inputs); iterative
@@ -121,11 +121,23 @@ internet access.
   grouped by category, plus a separate "(custom)" tag for the four import
   bridges. Click one to open it in its own popup — open as many at once as
   you want, each is independent.
-- **Standard inputs**: RELION's own first GUI tab for that job (almost
-  always "I/O") — extracted directly from `gui_jobwindow.cpp`, not guessed.
-- **Advanced tab**: every other real RELION tab for that job (e.g. Class3D
-  has Reference / CTF / Optimisation / Sampling / Helix / Compute),
-  preserved as named groups.
+- **Top panel**: **every option RELION's own GUI shows for that job**, in
+  RELION's own groups and order (I/O, Reference, CTF, Optimisation, Sampling,
+  Helix, Compute, Running), as collapsible sections — extracted directly from
+  `gui_jobwindow.cpp` and `pipeline_jobs.cpp`, not guessed. The I/O section
+  starts open; the rest are one click away. Nothing RELION shows is hidden
+  behind a tab.
+- **Running section**: MPI procs, threads, and **Additional arguments** —
+  RELION's own Running tab. Setting MPI procs above 1 does exactly what RELION
+  does: prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and switches to that
+  job's `_mpi` binary, with both binary names read out of the job's own C++
+  source rather than guessed by appending a suffix. Additional arguments are
+  appended verbatim at the end, as RELION appends them.
+- **Advanced tab**: the opposite of the top panel — command-line options the
+  program accepts that **RELION's GUI never exposes**, the ones you would
+  otherwise find by running the binary with `--help` or reading the source.
+  The list comes from asking your installed binary (see "The Advanced tab"
+  below), so it matches your build.
 - **Progress tab** (iterative jobs only): live charts of resolution and class
   distribution plus class images, with per-job controls for how often images
   refresh and whether earlier iterations are kept — see "Live progress for
@@ -159,13 +171,52 @@ between `relion_run_motioncorr` and the `_mpi` variant depending on
 `nr_mpi`; `--float16` doesn't literally match its `do_float16` field key).
 Fields that don't have a literal matching flag are left out of the draft
 and listed in "unmapped fields" (hover the Recompute button's tooltip)
-rather than guessed at — check the Advanced tab and the RELION Source tab
-for those, and add them to the command box by hand if needed.
+rather than guessed at — check the RELION Source tab for those, and add them
+to the command box by hand if needed.
+
+Where a flag isn't simply `--` + the option key, the pairing is read out of the
+job's own builder too (`command += " --i " + joboptions["input_star_mics"]...`),
+so `--i`, `--Box`, `--j` and ~80 others are drafted correctly rather than
+reported as unmapped. Pairings that RELION only emits inside a branch depending
+on a *different* option — Autopick's `--particle_diameter` in Topaz mode versus
+`--LoG_diam_min` in LoG mode — are deliberately left out: emitting both would
+produce a command that contradicts itself.
 
 Three job types (DynaMight, ModelAngelo, External) don't hard-code a
 binary at all — RELION runs whatever executable path you set in a
 "Location of X executable" field. The draft command resolves that
 automatically from the field's current value.
+
+## The Advanced tab (options the GUI doesn't show)
+
+RELION's GUI exposes a subset of what each program actually accepts. The rest —
+expert and developmental flags — are what its "Additional arguments" box exists
+for, and finding them normally means running the binary with no arguments and
+reading the usage dump.
+
+The Advanced tab does that for you. On opening a job it runs the job's program
+with `--help`, parses RELION's own usage format, subtracts every flag the form
+above already covers, and lists what's left with its default, its section, and
+its help text. Filter the list, fill in a value, and **Add** appends it to the
+command box — where you can still edit or delete it, like everything else here.
+
+Three things worth knowing:
+
+- It asks **your installed binary**, so the list reflects your RELION build,
+  including local patches — not whichever checkout the job definitions came
+  from. If MPI procs is above 1 it asks the `_mpi` binary, which can accept
+  flags the serial one doesn't.
+- If the program isn't on the backend's PATH, the tab says so plainly instead
+  of showing an empty list. You can still type anything into the command box or
+  into Additional arguments.
+- RELION-5's Python tomo tools are Typer-based and don't print RELION's usage
+  format. Rather than guess at a format it doesn't understand, the tab shows
+  their raw `--help` output as-is.
+
+Each program's help is read once per backend session and cached on the
+binary's path, size and modification time, so rebuilding RELION or switching
+versions picks up the new options without a restart.
+
 
 ## The four custom import jobs
 
@@ -390,6 +441,7 @@ parsing gaps introduced by a new RELION release show up as failures.
 ./run_tests.sh              # backend suite only — seconds, run it always
 ./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
 ./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
+./run_tests.sh options      # + option placement, MPI/threads, Advanced tab
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
 ./run_tests.sh all          # everything (~80 s) — before you commit a milestone

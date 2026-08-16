@@ -382,9 +382,117 @@ def extract_joboptions(func_body: str) -> list[dict]:
     return results
 
 
+def _match_paren_backwards(text: str, close_pos: int) -> int:
+    """Index of the '(' matching the ')' at close_pos, or -1."""
+    depth = 0
+    i = close_pos
+    while i >= 0:
+        if text[i] == ")":
+            depth += 1
+        elif text[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return i
+        i -= 1
+    return -1
+
+
+def _condition_before(text: str, pos: int) -> str | None:
+    """The `if (...)` / `else if (...)` / `else` guarding whatever starts at
+    `pos`, or None if nothing does.
+
+    Returns the condition text, or "else" for a bare else (which is a guard
+    even though it has no condition of its own). Matching the parenthesis
+    backwards rather than regex-scanning a fixed window matters: RELION's
+    conditions nest parens and span lines, and a greedy `[^{]*` pattern
+    swallows whole statements and reports them as the condition.
+    """
+    j = pos - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    if j < 0:
+        return None
+    if text[j] == ")":
+        open_p = _match_paren_backwards(text, j)
+        if open_p == -1:
+            return None
+        if re.search(r"\bif\s*$", text[:open_p]):
+            return text[open_p + 1 : j].strip()
+        return None
+    if re.search(r"\belse$", text[: j + 1]):
+        return "else"
+    return None
+
+
+def enclosing_conditions(text: str, pos: int) -> list[str]:
+    """Conditions of every construct that guards `pos`.
+
+    Covers both forms RELION uses: braced blocks, and the brace-less
+    `else if (x) command += ...;` one-liners that are common in these
+    builders. Missing the brace-less form is not cosmetic -- it reports a
+    branch-only flag as unconditional, and the draft then emits mutually
+    contradictory options.
+    """
+    stack: list[str] = []
+    i = 0
+    while i < pos and i < len(text):
+        c = text[i]
+        if c == "{":
+            stack.append(_condition_before(text, i) or "")
+        elif c == "}":
+            if stack:
+                stack.pop()
+        i += 1
+
+    # ...plus a brace-less guard on the statement itself: RELION writes
+    # `else if (scratch_dir != "") command += " --scratch_dir " + ...;`
+    # with no braces, and treating that as unconditional is how a
+    # branch-only flag ends up in every draft.
+    immediate = _condition_before(text, pos)
+    if immediate is not None:
+        stack.append(immediate)
+    return stack
+
+
+# A literal guarded by one of these is not what the job runs by default:
+#   is_continue -> only when continuing/re-running an existing job
+#   nr_mpi      -> the parallel binary, chosen only when MPI procs > 1
+# Taking the first literal in the function regardless is how the extractor
+# used to report `relion_manualpick` as Autopick's program (Autopick's first
+# literal sits inside its "continue manually" branch) and the _mpi binary as
+# the default for every MPI-capable job.
+NON_DEFAULT_BRANCH_MARKERS = ("is_continue", "nr_mpi")
+
+
+def _is_continue_only(condition: str) -> bool:
+    """True if this condition can only hold when continuing an existing job.
+
+    `is_continue && ...` qualifies; `!is_continue || ...` does not -- that is
+    the ordinary first-run path, and treating it as continue-only skipped the
+    real command literal.
+    """
+    if "is_continue" not in condition:
+        return False
+    return not re.search(r"!\s*is_continue", condition)
+
+
 def extract_program_guess(func_body: str) -> str | None:
-    m = re.search(r'command\s*=\s*"([^"]*)"', func_body)
-    if m:
+    # Skip the parallel half of each `if (nr_mpi > 1) ... else ...` pair: the
+    # serial binary is what the job runs by default (nr_mpi defaults to 1), and
+    # taking the first literal in the function reported the _mpi binary as the
+    # default for every MPI-capable job.
+    mpi_spans = [m.span(1) for m in MPI_BINARY_PAIR_RE.finditer(func_body)]
+    for m in re.finditer(r'command\s*=\s*"([^"]*)"', func_body):
+        pos = m.start(1)
+        if any(lo <= pos < hi for lo, hi in mpi_spans):
+            continue
+        # ...and skip literals that only run when continuing an existing job
+        # (Autopick's first literal is `relion_manualpick`, inside its
+        # "continue manually" branch). A negated test is the default path, not
+        # a continue-only one: MultiBody wraps its real command in
+        # `if (!is_continue || (is_continue && fn_cont != ""))`.
+        if any(_is_continue_only(c) for c in enclosing_conditions(func_body, pos)):
+            continue
         return m.group(1).strip()
     # Some jobs (DynaMight, ModelAngelo, External) don't hard-code a binary;
     # they run whatever executable path the user set in a JobOption (a
@@ -396,6 +504,147 @@ def extract_program_guess(func_body: str) -> str | None:
     if m:
         return "{joboptions." + m.group(1) + "}"
     return None
+
+
+# RELION's MPI-capable jobs pick their binary with a brace-less if/else:
+#
+#     if (joboptions["nr_mpi"].getNumber(error_message) > 1)
+#         command="`which relion_run_motioncorr_mpi`";
+#     else
+#         command="`which relion_run_motioncorr`";
+#
+# Both names are read out of that branch rather than derived by appending
+# "_mpi" to the serial name: the two differ by more than a suffix for some
+# jobs, and a guessed binary name is a job that fails at launch.
+MPI_BINARY_PAIR_RE = re.compile(
+    r'if\s*\(\s*joboptions\["nr_mpi"\]\.getNumber\([^)]*\)\s*>\s*1\s*\)\s*'
+    r'command\s*=\s*"([^"]*)"\s*;\s*else\s*command\s*=\s*"([^"]*)"\s*;',
+    re.DOTALL,
+)
+
+
+def extract_mpi_program(func_body: str) -> str | None:
+    """The binary this job runs when "Number of MPI procs" > 1, or None if it
+    has no MPI variant."""
+    m = MPI_BINARY_PAIR_RE.search(func_body)
+    return m.group(1).strip() if m else None
+
+
+def extract_mpi_thread_capability(text: str) -> dict[str, dict[str, bool]]:
+    """Which jobs RELION gives "Number of MPI procs" / "Number of threads".
+
+    Read from the dispatcher in `RelionJob::initialise(int _job_type)`, where
+    each branch sets has_mpi/has_thread next to the initialise<Name>Job() call:
+
+        else if (type == PROC_CTFFIND)
+        {
+            has_mpi = true;
+            has_thread = false;
+            initialiseCtffindJob();
+        }
+
+    These two options are added by the shared tail of initialise(), not by any
+    job's own initialise<Name>Job(), so a per-job scan misses them entirely --
+    which is why the Running tab was absent from every job.
+    """
+    m = re.search(r"void RelionJob::initialise\(int\s+\w+\)\s*\{", text)
+    if not m:
+        return {}
+    brace_open = text.index("{", m.end() - 1)
+    body = text[brace_open + 1 : find_matching_brace(text, brace_open)]
+
+    out: dict[str, dict[str, bool]] = {}
+    for call in re.finditer(r"initialise(\w+)Job\(\)\s*;", body):
+        # The enclosing branch block: scan back to the `{` that opens it.
+        start = body.rfind("{", 0, call.start())
+        block = body[start + 1 : call.start()] if start != -1 else ""
+        flags = {"has_mpi": False, "has_thread": False}
+        # `has_mpi = has_thread = false;` and `has_mpi = true;` both occur.
+        for chain in re.finditer(
+            r"((?:has_mpi|has_thread)\s*=\s*(?:has_mpi|has_thread)\s*=\s*|"
+            r"(?:has_mpi|has_thread)\s*=\s*)(true|false)\s*;",
+            block,
+        ):
+            value = chain.group(2) == "true"
+            for name in re.findall(r"has_mpi|has_thread", chain.group(1)):
+                flags[name] = value
+        out[call.group(1)] = flags
+    return out
+
+
+# Ranges for nr_mpi / nr_threads. RELION reads these from the environment at
+# GUI start-up (RELION_MPI_MAX, RELION_THREAD_MAX), so there is no literal in
+# the source to extract; these are RELION's own compiled-in defaults, from
+# pipeline_jobs.h DEFAULTMPIMAX / DEFAULTTHREADMAX / DEFAULTNRMPI /
+# DEFAULTNRTHREADS. Everything else about these two fields -- label, help text,
+# step -- is extracted verbatim like any other JobOption.
+RUN_TAB_NUMERIC_RANGES = {
+    "nr_mpi": {"default": 1, "min": 1, "max": 64, "step": 1},
+    "nr_threads": {"default": 1, "min": 1, "max": 16, "step": 1},
+}
+
+# Of the shared Running tab, these are the options that actually change the
+# command RELION-US runs. The queue-submission ones (do_queue, queuename, qsub,
+# qsub_extra*, qsubscript, min_dedicated) drive RELION's own qsub path, which
+# this app does not reproduce -- it runs the command as a subprocess -- so
+# showing them would be offering controls that do nothing. See slurm/ for the
+# cluster-submission path.
+RUN_TAB_KEYS = ("nr_mpi", "nr_threads", "other_args")
+RUN_TAB_NAME = "Running"
+
+
+def extract_run_tab_options(text: str) -> dict[str, dict]:
+    """The Running-tab JobOptions from the shared tail of
+    `RelionJob::initialise()`, keyed by option key."""
+    m = re.search(r"void RelionJob::initialise\(int\s+\w+\)\s*\{", text)
+    if not m:
+        return {}
+    brace_open = text.index("{", m.end() - 1)
+    body = text[brace_open + 1 : find_matching_brace(text, brace_open)]
+    found = {}
+    for opt in extract_joboptions(body):
+        if opt["key"] in RUN_TAB_KEYS:
+            fixed = RUN_TAB_NUMERIC_RANGES.get(opt["key"])
+            if fixed:
+                opt.update(fixed)
+                opt["field_type"] = "slider"
+            found[opt["key"]] = opt
+    return found
+
+
+# RELION's builders append most options as `command += " --flag " + joboptions
+# ["key"]...`, and for ~200 of them the flag is NOT just "--" + key (--i for
+# input_star_mics, --Box for box, --j for nr_threads, --gainref for
+# fn_gain_ref). Reading the pairing straight out of the source is the whole
+# point of this extractor: the alternative is guessing, and a guessed flag is
+# a job that either fails or, worse, runs with a default the user thought they
+# had changed.
+OPTION_FLAG_RE = re.compile(
+    r'command\s*\+=\s*"\s*(--[A-Za-z][A-Za-z0-9_-]*)\s*"\s*\+\s*'
+    r'joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]'
+)
+
+
+def extract_option_flags(func_body: str) -> dict[str, dict]:
+    """Per-job {option key: {flag, condition}} read from the real builder.
+
+    `condition` is the `if (...)` test guarding the statement, or "" when the
+    flag is emitted unconditionally. Callers must respect it: RELION emits
+    Autopick's --particle_diameter only in Topaz mode and its --LoG_diam_min
+    only in LoG mode, so emitting every extracted flag would produce a command
+    with mutually contradictory options.
+    """
+    out: dict[str, dict] = {}
+    for m in OPTION_FLAG_RE.finditer(func_body):
+        flag, key = m.group(1), m.group(2)
+        conds = [c.strip() for c in enclosing_conditions(func_body, m.start()) if c.strip()]
+        # First occurrence wins, but an unconditional one always beats a
+        # conditional one for the same key.
+        condition = " && ".join(conds)
+        prev = out.get(key)
+        if prev is None or (prev["condition"] and not condition):
+            out[key] = {"flag": flag, "condition": condition}
+    return out
 
 
 def extract_flags_used(func_body: str) -> list[str]:
@@ -554,6 +803,8 @@ def main() -> int:
     gui_text = strip_comments(strip_line_splices(gui_path.read_text(encoding="utf-8")))
     option_vectors = extract_static_option_vectors(header_text)
     tab_layouts = extract_tab_layout(gui_text)
+    mpi_thread = extract_mpi_thread_capability(text)
+    run_tab_options = extract_run_tab_options(text)
     tomo_input_template = extract_add_tomo_input_options_template(text)
 
     jobs = {}
@@ -592,6 +843,8 @@ def main() -> int:
         entry = jobs.setdefault(job_name, {})
         entry["commands_source"] = full_func
         entry["program_guess"] = extract_program_guess(body)
+        entry["program_mpi"] = extract_mpi_program(body)
+        entry["option_flags"] = extract_option_flags(body)
         entry["flags_used"] = extract_flags_used(body)
 
     # gui_jobwindow.cpp's JobWindow::initialise<X>Window() names don't all
@@ -607,6 +860,35 @@ def main() -> int:
     for job_name, layout in tab_layouts.items():
         canonical = GUI_TO_JOB_NAME_ALIASES.get(job_name, job_name)
         jobs.setdefault(canonical, {})["tab_layout"] = layout
+
+    # Append RELION's shared Running tab (JobWindow::setupRunTab) to every job.
+    # It is not part of any job's own initialise<Name>Job() or of the per-job
+    # window layout in gui_jobwindow.cpp, so without this step these fields --
+    # including "Additional arguments", which RELION appends verbatim to every
+    # command -- simply do not exist in the extracted data.
+    for job_name, entry in jobs.items():
+        caps = mpi_thread.get(job_name, {})
+        keys = []
+        for key in RUN_TAB_KEYS:
+            if key == "nr_mpi" and not caps.get("has_mpi"):
+                continue
+            if key == "nr_threads" and not caps.get("has_thread"):
+                continue
+            if key not in run_tab_options:
+                continue
+            keys.append(key)
+        if not keys:
+            continue
+        existing = {o["key"] for o in entry.get("options", [])}
+        entry.setdefault("options", []).extend(
+            dict(run_tab_options[k]) for k in keys if k not in existing
+        )
+        layout = entry.setdefault("tab_layout", {"tab_order": [], "tab_fields": {}})
+        if RUN_TAB_NAME not in layout["tab_order"]:
+            layout["tab_order"].append(RUN_TAB_NAME)
+        layout["tab_fields"].setdefault(RUN_TAB_NAME, []).extend(
+            k for k in keys if k not in layout["tab_fields"].get(RUN_TAB_NAME, [])
+        )
 
     out_path.write_text(json.dumps(jobs, indent=2, ensure_ascii=False), encoding="utf-8")
     n_options = sum(len(j.get("options", [])) for j in jobs.values())

@@ -62,8 +62,10 @@ relion_us/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + one websocket per job run
 │   ├── job_registry.py      # raw extraction -> API-ready job definitions,
-│   │                        #   standard/advanced field split, draft-command
-│   │                        #   heuristic (see "Draft command" below)
+│   │                        #   RELION's own tab groups for the top panel,
+│   │                        #   draft-command heuristic (see below)
+│   ├── program_help.py      # runs <program> --help to list the CLI options
+│   │                        #   RELION's GUI never exposes (Advanced tab)
 │   ├── job_catalog.py       # curated display metadata (names, categories)
 │   ├── job_runner.py        # executes the approved command exactly as given;
 │   │                        #   per-project run history persistence
@@ -97,7 +99,7 @@ relion_us/
 └── test_*.py                 # Playwright browser smoke tests (job list, Change
                               #   Project + recents, Command Center,
                               #   abort/overwrite, Progress tab + theme + file
-                              #   pickers, orthogonal viewer)
+                              #   pickers, orthogonal viewer, option placement)
 ```
 
 ### Why this instead of a Streamlit GUI
@@ -115,6 +117,52 @@ supports all of that directly. The `relion_tomo_bridge` converters
 carried over unchanged into `backend/converters/` — only the GUI wrapping
 them changed.
 
+### Where a job's options live
+
+Two panels, two different questions:
+
+- **Top panel — everything RELION's own GUI shows.** All of a job's JobOptions,
+  grouped under RELION's own tab names and in RELION's own order
+  (`standard_groups`, from the extracted `tab_layout`), as collapsible sections.
+  A test asserts the placement is total and unique: every extracted option
+  appears in exactly one section, so no field RELION offers is unreachable here.
+- **Advanced tab — what the GUI does not show.** Command-line options the
+  *program* accepts but the GUI never exposes, discovered by running the
+  installed binary with `--help` (see `backend/program_help.py`), minus every
+  flag the form above already covers. This is the "additional arguments" case:
+  expert flags you would otherwise find in a usage dump or the source.
+
+The split is by *provenance*, not by how advanced an option feels. The
+alternative — first RELION tab on top, later tabs in Advanced — buried
+Optimisation and Compute behind a tab while leaving nothing for the options
+RELION's own GUI has no field for.
+
+#### RELION's Running tab
+
+`nr_mpi`, `nr_threads` and `other_args` are added by the shared tail of
+`RelionJob::initialise()` and placed by `JobWindow::setupRunTab()`, not by any
+job's own `initialise<Name>Job()` or per-job window layout — so a per-job scan
+missed them entirely and they were absent from every job. The extractor now
+reads them, along with the per-job `has_mpi` / `has_thread` flags from
+`initialise()`'s own dispatcher, so a job gets exactly the ones RELION gives it
+(Import neither, Ctffind MPI only, MaskCreate threads only).
+
+The queue-submission options from the same tab (`do_queue`, `queuename`,
+`qsub`, `qsubscript`, `min_dedicated`) are deliberately **not** included:
+RELION-US runs the command as a subprocess and does not reproduce RELION's
+qsub path, so those controls would do nothing. `slurm/` is the cluster route.
+
+**MPI is wrapping, not a flag.** RELION's `prepareFinalCommand()` prefixes
+`$RELION_MPIRUN -n N` (default `mpirun`, `DEFAULTMPIRUN` in `pipeline_jobs.h`)
+when procs > 1 and the command names an `_mpi` binary; the binary swap itself
+happens in each job's own builder. Both names are extracted from that branch
+(`program_guess` / `program_mpi`) rather than derived by appending `_mpi` —
+they differ by more than a suffix for some jobs, and a guessed binary name is a
+job that fails at launch.
+
+**Additional arguments** are appended verbatim at the very end, unquoted,
+exactly as `command += " " + joboptions["other_args"].getString();` does.
+
 ### Draft command heuristic
 
 The command box in every job popup is pre-filled by a **best-effort** rule,
@@ -128,6 +176,25 @@ reimplemented — fields without a literal matching flag are left out of the
 draft and listed as "unmapped," rather than guessed at, and the job's real
 RELION C++ source is one tab away for cross-checking. See the main
 `README.md`'s "How the draft command is built" for the full explanation.
+
+**Source-verified flag pairings.** Most RELION options are appended as
+`command += " --flag " + joboptions["key"]...`, and for ~200 of them the flag is
+not `--` + key (`--i` for `input_star_mics`, `--Box` for `box`, `--j` for
+`nr_threads`). The extractor records each pairing with the `if (...)` condition
+guarding it (`option_flags`). The draft uses a pairing when it is unconditional,
+or when the condition only tests that option's own value — RELION's common
+"emit when set" guard, which the draft already implements by skipping empty
+values. A pairing guarded by a *different* option is a real branch
+(Topaz vs LoG picking, EM vs gradient refinement) and stays out of the draft:
+emitting both halves of a branch produces a command that contradicts itself.
+Parsing that condition correctly requires handling RELION's brace-less
+`else if (x) command += ...;` one-liners — treating those as unconditional is
+exactly how a branch-only flag lands in every draft.
+
+**Default program.** `program_guess` skips two kinds of literal that are not
+what a fresh job runs: the `_mpi` half of each `if (nr_mpi > 1)` pair, and
+anything inside a continue-only branch (Autopick's first literal is
+`relion_manualpick`, from its "continue manually" path).
 
 #### Draft-command overlays for RELION-5's Python tomo tools
 
