@@ -15,8 +15,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from converters import aretomo_bridge, deepetpicker_bridge, imod_bridge, warp_bridge
-from converters.star_io import backup_before_overwrite, write_particles
+try:
+    from .converters import aretomo_bridge, deepetpicker_bridge, imod_bridge, warp_bridge
+    from .converters.star_io import backup_before_overwrite, write_particles
+except ImportError:  # pragma: no cover - direct script/test import fallback
+    from converters import aretomo_bridge, deepetpicker_bridge, imod_bridge, warp_bridge
+    from converters.star_io import backup_before_overwrite, write_particles
 
 
 def _resolve_in(project_dir: Path, value: str) -> str:

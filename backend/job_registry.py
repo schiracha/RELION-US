@@ -43,16 +43,28 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from job_catalog import (
-    CATEGORIES,
-    CUSTOM_JOBS,
-    JOB_CATALOG,
-    draft_flag_for,
-    draft_is_suppressed,
-    draft_output_flag,
-    draft_program_override,
-    pipeline_type,
-)
+try:
+    from .job_catalog import (
+        CATEGORIES,
+        CUSTOM_JOBS,
+        JOB_CATALOG,
+        draft_flag_for,
+        draft_is_suppressed,
+        draft_output_flag,
+        draft_program_override,
+        pipeline_type,
+    )
+except ImportError:  # pragma: no cover - direct script/test import fallback
+    from job_catalog import (
+        CATEGORIES,
+        CUSTOM_JOBS,
+        JOB_CATALOG,
+        draft_flag_for,
+        draft_is_suppressed,
+        draft_output_flag,
+        draft_program_override,
+        pipeline_type,
+    )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
