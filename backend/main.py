@@ -138,13 +138,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-import job_registry
-import progress
-import program_help
-import project_manager
-import viz
-from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
-from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
+from . import job_registry
+from . import progress
+from . import program_help
+from . import project_manager
+from . import viz
+from .custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
+from .job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PROJECT_DIR = APP_DIR.parent / "relion_project"
@@ -265,8 +265,16 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
     try:
         payload = program_help.extra_options_for_job(raw, program)
     except program_help.ProgramHelpError as exc:
-        return {"available": False, "reason": "not_runnable", "message": str(exc),
-                "program": program, "options": []}
+        # Graceful degradation: missing binaries don't block usage, just limit
+        # auto-discovery. Users can still type everything manually.
+        return {
+            "available": False,
+            "reason": "not_installed",
+            "message": str(exc),
+            "program": program,
+            "options": [],
+            "can_proceed_without": True,
+        }
     return {"available": True, **payload}
 
 

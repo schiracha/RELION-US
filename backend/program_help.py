@@ -80,11 +80,36 @@ def program_argv(program: str) -> list[str]:
 
 
 def resolve_program(program: str) -> tuple[str | None, list[str]]:
-    """(absolute path or None, extra argv after the binary)."""
+    """(absolute path or None, extra argv after the binary).
+
+    Some environments launch Python from a non-interactive shell, which does
+    not inherit the same PATH that a user shell typically sources. If the
+    direct lookup fails, try one interactive shell pass to resolve the binary
+    from the user's configured environment.
+    """
     argv = program_argv(program)
     if not argv:
         return None, []
-    return shutil.which(argv[0]), argv[1:]
+
+    path = shutil.which(argv[0])
+    if path:
+        return path, argv[1:]
+
+    # Some systems only expose RELION in a user shell startup file. An
+    # interactive shell is often the quickest, portable way to pick that up.
+    try:
+        result = subprocess.run(
+            ["bash", "-i", "-c", f"which {shlex.quote(argv[0])}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip(), argv[1:]
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    return None, argv[1:]
 
 
 def _run_help(path: str, extra_argv: list[str]) -> str:
@@ -172,10 +197,12 @@ def program_options(program: str) -> dict[str, Any]:
     path, extra = resolve_program(program)
     if path is None:
         argv = program_argv(program)
+        binary_name = argv[0] if argv else program
         raise ProgramHelpError(
-            f"{argv[0] if argv else program!r} is not on this machine's PATH. "
-            "The Advanced tab lists options by asking the installed program, so "
-            "it needs the RELION binaries the backend would run."
+            f"RELION binary '{binary_name}' is not on this machine's PATH. "
+            f"If you have RELION installed, add its bin/ directory to your PATH. "
+            f"Otherwise, you can still type any command-line options directly into the command box "
+            f"or use Additional arguments in the Running section above."
         )
     try:
         st = Path(path).stat()
