@@ -41,12 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    from . import job_catalog
-    from . import project_manager
-except ImportError:  # pragma: no cover - direct script/test import fallback
-    import job_catalog
-    import project_manager
+import job_catalog
+import project_manager
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"

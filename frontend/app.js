@@ -500,12 +500,9 @@ async function openJobPopup(internalName, displayName, existingRun) {
     const intro = document.createElement("div");
     intro.className = "cli-note";
     if (!data.available) {
-      const message = data.reason === "not_installed"
-        ? `<strong>RELION binaries not found:</strong> ${escapeHtml(data.message || "Not installed on this machine.")}`
-        : `<strong>Advanced options unavailable:</strong> ${escapeHtml(data.message || "No extra options available.")}`;
       intro.innerHTML =
-        message +
-        `<br /><br />✓ <em>You can still use this job:</em> anything you need can be typed directly into the command box, ` +
+        `${escapeHtml(data.message || "No extra options available.")}` +
+        `<br />Anything you need can still be typed straight into the command box, ` +
         `or into <em>Additional arguments</em> in the Running section above.`;
       advancedContent.appendChild(intro);
       return;

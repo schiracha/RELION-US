@@ -88,10 +88,7 @@ def detect_pipeline_hint(project_dir: Path) -> str:
         return "unknown"
 
     try:
-        try:
-            from .converters.star_io import StarDocument
-        except ImportError:  # pragma: no cover - direct script/test import fallback
-            from converters.star_io import StarDocument
+        from converters.star_io import StarDocument
 
         doc = StarDocument.read(star_path)
         df = doc.block("pipeline_processes")
@@ -104,10 +101,7 @@ def detect_pipeline_hint(project_dir: Path) -> str:
     if df.empty or "rlnPipeLineProcessTypeLabel" not in df.columns:
         return "unknown"
 
-    try:
-        from .job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY
-    except ImportError:  # pragma: no cover - direct script/test import fallback
-        from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY
+    from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY
 
     tomo_labels = {JOB_CATALOG[n][0] for n in PIPELINE_TOMO_ONLY if n in JOB_CATALOG}
     tomo_labels |= {CUSTOM_JOBS[n]["label_new"] for n in PIPELINE_TOMO_ONLY if n in CUSTOM_JOBS}
