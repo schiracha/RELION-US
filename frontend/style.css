@@ -224,6 +224,17 @@ html, body {
 #ccTable tbody tr:hover { background: var(--panel-alt); }
 #ccTable td { padding: 7px 12px; }
 .cc-job-note-icon { margin-left: 4px; color: var(--accent); cursor: help; }
+/* A job read out of RELION's own default_pipeline.star rather than run here. */
+.cc-relion-tag {
+  margin-left: 6px; padding: 1px 5px; border-radius: 8px;
+  font-size: 9px; letter-spacing: .04em; cursor: help;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.job-relion-bar {
+  padding: 6px 10px; font-size: 11px; line-height: 1.4;
+  color: var(--text-dim); background: var(--panel-alt);
+  border-bottom: 1px solid var(--border);
+}
 
 .cc-status-badge {
   display: inline-block;

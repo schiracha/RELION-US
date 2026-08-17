@@ -226,6 +226,50 @@ class JobRunManager:
     def new_run_id(self) -> str:
         return uuid.uuid4().hex[:12]
 
+    RELION_RUN_PREFIX = "relion:"
+
+    @classmethod
+    def is_relion_run(cls, run_id: str) -> bool:
+        """A Command Center row imported from RELION's own pipeline rather
+        than started here. This app does not own those jobs and does not write
+        RELION's pipeline state, so abort / overwrite / delete / status edits
+        are refused on them."""
+        return str(run_id).startswith(cls.RELION_RUN_PREFIX)
+
+    def relion_run_detail(self, run_id: str, project_dir: Optional[Path] = None) -> Optional[dict]:
+        """One imported RELION job, with the option values it actually ran
+        with.
+
+        RELION saves every JobOption into `job.star` in the job's own
+        directory when the job runs -- the same file its GUI reads to reopen a
+        job -- so reopening one here shows its real settings rather than the
+        job type's defaults. Jobs from RELION 3.0 or earlier (a `run.job` in a
+        different format) and directories that have since been deleted come
+        back with empty values and a note saying so, which is the honest
+        answer.
+        """
+        pd = project_dir if project_dir is not None else self.project_dir
+        for entry in self._relion_pipeline_entries(pd):
+            if entry["run_id"] != run_id:
+                continue
+            entry = dict(entry)
+            job_dir = Path(entry["cwd"])
+            values = project_manager.read_relion_job_options(job_dir)
+            entry["field_values"] = values
+            if not entry["exists_on_disk"]:
+                entry["import_note"] = (
+                    "This job is listed in RELION's pipeline but its directory "
+                    "is no longer on disk."
+                )
+            elif not values:
+                entry["import_note"] = (
+                    "No job.star in this job's directory, so its settings could "
+                    "not be read (RELION 3.0 and earlier wrote a run.job "
+                    "instead). The form shows this job type's defaults."
+                )
+            return entry
+        return None
+
     def get(self, run_id: str) -> Optional[JobRun]:
         return self.runs.get(run_id)
 
@@ -245,6 +289,10 @@ class JobRunManager:
         running). In-memory wins on conflict since it's more current."""
         target = str(project_dir if project_dir is not None else self.project_dir)
         merged: dict[str, dict] = {}
+        # Jobs RELION itself ran, from its own default_pipeline.star. First, so
+        # anything this app also has a record of overrides them.
+        for entry in self._relion_pipeline_entries(Path(target)):
+            merged[entry["run_id"]] = entry
         for entry in project_manager.load_history(Path(target)):
             run_id = entry.get("run_id")
             if run_id:
@@ -252,9 +300,80 @@ class JobRunManager:
         for run in self.runs.values():
             if run.project_dir == target:
                 merged[run.run_id] = run.to_summary()
-        runs = sorted(merged.values(), key=lambda r: r.get("started_at") or 0)
+        # Job number first, timestamp as a tie-break. Jobs imported from
+        # RELION's pipeline carry no timestamp, and a project's job counter
+        # only ever goes up -- for RELION's jobs and this app's alike -- so the
+        # number is the one chronological key that works across both.
+        runs = sorted(
+            merged.values(),
+            key=lambda r: (r.get("job_number") or 0, r.get("started_at") or 0),
+        )
         self._attach_input_lineage(runs, Path(target))
         return runs
+
+    @staticmethod
+    def _relion_pipeline_entries(project_dir: Path) -> list[dict]:
+        """Jobs from RELION's own `default_pipeline.star`, as Command Center
+        rows.
+
+        A project built in RELION's GUI has its whole history there and none of
+        it in this app's own file, so without this the Command Center is empty
+        in exactly the project where it would be most useful.
+
+        These are **read-only**: `source: "relion"` marks them, and the API
+        refuses abort/overwrite/delete on them. This app does not write
+        RELION's pipeline state, so it must not offer actions that imply it
+        owns these jobs. Reopening one still works -- the options come from the
+        job's own `job.star` (see get_run_detail).
+
+        Timestamps are left empty: RELION's pipeline file records none, and a
+        job directory's mtime is when it was last touched, not when the job
+        ran. A blank Started column is honest; a plausible-looking wrong
+        timestamp is not.
+        """
+        info = project_manager.read_relion_pipeline(project_dir)
+        out: list[dict] = []
+        for proc in info["processes"]:
+            name = proc["name"]                        # e.g. "Class2D/job005"
+            job_dir = project_dir / name
+            internal = job_catalog.internal_name_for_label(proc["type_label"])
+            display = job_catalog.JOB_CATALOG.get(internal, (None, proc["type_label"]))[1] \
+                if internal else proc["type_label"]
+            try:
+                exists = job_dir.exists()
+            except OSError:
+                exists = False
+            # The run_id must survive a URL path segment, so it cannot carry
+            # the job's directory name -- an encoded "/" in a path is rejected
+            # before the route ever matches. RELION's job number is unique
+            # across the project (one counter for every job type), which makes
+            # it the natural identifier.
+            slug = (f"job{proc['job_number']:03d}" if proc["job_number"]
+                    else name.replace("/", "-"))
+            out.append({
+                "run_id": f"relion:{slug}",
+                "source": "relion",
+                "internal_name": internal or "",
+                "display_name": display,
+                "command": "",
+                "status": project_manager.RELION_STATUS_MAP.get(
+                    proc["status_label"], "completed"),
+                "exit_code": None,
+                "started_at": None,
+                "ended_at": None,
+                "project_dir": str(project_dir),
+                "cwd": str(job_dir),
+                "job_number": proc["job_number"],
+                "alias": proc["alias"],
+                "note": "",
+                "job_name": name.split("/")[-1],
+                "field_values": {},
+                "detected_inputs": [],
+                "abortable": False,
+                "relion_type_label": proc["type_label"],
+                "exists_on_disk": exists,
+            })
+        return out
 
     @staticmethod
     def _attach_input_lineage(runs: list[dict], project_dir: Path) -> None:
@@ -300,18 +419,42 @@ class JobRunManager:
             if links:
                 r["input_links"] = links
 
-    def _next_job_number(self, project_dir: Path) -> int:
+    def _next_job_number(self, project_dir: Path, internal_name: Optional[str] = None) -> int:
         """RELION's own job numbering is a single counter for the whole
         project, shared across every job type (see job_catalog.py's
         JOB_DIRNAME docstring) -- derived fresh each time from persisted +
         in-memory state rather than kept as separate mutable counter state,
-        so it can't drift out of sync across a backend restart."""
+        so it can't drift out of sync across a backend restart.
+
+        **RELION's own numbering counts too.** Opening a project that was built
+        in RELION's GUI, this app used to start again at job001 -- and job001
+        in such a project is somebody's existing results. `rlnPipeLineJobCounter`
+        and the per-process numbers in `default_pipeline.star` are read so the
+        numbering continues the project instead of colliding with it.
+
+        As a final backstop, if the directory the number would produce already
+        exists on disk (a job RELION ran but later removed from its pipeline,
+        say), keep going until it doesn't. Nothing here ever allocates a
+        directory that is already there.
+        """
         target = str(project_dir)
         numbers = [
             entry.get("job_number", 0) for entry in project_manager.load_history(project_dir)
         ]
         numbers += [run.job_number for run in self.runs.values() if run.project_dir == target]
-        return (max(numbers) if numbers else 0) + 1
+        numbers += list(project_manager.relion_job_numbers(project_dir))
+        n = (max(numbers) if numbers else 0) + 1
+
+        if internal_name:
+            prefix = job_catalog.job_dirname(internal_name)
+            # Bounded: a project with 10k consecutive existing job dirs is not
+            # a real case, and an unbounded loop on a strange filesystem is
+            # worse than a number that is merely high.
+            for _ in range(10000):
+                if not (project_dir / f"{prefix}/job{n:03d}").exists():
+                    break
+                n += 1
+        return n
 
     def prospective_subdir(self, internal_name: str, project_dir: Optional[Path] = None) -> str:
         """The project-root-relative output directory the NEXT run of this
@@ -323,7 +466,7 @@ class JobRunManager:
         which rewrites the command's output path if another job was recorded
         in between."""
         pd = project_dir if project_dir is not None else self.project_dir
-        n = self._next_job_number(pd)
+        n = self._next_job_number(pd, internal_name)
         return f"{job_catalog.job_dirname(internal_name)}/job{n:03d}"
 
     def _resolve_overwrite_target(self, overwrite_run_id: str, project_dir: Path) -> dict:
@@ -421,7 +564,7 @@ class JobRunManager:
             alias, note = target["alias"], target["note"]
         else:
             run_id = self.new_run_id()
-            job_number = self._next_job_number(project_dir)
+            job_number = self._next_job_number(project_dir, internal_name)
             authoritative_subdir = f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
             # `subdir` is the output path the draft embedded in the command's
             # `--o`/`--output-directory` (the prospective number shown when the
@@ -606,7 +749,7 @@ class JobRunManager:
             alias, note = target["alias"], target["note"]
         else:
             run_id = self.new_run_id()
-            job_number = self._next_job_number(project_dir)
+            job_number = self._next_job_number(project_dir, internal_name)
             cwd = project_dir / f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
             alias, note = "", ""
         cwd.mkdir(parents=True, exist_ok=True)
@@ -877,6 +1020,13 @@ class JobRunManager:
         run = self.get(run_id)
         if run is not None:
             return Path(run.cwd)
+        if self.is_relion_run(run_id):
+            # A job RELION itself ran. Its directory is real and full of real
+            # output, so browsing files and reading its per-iteration progress
+            # work exactly as they do for this app's own runs -- an old
+            # classification's resolution curve is worth seeing.
+            detail = self.relion_run_detail(run_id)
+            return Path(detail["cwd"]) if detail else None
         entry = next(
             (h for h in project_manager.load_history(self.project_dir) if h.get("run_id") == run_id),
             None,

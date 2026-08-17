@@ -22,6 +22,8 @@ follow the same job-popup UI as every RELION job type, but their "command"
 is a direct Python call into backend/converters/ rather than a relion_*
 subprocess (see job_runner.py).
 """
+
+import functools
 from typing import Optional
 
 CATEGORIES = [
@@ -292,6 +294,36 @@ def job_dirname(internal_name: str) -> str:
     JOB_DIRNAME above). Falls back to internal_name for any job type added
     here in the future before its real dirname is looked up."""
     return JOB_DIRNAME.get(internal_name, internal_name)
+
+@functools.lru_cache(maxsize=1)
+def _label_to_internal() -> dict[str, str]:
+    """RELION's process type label -> this app's internal job name."""
+    out = {label_new: name for name, (label_new, *_rest) in JOB_CATALOG.items()}
+    out.update({meta["label_new"]: name for name, meta in CUSTOM_JOBS.items()})
+    return out
+
+
+def internal_name_for_label(type_label: str) -> str | None:
+    """Reverse of a job's `label_new`, for reading RELION's own
+    `default_pipeline.star` (whose rows carry only the type label).
+
+    RELION appends a sub-label to the base type for many jobs -- `label +=
+    ".movies"`, `".em"`, `".topaz"`, 35 places in pipeline_jobs.cpp -- so a
+    real project records "relion.class2d.em" where this catalog holds
+    "relion.class2d". Longest matching base wins, so "relion.class2d" is not
+    mistaken for a prefix of something more specific that also exists.
+    """
+    label = (type_label or "").strip()
+    if not label:
+        return None
+    table = _label_to_internal()
+    if label in table:
+        return table[label]
+    candidates = [base for base in table if label.startswith(base + ".")]
+    if not candidates:
+        return None
+    return table[max(candidates, key=len)]
+
 
 
 # --------------------------------------------------------------------------

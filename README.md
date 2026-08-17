@@ -267,6 +267,34 @@ built on a flipped or raw-`tilt` volume has depth in Y, not Z. Mirroring
 requires the tomogram dimension for that axis, and fails loudly if you
 don't supply it rather than silently producing wrong coordinates.
 
+## Opening a project built in RELION's GUI
+
+Point RELION-US at an existing project and it reads RELION's own
+`default_pipeline.star` (never writes it):
+
+- **Its jobs fill the Command Center**, tagged `RELION`, with RELION's own job
+  numbers, aliases, types and statuses (Succeeded/Failed/Running map onto the
+  same states this app uses). They carry no timestamps — RELION's pipeline file
+  records none, and a directory's mtime is not a start time.
+- **Opening one shows the settings it actually ran with**, read from that job's
+  own `job.star` — the same file RELION's GUI reads to reopen a job. A job from
+  RELION 3.0 or earlier (which wrote `run.job` in a different format) opens with
+  the job type's defaults and says so.
+- **Its Outputs and Progress tabs work.** An old classification's
+  `run_it###_model.star` files are still there, so you get its resolution curve
+  and class images without re-running anything.
+- **New jobs continue the project's numbering.** RELION-US takes
+  `rlnPipeLineJobCounter` and the existing process list into account, and skips
+  any number whose directory is already on disk. In a project sitting at job011
+  your next job is job012 — not job001 on top of somebody's Import.
+
+What it does **not** do: register its own runs back into
+`default_pipeline.star`. That file is RELION's own state, and writing it
+incorrectly would damage a project this app is only a companion to. The
+practical consequence is that the two tools each keep their own record — jobs
+you run here won't show in RELION's GUI, and RELION's counter won't know about
+them. If you work in both, check the job number before running.
+
 ## Command Center (job history)
 
 The main panel lists every job run in the current project, in two togglable
@@ -427,6 +455,14 @@ parsing gaps introduced by a new RELION release show up as failures.
 - The job definitions come from one specific RELION checkout. Job internals
   change across releases, so re-run the extractor (above) after a RELION
   upgrade; the test suite flags most breakage immediately.
+- Jobs RELION itself ran are **read-only** here (see "Opening a project built
+  in RELION's GUI"): abort, overwrite, rename, note and delete are refused on
+  them, because RELION-US doesn't write `default_pipeline.star` and couldn't
+  keep RELION's record straight afterwards.
+- RELION-US's own runs do **not** appear in RELION's pipeline file, so RELION's
+  GUI won't list them. It will also keep numbering from its own counter, which
+  can collide with a job RELION-US has already created — check the job number
+  if you go back and forth between the two.
 - Job history persists run *summaries* (command, status, timestamps) per
   project, not full stdout/stderr transcripts — reopening a job from
   history after the backend has restarted shows its last known status but
@@ -444,6 +480,7 @@ parsing gaps introduced by a new RELION release show up as failures.
 ./run_tests.sh options      # + option placement, MPI/threads, Advanced tab
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
+./run_tests.sh legacy       # + opening a project built in RELION's own GUI
 ./run_tests.sh all          # everything (~80 s) — before you commit a milestone
 ```
 

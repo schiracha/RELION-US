@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,153 @@ def is_relion_project(path: Path) -> bool:
     if not path.is_dir():
         return False
     return (path / RELION_PIPELINE_STAR).exists() or (path / MARKER_DIRNAME).is_dir()
+
+
+# --------------------------------------------------------------------------
+# Reading RELION's own pipeline
+#
+# A project built in RELION's own GUI has a `default_pipeline.star` holding
+# the whole job history: a global job counter and one row per process. Opening
+# such a project without reading it is what made RELION-US restart numbering at
+# job001 in a project already on job012 -- i.e. draft an output path pointing
+# straight at somebody's existing results.
+#
+# RELION-US reads this file and never writes it. Registering its own runs back
+# into RELION's pipeline state is RELION's job, and getting it wrong would
+# corrupt a project this app is only a companion to.
+#
+# Schema verified against RELION's PipeLine::write() (src/pipeliner.cpp) and
+# the label table in src/metadata_label.h.
+# --------------------------------------------------------------------------
+
+PIPELINE_GENERAL_BLOCK = "pipeline_general"
+PIPELINE_PROCESSES_BLOCK = "pipeline_processes"
+JOB_DIR_RE = re.compile(r"job(\d+)/?$")
+
+# procstatus_type2label in RELION's src/pipeline_jobs.h, mapped onto the
+# statuses this app already uses in its own history.
+RELION_STATUS_MAP = {
+    "Running": "running",
+    "Scheduled": "pending",
+    "Succeeded": "completed",
+    "Failed": "failed",
+    "Aborted": "aborted",
+}
+
+
+def _job_number_from_name(name: str) -> int:
+    """5 from "Class2D/job005/". RELION's numbering is one counter for the
+    whole project, so the number alone is meaningful."""
+    m = JOB_DIR_RE.search(str(name).rstrip("/"))
+    return int(m.group(1)) if m else 0
+
+
+def read_relion_pipeline(project_dir: Path) -> dict[str, Any]:
+    """RELION's own job history for this project.
+
+    Returns {"job_counter": int|None, "processes": [...]}; an empty result for
+    a project with no `default_pipeline.star` (one RELION-US started itself) or
+    an unreadable one. Never raises: a project must still open when its
+    pipeline file is from a newer RELION, half-written, or corrupt.
+
+    `job_counter` is RELION's `rlnPipeLineJobCounter` -- the number it would
+    give the *next* job.
+    """
+    star_path = project_dir / RELION_PIPELINE_STAR
+    if not star_path.exists():
+        return {"job_counter": None, "processes": []}
+
+    try:
+        from converters.star_io import StarDocument
+
+        doc = StarDocument.read(star_path)
+    except Exception:
+        return {"job_counter": None, "processes": []}
+
+    job_counter = None
+    try:
+        # `pipeline_general` is a STAR *list* block (one label per line, no
+        # loop_), which `starfile` hands back as a plain dict rather than a
+        # DataFrame -- so this cannot assume the DataFrame API the loop blocks
+        # use. Both shapes are accepted here rather than relying on which one
+        # a given starfile version returns.
+        general = doc.block(PIPELINE_GENERAL_BLOCK)
+        if isinstance(general, dict):
+            raw = general.get("rlnPipeLineJobCounter")
+        elif general is not None and not general.empty:
+            raw = general.iloc[0].get("rlnPipeLineJobCounter")
+        else:
+            raw = None
+        if raw is not None:
+            job_counter = int(float(raw))
+    except Exception:
+        job_counter = None
+
+    processes: list[dict[str, Any]] = []
+    try:
+        df = doc.block(PIPELINE_PROCESSES_BLOCK)
+    except Exception:
+        df = None
+    if df is not None and not df.empty and "rlnPipeLineProcessName" in df.columns:
+        for _, row in df.iterrows():
+            name = str(row["rlnPipeLineProcessName"]).strip()
+            if not name:
+                continue
+            alias = str(row.get("rlnPipeLineProcessAlias", "") or "").strip()
+            processes.append({
+                "name": name.rstrip("/"),
+                # RELION writes the literal string "None" for "no alias".
+                "alias": "" if alias in ("", "None") else alias.rstrip("/"),
+                "type_label": str(row.get("rlnPipeLineProcessTypeLabel", "") or ""),
+                "status_label": str(row.get("rlnPipeLineProcessStatusLabel", "") or ""),
+                "job_number": _job_number_from_name(name),
+            })
+    return {"job_counter": job_counter, "processes": processes}
+
+
+def relion_job_numbers(project_dir: Path) -> set[int]:
+    """Every job number RELION's own pipeline already accounts for, plus the
+    counter it would hand out next. Used so this app's numbering continues a
+    project rather than colliding with it."""
+    info = read_relion_pipeline(project_dir)
+    numbers = {p["job_number"] for p in info["processes"] if p["job_number"]}
+    if info["job_counter"]:
+        # The counter is the *next* number RELION would use, so everything
+        # below it is spoken for -- including jobs deleted from the pipeline,
+        # whose directories may well still be on disk.
+        numbers.add(info["job_counter"] - 1)
+    return numbers
+
+
+def read_relion_job_options(job_dir: Path) -> dict[str, str]:
+    """The option values RELION saved for one job, from its own `job.star`.
+
+    RELION writes every JobOption into a `joboptions_values` block
+    (`rlnJobOptionVariable` / `rlnJobOptionValue`, see RelionJob::write in
+    src/pipeline_jobs.cpp) when a job runs -- the same file its GUI reads back
+    to reopen a job. Keys are the same option keys this app's forms use, so an
+    old job reopens with the settings it actually ran with.
+
+    Returns {} when there's no job.star: RELION 3.0 and earlier wrote a
+    `run.job` in a different format, and a job directory can be missing either.
+    """
+    star_path = Path(job_dir) / "job.star"
+    if not star_path.exists():
+        return {}
+    try:
+        from converters.star_io import StarDocument
+
+        df = StarDocument.read(star_path).block("joboptions_values")
+    except Exception:
+        return {}
+    if df is None or df.empty:
+        return {}
+    if "rlnJobOptionVariable" not in df.columns or "rlnJobOptionValue" not in df.columns:
+        return {}
+    return {
+        str(k): str(v)
+        for k, v in zip(df["rlnJobOptionVariable"], df["rlnJobOptionValue"])
+    }
 
 
 def detect_pipeline_hint(project_dir: Path) -> str:
@@ -107,9 +255,18 @@ def detect_pipeline_hint(project_dir: Path) -> str:
     tomo_labels |= {CUSTOM_JOBS[n]["label_new"] for n in PIPELINE_TOMO_ONLY if n in CUSTOM_JOBS}
     spa_labels = {JOB_CATALOG[n][0] for n in PIPELINE_SPA_ONLY if n in JOB_CATALOG}
 
+    # RELION appends a sub-label to the base type for many jobs
+    # (`label += ".movies"`, `".em"`, `".topaz"` -- 35 places in
+    # pipeline_jobs.cpp), so a real project records "relion.class2d.em" while
+    # this app's catalog holds "relion.class2d". An exact-set test therefore
+    # matched nothing at all on any real project, and this hint silently never
+    # fired. Match on the base label instead.
+    def _matches(label: str, base_labels: set[str]) -> bool:
+        return any(label == b or label.startswith(b + ".") for b in base_labels)
+
     labels_used = set(df["rlnPipeLineProcessTypeLabel"].astype(str))
-    has_tomo = not labels_used.isdisjoint(tomo_labels)
-    has_spa = not labels_used.isdisjoint(spa_labels)
+    has_tomo = any(_matches(l, tomo_labels) for l in labels_used)
+    has_spa = any(_matches(l, spa_labels) for l in labels_used)
 
     if has_tomo and has_spa:
         return "mixed"

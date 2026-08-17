@@ -15,6 +15,7 @@
 #                               #   wiring
 #   ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 #   ./run_tests.sh project      # + Change Project, recents, Create Folder
+#   ./run_tests.sh legacy       # + opening a project built in RELION's own GUI
 #   ./run_tests.sh ui           # + every browser suite
 #   ./run_tests.sh all          # everything (use before staging a milestone)
 #
@@ -27,6 +28,7 @@
 #   job popups, run/abort/overwrite, Outputs ............. jobs
 #   job_registry / the extractor / the Advanced tab ...... options
 #   project_manager.py or the Change Project dialog ...... project
+#   job numbering, the Command Center, RELION's pipeline .. legacy
 #   frontend/app.js scaffolding shared by all popups ..... ui
 #
 # Every browser suite gets a fresh project directory and its own backend on its
@@ -141,8 +143,14 @@ start_backend() {
   # default_pipeline.star or our marker; without the marker the backend falls
   # back to the app's own relion_project, and the suite would run against
   # whatever history is sitting in it.
-  mkdir -p "$proj/.relion_us"
-  echo "[]" > "$proj/.relion_us/run_history.json"
+  if [[ "$name" == test_legacy_project ]]; then
+    # Deliberately NO .relion_us marker: the point is a project RELION built
+    # and this app has never seen.
+    make_legacy_project "$proj"
+  else
+    mkdir -p "$proj/.relion_us"
+    echo "[]" > "$proj/.relion_us/run_history.json"
+  fi
 
   # XDG_CONFIG_HOME is redirected so the recent-projects cache written by the
   # test run never touches the developer's real one.
@@ -192,6 +200,88 @@ stop_backend() {
   kill "$BACKEND_PID" 2>/dev/null
   wait "$BACKEND_PID" 2>/dev/null
   BACKEND_PID=""
+}
+
+# A project as RELION's own GUI leaves one: a default_pipeline.star with a job
+# counter and a process list, real job directories, and a job.star holding the
+# options one of them ran with. The `legacy` suite opens this instead of an
+# empty project.
+make_legacy_project() {
+  local proj="$1"
+  mkdir -p "$proj"
+  cat > "$proj/default_pipeline.star" <<'STAR'
+
+# version 30001
+
+data_pipeline_general
+
+_rlnPipeLineJobCounter                      12
+
+
+# version 30001
+
+data_pipeline_processes
+
+loop_
+_rlnPipeLineProcessName #1
+_rlnPipeLineProcessAlias #2
+_rlnPipeLineProcessTypeLabel #3
+_rlnPipeLineProcessStatusLabel #4
+Import/job001/       None            relion.import.movies     Succeeded
+MotionCorr/job002/   my_motioncorr   relion.motioncorr.own    Succeeded
+CtfFind/job003/      None            relion.ctffind.ctffind4  Succeeded
+Class2D/job005/      None            relion.class2d.em        Failed
+Refine3D/job011/     None            relion.refine3d          Succeeded
+STAR
+  mkdir -p "$proj/Import/job001" "$proj/MotionCorr/job002" \
+           "$proj/CtfFind/job003" "$proj/Class2D/job005" "$proj/Refine3D/job011"
+  cat > "$proj/Class2D/job005/job.star" <<'STAR'
+
+# version 30001
+
+data_job
+
+_rlnJobTypeLabel                     relion.class2d.em
+_rlnJobIsContinue                             0
+_rlnJobIsTomo                                 0
+
+
+# version 30001
+
+data_joboptions_values
+
+loop_
+_rlnJobOptionVariable #1
+_rlnJobOptionValue #2
+fn_img            Select/job004/particles.star
+nr_classes        50
+tau_fudge         4
+particle_diameter 180
+do_ctf_correction Yes
+nr_mpi            5
+nr_threads        8
+STAR
+  # A few iterations of real RELION output, so the Progress tab has something
+  # to plot for a job this app never ran.
+  "$PYTHON" - "$proj/Class2D/job005" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np, mrcfile, starfile, pandas as pd
+d = Path(sys.argv[1]); NC = 4
+for it in (1, 2, 3):
+    with mrcfile.new(d / f"run_it{it:03d}_classes.mrcs", overwrite=True) as m:
+        m.set_data((np.random.rand(NC, 32, 32) * 0.3).astype(np.float32))
+    starfile.write({
+        "model_general": pd.DataFrame({"rlnCurrentResolution": [1 / (18.0 - it)],
+                                       "rlnNrClasses": [NC],
+                                       "rlnReferenceDimensionality": [2],
+                                       "rlnPixelSize": [1.4]}),
+        "model_classes": pd.DataFrame({
+            "rlnReferenceImage": [f"{k+1:06d}@run_it{it:03d}_classes.mrcs" for k in range(NC)],
+            "rlnClassDistribution": [0.4, 0.3, 0.2, 0.1],
+            "rlnEstimatedResolution": [20.0 - it + k for k in range(NC)]})},
+        d / f"run_it{it:03d}_model.star", overwrite=True)
+PY
 }
 
 # run_browser_suite <script> [pass_project_dir]
@@ -246,6 +336,7 @@ wants jobs     && run_browser_suite test_frontend.py
 wants jobs     && run_browser_suite test_command_center.py
 wants jobs     && run_browser_suite test_command_center_abort_overwrite.py
 wants project  && run_browser_suite test_frontend_project.py
+wants legacy   && run_browser_suite test_legacy_project.py yes
 
 echo
 echo "======================================================================"

@@ -299,6 +299,12 @@ class StartRunRequest(BaseModel):
 
 @app.post("/api/runs")
 async def start_run(req: StartRunRequest):
+    if req.overwrite_run_id:
+        # Overwriting means re-running into that job's own directory. For a job
+        # RELION owns, that would silently replace results its pipeline still
+        # describes, with no way for this app to update RELION's record.
+        _reject_relion_run(req.overwrite_run_id, "overwritten")
+
     if req.internal_name in CUSTOM_JOB_DEFINITIONS:
         runner = CUSTOM_JOB_RUNNERS[req.internal_name]
         display_name = CUSTOM_JOB_DEFINITIONS[req.internal_name]["display_name"]
@@ -339,6 +345,27 @@ async def start_run(req: StartRunRequest):
     return run.to_summary()
 
 
+def _reject_relion_run(run_id: str, action: str) -> None:
+    """Imported RELION jobs are read-only here.
+
+    RELION-US never writes `default_pipeline.star`, so it cannot keep RELION's
+    own record straight if it aborts, re-runs or deletes a job RELION owns.
+    Refusing is better than half-doing it and leaving the project's pipeline
+    describing something that is no longer true.
+    """
+    if JobRunManager.is_relion_run(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This job was run in RELION itself, not in RELION-US, so it "
+                f"cannot be {action} from here — RELION-US doesn't write "
+                f"RELION's pipeline file and can't keep its record consistent. "
+                f"Use RELION's own GUI for that, or re-run the job here as a "
+                f"new job."
+            ),
+        )
+
+
 @app.get("/api/runs")
 def list_runs():
     return run_manager.list_runs()
@@ -347,6 +374,7 @@ def list_runs():
 @app.post("/api/runs/{run_id}/abort")
 async def abort_run(run_id: str):
     """Command Center 'Abort' action (real RELION 'Abort running')."""
+    _reject_relion_run(run_id, "aborted")
     ok = await run_manager.abort_run(run_id)
     if not ok:
         raise HTTPException(status_code=409, detail="Run is not currently running (or doesn't exist)")
@@ -384,6 +412,7 @@ def update_run(run_id: str, req: RunUpdateRequest):
             ),
         )
 
+    _reject_relion_run(run_id, "edited")
     updated: dict | None = None
     if req.alias is not None:
         updated = run_manager.set_alias(run_id, req.alias)
@@ -408,6 +437,7 @@ def delete_run(run_id: str, remove_files: bool = False):
     """Command Center 'Delete' action (real RELION 'Delete' job action).
     remove_files=true also removes the job's own output directory -- see
     job_runner.JobRunManager.delete_run's docstring for the safety checks."""
+    _reject_relion_run(run_id, "deleted")
     ok, reason = run_manager.delete_run(run_id, remove_files=remove_files)
     if not ok:
         status_code = 404 if reason == "Unknown run_id" else 409
@@ -591,6 +621,13 @@ def create_folder_endpoint(req: ProjectPathRequest):
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str):
+    if JobRunManager.is_relion_run(run_id):
+        # A job RELION itself ran: no live output to stream, but its real
+        # option values come out of the job's own job.star.
+        detail = run_manager.relion_run_detail(run_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Unknown run_id")
+        return {**detail, "stdout_lines": [], "stderr_lines": []}
     run = run_manager.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")

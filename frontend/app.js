@@ -338,7 +338,14 @@ async function openJobPopup(internalName, displayName, existingRun) {
 
   const optionsByKey = {};
   (def.options || []).forEach((o) => (optionsByKey[o.key] = o));
-  const prefillValues = (isReopen && existingRun.field_values) || def.default_values || {};
+  // A job imported from RELION's pipeline carries the values RELION saved in
+  // its job.star; merge them over the defaults so options RELION's job.star
+  // doesn't mention (a newer RELION-US field, say) still get sane values.
+  const prefillValues = isReopen && existingRun.field_values
+    ? (existingRun.source === "relion"
+        ? { ...(def.default_values || {}), ...existingRun.field_values }
+        : existingRun.field_values)
+    : (def.default_values || {});
 
   // The RELION-style output dir (<JobDir>/jobNNN) this popup targets. For a
   // fresh job it's the prospective next dir from the job definition; passed
@@ -356,6 +363,9 @@ async function openJobPopup(internalName, displayName, existingRun) {
   body.className = "job-popup";
   body.innerHTML = `
     <div class="job-desc-bar">${escapeHtml(def.description || "")}</div>
+    ${(isReopen && existingRun.source === "relion") ? `<div class="job-relion-bar">Run in RELION itself — read-only here. ${
+      escapeHtml(existingRun.import_note || "Settings below are the ones this job ran with, from its job.star.")
+    }</div>` : ""}
     <div class="job-actions-toolbar" data-role="actions-toolbar">
       <span class="job-name-display" data-role="job-name-display" title="Click to rename (RELION's 'Alias' job action)">${escapeHtml((currentRun && currentRun.job_name) || displayName)}</span>
       <button class="btn" data-action="collapse" title="Minimize this window">− Collapse</button>
@@ -669,12 +679,22 @@ async function openJobPopup(internalName, displayName, existingRun) {
   function refreshToolbarState() {
     const hasRun = !!currentRun;
     const status = hasRun ? currentRun.status : null;
+    // A job imported from RELION's own pipeline: this app didn't run it and
+    // doesn't write RELION's pipeline file, so it can't abort, re-run into,
+    // rename or delete it without leaving RELION's record describing
+    // something untrue. Browsing its outputs and settings is fine.
+    const fromRelion = hasRun && currentRun.source === "relion";
     jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
-    overwriteBtn.hidden = !hasRun || status === "running";
-    abortBtn.hidden = !hasRun || status !== "running";
-    markFinishedBtn.hidden = !hasRun || status === "running" || status === "completed";
-    markFailedBtn.hidden = !hasRun || status === "running" || status === "failed";
-    deleteBtn.hidden = !hasRun || status === "running";
+    overwriteBtn.hidden = !hasRun || fromRelion || status === "running";
+    abortBtn.hidden = !hasRun || fromRelion || status !== "running";
+    markFinishedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "completed";
+    markFailedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "failed";
+    deleteBtn.hidden = !hasRun || fromRelion || status === "running";
+    noteBtn.hidden = fromRelion;
+    jobNameDisplay.style.cursor = fromRelion ? "default" : "";
+    jobNameDisplay.title = fromRelion
+      ? "Run in RELION itself — rename it there"
+      : "Click to rename (RELION's 'Alias' job action)";
     outputsTabBtn.hidden = !hasRun;
     refreshProgressTabVisibility();
     refreshNoteRow();
@@ -1191,7 +1211,10 @@ function renderTable() {
   for (const run of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${escapeHtml(run.job_name || "job???")}${run.note ? '<span class="cc-job-note-icon" title="' + escapeHtml(run.note) + '">📝</span>' : ""}</td>
+      <td>${escapeHtml(run.job_name || "job???")}${run.note ? '<span class="cc-job-note-icon" title="' + escapeHtml(run.note) + '">📝</span>' : ""}${
+        run.source === "relion"
+          ? '<span class="cc-relion-tag" title="Run in RELION itself, read from this project\'s default_pipeline.star. Read-only here.">RELION</span>'
+          : ""}</td>
       <td>${escapeHtml(run.display_name || run.internal_name)}</td>
       <td>${statusBadge(run.status)}</td>
       <td>${formatTimestamp(run.started_at)}</td>
@@ -1240,8 +1263,15 @@ function renderTimeline() {
         <span class="cc-card-name">${escapeHtml(run.job_name || "job???")}</span>
         <span class="cc-card-type">${escapeHtml(run.display_name || run.internal_name)}</span>
         ${statusBadge(run.status)}
+        ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
       </div>
-      <div class="cc-card-meta">${formatTimestamp(run.started_at)} · ${formatDuration(run.started_at, run.ended_at)}</div>
+      <div class="cc-card-meta">${
+        run.source === "relion"
+          // RELION's pipeline file records no timestamps -- saying so beats
+          // showing a made-up one.
+          ? "from RELION's pipeline" + (run.exists_on_disk === false ? " · directory missing" : "")
+          : formatTimestamp(run.started_at) + " · " + formatDuration(run.started_at, run.ended_at)
+      }</div>
       ${inputsLine}
       ${noteLine}
     `;
@@ -1277,11 +1307,29 @@ async function refreshCommandCenter() {
   renderCommandCenterViews();
 }
 
-function reopenRun(run) {
+async function reopenRun(run) {
   // Note: openJobPopup fetches the job definition fresh from
   // /api/jobs/{internal_name} and uses ITS is_custom flag throughout, so we
   // don't need (and shouldn't try) to infer custom-vs-RELION from the run
   // summary here.
+  if (run.source === "relion") {
+    if (!run.internal_name) {
+      errorDialog(
+        `This job's type ("${run.relion_type_label || "unknown"}") isn't one ` +
+        `RELION-US knows, so its form can't be opened. Its output directory is ` +
+        `${run.cwd || "unknown"}.`
+      );
+      return;
+    }
+    // Fetch the detail so the form opens with the values RELION actually ran
+    // with (from the job's own job.star), not this job type's defaults.
+    try {
+      run = await api(`/api/runs/${encodeURIComponent(run.run_id)}`);
+    } catch (err) {
+      errorDialog("Could not read this job from RELION's pipeline: " + err.message);
+      return;
+    }
+  }
   openJobPopup(run.internal_name, run.display_name || run.internal_name, run);
 }
 
