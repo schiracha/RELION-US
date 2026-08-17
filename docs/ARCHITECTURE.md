@@ -99,7 +99,8 @@ relion_us/
 └── test_*.py                 # Playwright browser smoke tests (job list, Change
                               #   Project + recents, Command Center,
                               #   abort/overwrite, Progress tab + theme + file
-                              #   pickers, orthogonal viewer, option placement)
+                              #   pickers, orthogonal viewer, option placement,
+                              #   adopting a RELION-built project)
 ```
 
 ### Why this instead of a Streamlit GUI
@@ -294,6 +295,51 @@ choices:
 
 Writing the cache never raises: a read-only or full home directory must not
 stop someone opening a project, which is the task they actually asked for.
+
+### Adopting a project RELION's own GUI built
+
+`default_pipeline.star` is read (never written) so an existing project opens as
+a continuation rather than a blank slate — see
+`project_manager.read_relion_pipeline()`.
+
+- **Numbering.** `job_runner._next_job_number()` takes the max of this app's own
+  history, its in-memory runs, and RELION's own numbers
+  (`rlnPipeLineJobCounter - 1` plus every process's number), then skips forward
+  past any job directory already on disk. Without this the app restarted at
+  job001 in a project already at job012 and drafted `--o` into existing results.
+  The counter is the number RELION would hand out *next*, so everything below it
+  is spoken for — including jobs deleted from the pipeline whose directories
+  survive.
+- **Command Center import.** `_relion_pipeline_entries()` turns each process
+  into a row with `source: "relion"`. Sorting is by job number, not timestamp:
+  imported jobs have none, and a project's counter only ever increases, so the
+  number is the one chronological key that works across both tools.
+- **Reopening.** `read_relion_job_options()` reads the job's own `job.star`
+  (`joboptions_values`: `rlnJobOptionVariable` / `rlnJobOptionValue`), whose
+  keys are the same option keys these forms use. Values are merged *over* the
+  job type's defaults, so an option RELION's file doesn't mention still gets a
+  sane value.
+- **Read-only.** Abort / overwrite / delete / status and alias edits are refused
+  on imported jobs, in the API (`_reject_relion_run`, 409) as well as the UI.
+  This app does not write RELION's pipeline state, so acting on a job RELION
+  owns would leave that file describing something untrue. Browsing outputs and
+  reading progress are fine — those only read the job's directory.
+- **Run ids carry the job number, not the directory.** `relion:job005`, not
+  `relion:Class2D/job005`: an encoded `/` in a URL path segment is rejected
+  before the route matches, and RELION's numbering is project-wide unique
+  anyway.
+
+Two non-obvious parsing details, both found by testing against a realistic
+project rather than a hand-made one:
+
+- `pipeline_general` is a STAR **list** block, which `starfile` returns as a
+  plain dict rather than a DataFrame — code that assumes the DataFrame API
+  silently reads no counter at all.
+- RELION appends a sub-label to a job's type for many jobs (`label += ".movies"`,
+  `".em"`, `".topaz"` — 35 sites in `pipeline_jobs.cpp`), so a real project
+  records `relion.class2d.em` where `job_catalog` holds `relion.class2d`.
+  `internal_name_for_label()` matches on the longest base prefix. The same bug
+  had been quietly disabling the SPA/Tomo auto-detect on every real project.
 
 ### SPA / Tomo / All jobs-list toggle
 
