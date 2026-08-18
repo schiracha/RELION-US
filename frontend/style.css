@@ -73,8 +73,20 @@ html, body {
   align-items: center;
   gap: 16px;
   padding: 0 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
+  background: #134394;
+  border-bottom: 1px solid #0d2f6b;
+  /* A fixed brand blue rather than a theme variable, requested as-is in
+     both light and dark mode. Overriding these custom properties here (not
+     rewriting every child selector) is enough: every rule below already
+     reads --panel/--panel-alt/--text/--text-dim/--border/--accent-dim for
+     its own background/text/border/hover colors, so the whole bar's
+     children pick up matching, legible values automatically. */
+  --panel: #134394;
+  --panel-alt: #1c52ab;
+  --text: #ffffff;
+  --text-dim: #cfe0f7;
+  --border: #2a5cad;
+  --accent-dim: #2a5cad;
 }
 #toggleSidebarBtn {
   background: var(--panel-alt);
@@ -85,7 +97,7 @@ html, body {
   cursor: pointer;
 }
 #toggleSidebarBtn:hover { background: var(--accent-dim); }
-#appTitle { font-weight: 600; letter-spacing: .02em; }
+#appTitle { font-weight: 600; letter-spacing: .02em; color: var(--text); }
 #changeProjectBtn, #visualizeBtn, #themeBtn, #pipelineSyncBtn {
   background: var(--panel-alt);
   color: var(--text);
@@ -305,6 +317,40 @@ html, body {
 }
 .cc-input-job:hover { background: var(--accent); color: var(--panel); }
 .cc-card-note { font-size: 11px; color: var(--text-dim); margin-top: 4px; font-style: italic; }
+
+/* --- Network view ----------------------------------------------------------
+   A lineage DAG: oldest jobs at the top, each row directly beneath every job
+   it took input from, branches drawn as curved SVG paths. #ccNetworkRows is
+   `position: relative` so it's the positioned ancestor both node offsetLeft/
+   Top (read back in app.js's renderNetwork) and the overlay SVG (absolutely
+   positioned, sized to match via inset:0) are measured against. */
+#ccNetworkView { overflow: auto; }
+#ccNetworkCanvas { position: relative; min-width: 100%; width: max-content; padding: 24px; }
+#ccNetworkRows { position: relative; display: flex; flex-direction: column; gap: 46px; }
+#ccNetworkEdges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.cc-network-edge { fill: none; stroke: var(--accent-dim); stroke-width: 2; }
+.cc-network-row { display: flex; gap: 28px; justify-content: center; }
+.cc-network-node {
+  position: relative;
+  z-index: 1;
+  width: 176px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cc-network-node:hover { border-color: var(--accent); }
+.cc-network-node-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.cc-network-node-name { font-weight: 600; font-size: 13px; }
+.cc-network-node-type { color: var(--text-dim); font-size: 11px; margin: 2px 0 6px; }
 
 /* --- Modals (Change Project / not-a-project prompt) --------------------- */
 .modal-overlay {
@@ -664,6 +710,19 @@ html, body {
 .status-line.failed { color: var(--err); }
 
 .winbox { --icon-color: var(--text); }
+
+/* Job popups: nearly window-filling (see width/height in app.js's
+   openJobPopup) with rounded corners. The corner radius has to be set on
+   both the outer window (so the header/box-shadow round) and .wb-body (whose
+   own opaque white/dark background otherwise squares off the bottom two
+   corners, since it's sized to exactly fill the window under the header) --
+   .wb-header has no background of its own, so the outer radius alone is
+   enough for the top two. Deliberately not touching overflow on .winbox
+   itself: WinBox's resize-handle elements sit just outside its edges
+   (negative offsets) for a larger grab target, and overflow:hidden there
+   would clip them out of the clickable area. */
+.job-popup-window.winbox { border-radius: 14px; }
+.job-popup-window .wb-body { border-radius: 0 0 14px 14px; }
 
 /* ---- Tomogram / particle-pick visualizer ----
    Three linked orthogonal views (XY main, ZY left, XZ below) with every

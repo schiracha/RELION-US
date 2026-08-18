@@ -119,8 +119,10 @@ internet access.
   live transcript itself isn't persisted, only the summary.
 - **Jobs list** (left sidebar, `☰ Jobs` toggles it): every RELION job type
   grouped by category, plus a separate "(custom)" tag for the four import
-  bridges. Click one to open it in its own popup — open as many at once as
-  you want, each is independent.
+  bridges. Click one to open it in its own popup — nearly window-filling
+  with rounded corners, and only one open at a time (opening a different
+  job closes whichever popup was already open, rather than stacking
+  windows).
 - **Top panel**: **every option RELION's own GUI shows for that job**, in
   RELION's own groups and order (I/O, Reference, CTF, Optimisation, Sampling,
   Helix, Compute, Running), as collapsible sections — extracted directly from
@@ -335,13 +337,25 @@ With it on, every job you run here is also registered in
 
 ## Command Center (job history)
 
-The main panel lists every job run in the current project, in two togglable
-views: a **table** (sortable by job name/number, type, status, or start
-time) and a **timeline** (newest-first or oldest-first, with a card per job
-that links to the jobs its inputs came from). Clicking a job reopens its
-popup showing the options it ran with, its live or final status, an
-**Outputs** tab (browse/download individual files or a `.zip` of any
-selection), the **Errors** tab, and the **RELION Source** tab.
+The main panel lists every job run in the current project, in three
+togglable views: a **table** (sortable by job name/number, type, status, or
+start time), a **timeline** (newest-first or oldest-first, with a card per
+job that links to the jobs its inputs came from), and a **network** view —
+a lineage graph, oldest jobs at the top, with every job that used another
+job's output drawn directly beneath it and connected by a branch line. A job
+whose output fed two later jobs (say job010 feeding both job011 and job012)
+shows job010 with two branches down to job011 and job012 side by side. For a
+project built in RELION's own GUI, this lineage isn't guessed from file
+paths — it's read straight from `default_pipeline.star`'s own
+`pipeline_input_edges`/`pipeline_output_edges` tables, the graph RELION
+itself computed when each job ran, so the network view (and the timeline's
+"Inputs from:" chips) work identically whether a job ran here or in RELION.
+
+Clicking a job reopens its popup — nearly window-filling, rounded corners,
+and only one open at a time (opening a new one closes whichever was open,
+rather than stacking windows) — showing the options it ran with, its live or
+final status, an **Outputs** tab (browse/download individual files or a
+`.zip` of any selection), the **Errors** tab, and the **RELION Source** tab.
 
 The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
 close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
@@ -443,6 +457,11 @@ The top bar has a theme switch. **Dark is the default**; pick light and it's
 remembered. The charts use separate, mode-specific colours validated against
 each background rather than a naive inversion, so they stay legible either
 way.
+
+The top bar itself is a fixed blue (`#134394`) in both themes rather than a
+theme-swapped color — everything on it (buttons, the project path label, the
+zoom control) still adjusts for legible contrast against that blue in either
+mode.
 
 ## SLURM templates (any cluster)
 

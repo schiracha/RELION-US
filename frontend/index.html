@@ -41,6 +41,7 @@
           <div class="cc-view-toggle" role="group" aria-label="Job history view">
             <button type="button" class="cc-view-btn active" data-view="table" title="Sortable table view">☰ Table</button>
             <button type="button" class="cc-view-btn" data-view="timeline" title="Chronological timeline view, connecting each job to its detected inputs">↕ Timeline</button>
+            <button type="button" class="cc-view-btn" data-view="network" title="Lineage graph: oldest jobs at top, with branches down to every job that used their output">🕸 Network</button>
           </div>
           <button type="button" id="ccDirectionBtn" class="btn" title="Reverse timeline order">Newest first ↓</button>
           <span id="ccHint">Select a job type from the list to launch it — every job you run shows up here.</span>
@@ -63,6 +64,13 @@
         <div id="ccTimelineView" class="cc-view hidden">
           <div id="ccTimelineList"></div>
           <div id="ccTimelineEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
+        </div>
+        <div id="ccNetworkView" class="cc-view hidden">
+          <div id="ccNetworkCanvas">
+            <div id="ccNetworkRows"></div>
+            <svg id="ccNetworkEdges" xmlns="http://www.w3.org/2000/svg"></svg>
+          </div>
+          <div id="ccNetworkEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
         </div>
       </div>
     </main>

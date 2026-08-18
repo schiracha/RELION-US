@@ -84,6 +84,8 @@ def is_relion_project(path: Path) -> bool:
 
 PIPELINE_GENERAL_BLOCK = "pipeline_general"
 PIPELINE_PROCESSES_BLOCK = "pipeline_processes"
+PIPELINE_INPUT_EDGES_BLOCK = "pipeline_input_edges"
+PIPELINE_OUTPUT_EDGES_BLOCK = "pipeline_output_edges"
 JOB_DIR_RE = re.compile(r"job(\d+)/?$")
 
 # procstatus_type2label in RELION's src/pipeline_jobs.h, mapped onto the
@@ -107,24 +109,33 @@ def _job_number_from_name(name: str) -> int:
 def read_relion_pipeline(project_dir: Path) -> dict[str, Any]:
     """RELION's own job history for this project.
 
-    Returns {"job_counter": int|None, "processes": [...]}; an empty result for
-    a project with no `default_pipeline.star` (one RELION-US started itself) or
-    an unreadable one. Never raises: a project must still open when its
-    pipeline file is from a newer RELION, half-written, or corrupt.
+    Returns {"job_counter": int|None, "processes": [...], "producers": {...}};
+    an empty result for a project with no `default_pipeline.star` (one
+    RELION-US started itself) or an unreadable one. Never raises: a project
+    must still open when its pipeline file is from a newer RELION,
+    half-written, or corrupt.
 
     `job_counter` is RELION's `rlnPipeLineJobCounter` -- the number it would
     give the *next* job.
+
+    `producers` is `{process_name: [producer_process_name, ...]}`, RELION's
+    own computed job graph -- not a guess from directory paths, but read
+    straight from `pipeline_input_edges`/`pipeline_output_edges`, the tables
+    RELION's own `getCommands<Job>Job()` populated when each job ran. This is
+    what lets the Command Center's network view draw real lineage for a
+    project built entirely in RELION's GUI, where nothing here ever ran
+    `_detect_inputs()` on any job's options.
     """
     star_path = project_dir / RELION_PIPELINE_STAR
     if not star_path.exists():
-        return {"job_counter": None, "processes": []}
+        return {"job_counter": None, "processes": [], "producers": {}}
 
     try:
         from converters.star_io import StarDocument
 
         doc = StarDocument.read(star_path)
     except Exception:
-        return {"job_counter": None, "processes": []}
+        return {"job_counter": None, "processes": [], "producers": {}}
 
     job_counter = None
     try:
@@ -164,7 +175,41 @@ def read_relion_pipeline(project_dir: Path) -> dict[str, Any]:
                 "status_label": str(row.get("rlnPipeLineProcessStatusLabel", "") or ""),
                 "job_number": _job_number_from_name(name),
             })
-    return {"job_counter": job_counter, "processes": processes}
+
+    # RELION's own node graph: which process produced each named output
+    # file ("Import/job001/tilt_series.star" -> "Import/job001"), then which
+    # processes consumed that file as an input ("Import/job001" ->
+    # "MotionCorr/job002"). Chaining the two gives process-to-process edges
+    # -- the same graph RELION's own GUI draws, computed by each job's real
+    # command builder rather than guessed from directory names.
+    node_producer: dict[str, str] = {}
+    try:
+        df_out = doc.block(PIPELINE_OUTPUT_EDGES_BLOCK)
+    except Exception:
+        df_out = None
+    if df_out is not None and not df_out.empty and "rlnPipeLineEdgeProcess" in df_out.columns:
+        for _, row in df_out.iterrows():
+            proc = str(row.get("rlnPipeLineEdgeProcess", "") or "").strip().rstrip("/")
+            node = str(row.get("rlnPipeLineEdgeToNode", "") or "").strip()
+            if proc and node:
+                node_producer[node] = proc
+
+    producers: dict[str, list[str]] = {}
+    try:
+        df_in = doc.block(PIPELINE_INPUT_EDGES_BLOCK)
+    except Exception:
+        df_in = None
+    if df_in is not None and not df_in.empty and "rlnPipeLineEdgeProcess" in df_in.columns:
+        for _, row in df_in.iterrows():
+            proc = str(row.get("rlnPipeLineEdgeProcess", "") or "").strip().rstrip("/")
+            node = str(row.get("rlnPipeLineEdgeFromNode", "") or "").strip()
+            src = node_producer.get(node)
+            if proc and src and src != proc:
+                bucket = producers.setdefault(proc, [])
+                if src not in bucket:
+                    bucket.append(src)
+
+    return {"job_counter": job_counter, "processes": processes, "producers": producers}
 
 
 def relion_job_numbers(project_dir: Path) -> set[int]:

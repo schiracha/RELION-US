@@ -232,6 +232,32 @@ MotionCorr/job002/   my_motioncorr   relion.motioncorr.own    Succeeded
 CtfFind/job003/      None            relion.ctffind.ctffind4  Succeeded
 Class2D/job005/      None            relion.class2d.em        Failed
 Refine3D/job011/     None            relion.refine3d          Succeeded
+
+
+# version 30001
+
+data_pipeline_output_edges
+
+loop_
+_rlnPipeLineEdgeProcess #1
+_rlnPipeLineEdgeToNode #2
+Import/job001/ Import/job001/movies.star
+MotionCorr/job002/ MotionCorr/job002/corrected.star
+CtfFind/job003/ CtfFind/job003/ctf.star
+Class2D/job005/ Class2D/job005/particles.star
+
+
+# version 30001
+
+data_pipeline_input_edges
+
+loop_
+_rlnPipeLineEdgeFromNode #1
+_rlnPipeLineEdgeProcess #2
+Import/job001/movies.star MotionCorr/job002/
+MotionCorr/job002/corrected.star CtfFind/job003/
+CtfFind/job003/ctf.star Class2D/job005/
+Class2D/job005/particles.star Refine3D/job011/
 STAR
   mkdir -p "$proj/Import/job001" "$proj/MotionCorr/job002" \
            "$proj/CtfFind/job003" "$proj/Class2D/job005" "$proj/Refine3D/job011"

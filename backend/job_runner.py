@@ -334,6 +334,7 @@ class JobRunManager:
         """
         info = project_manager.read_relion_pipeline(project_dir)
         out: list[dict] = []
+        by_process_name: dict[str, dict] = {}
         for proc in info["processes"]:
             name = proc["name"]                        # e.g. "Class2D/job005"
             job_dir = project_dir / name
@@ -351,7 +352,7 @@ class JobRunManager:
             # it the natural identifier.
             slug = (f"job{proc['job_number']:03d}" if proc["job_number"]
                     else name.replace("/", "-"))
-            out.append({
+            entry = {
                 "run_id": f"relion:{slug}",
                 "source": "relion",
                 "internal_name": internal or "",
@@ -373,7 +374,28 @@ class JobRunManager:
                 "abortable": False,
                 "relion_type_label": proc["type_label"],
                 "exists_on_disk": exists,
-            })
+            }
+            out.append(entry)
+            by_process_name[name] = entry
+
+        # RELION's own computed graph (see read_relion_pipeline's
+        # "producers"), wired up as the same input_links shape
+        # _attach_input_lineage produces for this app's own runs -- so the
+        # Command Center's lineage chips and network view work identically
+        # for a job RELION ran and a job run here, even though this side
+        # never ran _detect_inputs() on RELION's own jobs.
+        for name, entry in by_process_name.items():
+            links = []
+            for producer_name in info.get("producers", {}).get(name, []):
+                producer_entry = by_process_name.get(producer_name)
+                if producer_entry is not None:
+                    links.append({
+                        "path": producer_name,
+                        "run_id": producer_entry["run_id"],
+                        "job_name": producer_entry["job_name"],
+                    })
+            if links:
+                entry["input_links"] = links
         return out
 
     @staticmethod

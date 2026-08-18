@@ -57,10 +57,38 @@ with sync_playwright() as p:
     cmd_value = page.locator(".command-box").first.input_value()
     print("Command box after recompute:", cmd_value[:120])
 
-    # Open a second job (a custom import) to confirm multiple popups work
-    page.locator(".job-item", has_text="Import from DeepETPicker").first.click()
-    page.wait_for_timeout(500)
-    print("Popup count after opening second job:", page.locator(".winbox").count())
+    # Open a second job (a custom import) to confirm only one job popup is
+    # ever open at once -- opening this one must close the first rather than
+    # stacking a second window. dispatch_event("click"): the popup is now
+    # near window-filling by design (see app.js), so it visually covers the
+    # sidebar underneath it -- a real user closes/collapses the open popup
+    # before the sidebar is reachable again, an actual mouse click cannot
+    # reach through it (Playwright's own force=True still respects real
+    # DOM layering for a simulated mouse click, it only skips Playwright's
+    # own pre-click checks). dispatch_event fires the click event directly
+    # on the element, bypassing layering entirely, so this still exercises
+    # openJobPopup's own auto-close logic -- the same handler a reachable
+    # click would trigger -- even though the sidebar itself is intentionally
+    # unreachable by mouse while a popup is open.
+    second_job_item = page.locator(".job-item", has_text="Import from DeepETPicker").first
+    second_job_item.dispatch_event("click")
+    page.wait_for_function(
+        "() => document.querySelector('.winbox .wb-title')"
+        "  && document.querySelector('.winbox .wb-title').textContent.includes('DeepETPicker')",
+        timeout=5000,
+    )
+    popup_count = page.locator(".winbox").count()
+    print("Popup count after opening second job:", popup_count)
+    if popup_count != 1:
+        errors.append(f"Expected exactly 1 job popup open at once, found {popup_count}")
+    remaining_title = page.locator(".winbox .wb-title").first.inner_text()
+    print("Remaining popup's title:", remaining_title)
+    if "DeepETPicker" not in remaining_title:
+        errors.append(f"Expected the second job's popup to be the one left open, title was: {remaining_title}")
+
+    # Close it so the sidebar is reachable again for the checks below.
+    page.locator(".winbox .wb-close").first.click()
+    page.wait_for_timeout(200)
 
     # Test the zoom slider
     page.locator("#zoomSlider").fill("130")

@@ -73,6 +73,28 @@ def main():
               all(t.strip() in ("", "—", "-") for t in
                   rows.locator("td:nth-child(4)").all_inner_texts()))
 
+        # ---- network view: RELION's own edges, not a directory-path guess ----
+        # The fixture chains Import -> MotionCorr -> CtfFind -> Class2D ->
+        # Refine3D through pipeline_output_edges/pipeline_input_edges (see
+        # run_tests.sh's make_legacy_project) -- this app never ran
+        # _detect_inputs on any of these jobs, so this lineage can only have
+        # come from reading RELION's own edge tables.
+        page.locator('.cc-view-btn[data-view="network"]').click()
+        page.wait_for_timeout(400)
+        check("Network view becomes visible", page.locator("#ccNetworkView").is_visible())
+        check("Table view hidden", not page.locator("#ccTableView").is_visible())
+        node_count = page.locator(".cc-network-node").count()
+        check(f"All 5 jobs appear as network nodes ({node_count})", node_count == 5)
+        edge_count = page.locator(".cc-network-edge").count()
+        check(f"4 edges for a 5-job chain ({edge_count})", edge_count == 4)
+        rows_top_to_bottom = page.locator(".cc-network-row").all_inner_texts()
+        check(f"job001 (the root) is in the top row ({rows_top_to_bottom[:1]})",
+              "job001" in rows_top_to_bottom[0])
+        check(f"job011 (the end of the chain) is in the bottom row ({rows_top_to_bottom[-1:]})",
+              "job011" in rows_top_to_bottom[-1])
+        page.locator('.cc-view-btn[data-view="table"]').click()
+        page.wait_for_timeout(300)
+
         # ---- reopening one shows what it actually ran with ----
         page.locator("#ccTableBody tr", has_text="job005").first.click()
         page.wait_for_selector(".winbox", timeout=5000)
@@ -132,6 +154,11 @@ def main():
               refused[0] == 409 and "RELION" in refused[1])
 
         # ---- a new job continues the numbering ----
+        # Job popups are near window-filling and only one is open at once --
+        # close the reopened job005 popup first so the sidebar underneath is
+        # reachable again, same as a real user would have to.
+        win.locator(".wb-close").first.click()
+        page.wait_for_timeout(200)
         page.locator("#jobSearch").fill("3D classification")
         page.wait_for_timeout(300)
         page.locator(".job-item:visible", has_text="3D classification").first.click()

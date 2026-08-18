@@ -35,6 +35,12 @@ def check(label, cond):
 
 
 def open_job(page, search, name):
+    # Job popups are near window-filling and only one is ever open at once
+    # (see app.js's currentJobWinbox) -- close whichever is open first, the
+    # same way a real user would, so the sidebar underneath is reachable.
+    if page.locator(".winbox").count() > 0:
+        page.locator(".winbox .wb-close").first.click()
+        page.wait_for_timeout(200)
     page.locator("#jobSearch").fill(search)
     page.wait_for_timeout(300)
     page.locator(".job-item:visible", has_text=name).first.click()

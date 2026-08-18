@@ -1,9 +1,11 @@
 // app.js — RELION-US frontend. Vanilla JS, no build step.
 // Each job opened from the sidebar (or reopened from the Command Center)
 // becomes an independent WinBox popup — draggable, resizable, minimizable,
-// several open at once — mounted with a form built from the job definition
-// the backend serves. See style.css for the popup's internal layout (standard
-// fields on top, tabs, editable command box, live output at the bottom).
+// nearly window-filling with rounded corners — mounted with a form built
+// from the job definition the backend serves. See style.css for the popup's
+// internal layout (standard fields on top, tabs, editable command box, live
+// output at the bottom). Only one job popup is open at a time (see
+// currentJobWinbox below); opening a new one closes whichever was open.
 
 
 async function api(path, opts) {
@@ -324,6 +326,11 @@ function buildFieldRow(key, option, value) {
 // jobs too, not just custom ones) prefill the form instead of the job
 // type's defaults, and the command box shows the command that was ACTUALLY
 // run rather than a fresh draft, so reopening history shows history.
+
+// Tracks the one job popup allowed open at a time. Closed (not just
+// covered) right before a new one mounts, so its websocket/progress polling
+// tears down properly rather than streaming into a hidden window.
+let currentJobWinbox = null;
 
 async function openJobPopup(internalName, displayName, existingRun) {
   const isReopen = !!existingRun;
@@ -1146,21 +1153,31 @@ async function openJobPopup(internalName, displayName, existingRun) {
     });
   }
 
+  // Only one job popup at a time: close whichever was open right before
+  // mounting this one (not merely re-focusing it), so its websocket and
+  // progress polling stop cleanly instead of streaming into a hidden window.
+  if (currentJobWinbox) {
+    try { currentJobWinbox.close(); } catch (e) { /* noop */ }
+    currentJobWinbox = null;
+  }
+
   const win = new WinBox({
     title: displayName,
-    width: "660px",
-    height: "740px",
+    width: "94%",
+    height: "92%",
     x: "center",
     y: "center",
     mount: body,
-    class: ["no-full"],
+    class: ["no-full", "job-popup-window"],
     onclose: () => {
       stopProgressPolling();
       document.removeEventListener("relion-us-theme-changed", onThemeChange);
       if (ws) try { ws.close(); } catch (e) { /* noop */ }
+      if (currentJobWinbox === win) currentJobWinbox = null;
       return false;
     },
   });
+  currentJobWinbox = win;
 }
 
 loadCatalog().catch((err) => {
@@ -1177,7 +1194,7 @@ let ccSort = { key: "started_at", dir: "desc" };
 let ccDirection = "desc"; // timeline: 'desc' = newest first, 'asc' = oldest first
 try {
   const savedView = localStorage.getItem(CC_VIEW_KEY);
-  if (savedView === "table" || savedView === "timeline") ccView = savedView;
+  if (savedView === "table" || savedView === "timeline" || savedView === "network") ccView = savedView;
   const savedDir = localStorage.getItem(CC_DIRECTION_KEY);
   if (savedDir === "asc" || savedDir === "desc") ccDirection = savedDir;
 } catch (e) { /* fall back to defaults */ }
@@ -1288,13 +1305,151 @@ function renderTimeline() {
   }
 }
 
+// --- Command Center: Network view ------------------------------------
+//
+// A lineage graph built from run.input_links (see backend job_runner.py's
+// _attach_input_lineage for this app's own runs, and project_manager.py's
+// read_relion_pipeline "producers" for jobs RELION itself ran — both land in
+// the same {path, run_id, job_name} shape). Oldest jobs sit at the top;
+// every job that used another job's output hangs directly below it,
+// side-by-side with any siblings that used the same input, connected by a
+// curved branch line — e.g. job010 above, job011 and job012 side by side
+// beneath it, each with their own line back up to job010.
+//
+// Layout is two passes: (1) each run's row = 1 + the deepest row among its
+// parents (roots at row 0), so a branch's row always sits directly under
+// every one of its parents; (2) within a row, runs are ordered by the
+// average column of their already-placed parents, so branches stay visually
+// near their source instead of jumping around. Pixel positions for the SVG
+// connectors are read back from the DOM after layout (offsetLeft/Top
+// relative to #ccNetworkRows) rather than computed by hand, so it stays
+// correct regardless of how wide any job's name/type text renders.
+
+function buildLineageGraph(runs) {
+  const byId = new Map(runs.map((r) => [r.run_id, r]));
+  const parentsOf = new Map();
+  runs.forEach((r) => parentsOf.set(r.run_id, new Set()));
+  runs.forEach((r) => {
+    (r.input_links || []).forEach((link) => {
+      if (byId.has(link.run_id) && link.run_id !== r.run_id) {
+        parentsOf.get(r.run_id).add(link.run_id);
+      }
+    });
+  });
+  return { byId, parentsOf };
+}
+
+function computeLineageRows(runs, parentsOf) {
+  const row = new Map();
+  const visiting = new Set();
+  function rowOf(id) {
+    if (row.has(id)) return row.get(id);
+    if (visiting.has(id)) return 0; // shouldn't happen (no cycles in a real pipeline)
+    visiting.add(id);
+    const parents = Array.from(parentsOf.get(id) || []);
+    const r = parents.length ? 1 + Math.max(...parents.map(rowOf)) : 0;
+    visiting.delete(id);
+    row.set(id, r);
+    return r;
+  }
+  runs.forEach((r) => rowOf(r.run_id));
+  return row;
+}
+
+function renderNetwork() {
+  const rowsEl = document.getElementById("ccNetworkRows");
+  const svg = document.getElementById("ccNetworkEdges");
+  const empty = document.getElementById("ccNetworkEmpty");
+  rowsEl.innerHTML = "";
+  svg.innerHTML = "";
+  empty.classList.toggle("hidden", ccRuns.length > 0);
+  if (!ccRuns.length) return;
+
+  const { parentsOf } = buildLineageGraph(ccRuns);
+  const rowIndex = computeLineageRows(ccRuns, parentsOf);
+  const byId = new Map(ccRuns.map((r) => [r.run_id, r]));
+
+  const maxRow = Math.max(...Array.from(rowIndex.values()));
+  const rows = [];
+  for (let i = 0; i <= maxRow; i++) rows.push([]);
+  ccRuns.forEach((r) => rows[rowIndex.get(r.run_id)].push(r));
+
+  // Column position (a plain array index) per run, filled in row order so
+  // later rows can average their parents' already-known columns.
+  const colOf = new Map();
+  rows.forEach((rowRuns, r) => {
+    rowRuns.sort((a, b) => {
+      if (r > 0) {
+        const avg = (run) => {
+          const parents = Array.from(parentsOf.get(run.run_id) || []);
+          const cols = parents.map((pid) => colOf.get(pid)).filter((c) => c !== undefined);
+          return cols.length ? cols.reduce((s, c) => s + c, 0) / cols.length : Infinity;
+        };
+        const d = avg(a) - avg(b);
+        if (d) return d;
+      }
+      return (a.job_number || 0) - (b.job_number || 0);
+    });
+    rowRuns.forEach((run, i) => colOf.set(run.run_id, i));
+  });
+
+  rows.forEach((rowRuns) => {
+    const rowEl = document.createElement("div");
+    rowEl.className = "cc-network-row";
+    rowRuns.forEach((run) => {
+      const node = document.createElement("div");
+      node.className = "cc-network-node";
+      node.dataset.runId = run.run_id;
+      node.innerHTML = `
+        <div class="cc-network-node-top">
+          <span class="cc-network-node-name">${escapeHtml(run.job_name || "job???")}</span>
+          ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
+        </div>
+        <div class="cc-network-node-type">${escapeHtml(run.display_name || run.internal_name)}</div>
+        ${statusBadge(run.status)}
+      `;
+      node.addEventListener("click", () => reopenRun(run));
+      rowEl.appendChild(node);
+    });
+    rowsEl.appendChild(rowEl);
+  });
+
+  // Edges, read back from the laid-out DOM. #ccNetworkRows is the SVG's
+  // positioned ancestor (see style.css), so offsetLeft/Top on a node give
+  // coordinates directly in the SVG's own coordinate space.
+  const svgNS = "http://www.w3.org/2000/svg";
+  const nodeEls = new Map();
+  rowsEl.querySelectorAll(".cc-network-node").forEach((el) => nodeEls.set(el.dataset.runId, el));
+  const center = (el, edge) => ({
+    x: el.offsetLeft + el.offsetWidth / 2,
+    y: edge === "top" ? el.offsetTop : el.offsetTop + el.offsetHeight,
+  });
+  ccRuns.forEach((run) => {
+    const childEl = nodeEls.get(run.run_id);
+    if (!childEl) return;
+    (parentsOf.get(run.run_id) || new Set()).forEach((parentId) => {
+      const parentEl = nodeEls.get(parentId);
+      if (!parentEl) return;
+      const p = center(parentEl, "bottom");
+      const c = center(childEl, "top");
+      const midY = (p.y + c.y) / 2;
+      const path = document.createElementNS(svgNS, "path");
+      path.setAttribute("d", `M ${p.x} ${p.y} C ${p.x} ${midY}, ${c.x} ${midY}, ${c.x} ${c.y}`);
+      path.setAttribute("class", "cc-network-edge");
+      svg.appendChild(path);
+    });
+  });
+}
+
 function renderCommandCenterViews() {
   document.getElementById("ccTableView").classList.toggle("hidden", ccView !== "table");
   document.getElementById("ccTimelineView").classList.toggle("hidden", ccView !== "timeline");
+  document.getElementById("ccNetworkView").classList.toggle("hidden", ccView !== "network");
   document.getElementById("ccDirectionBtn").style.display = ccView === "timeline" ? "inline-block" : "none";
   document.getElementById("ccDirectionBtn").textContent = ccDirection === "desc" ? "Newest first ↓" : "Oldest first ↑";
   if (ccView === "table") renderTable();
-  else renderTimeline();
+  else if (ccView === "timeline") renderTimeline();
+  else renderNetwork();
 }
 
 async function refreshCommandCenter() {

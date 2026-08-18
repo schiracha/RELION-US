@@ -45,6 +45,32 @@ MotionCorr/job002/       my_motioncorr   relion.motioncorr.own    Succeeded
 CtfFind/job003/          None            relion.ctffind.ctffind4  Succeeded
 Class2D/job005/          None            relion.class2d.em        Failed
 Refine3D/job011/         None            relion.refine3d          Running
+
+
+# version 30001
+
+data_pipeline_output_edges
+
+loop_
+_rlnPipeLineEdgeProcess #1
+_rlnPipeLineEdgeToNode #2
+Import/job001/ Import/job001/movies.star
+MotionCorr/job002/ MotionCorr/job002/corrected.star
+CtfFind/job003/ CtfFind/job003/ctf.star
+Class2D/job005/ Class2D/job005/particles.star
+
+
+# version 30001
+
+data_pipeline_input_edges
+
+loop_
+_rlnPipeLineEdgeFromNode #1
+_rlnPipeLineEdgeProcess #2
+Import/job001/movies.star MotionCorr/job002/
+MotionCorr/job002/corrected.star CtfFind/job003/
+CtfFind/job003/ctf.star Class2D/job005/
+Class2D/job005/particles.star Refine3D/job011/
 """
 
 JOB_STAR = """
@@ -111,9 +137,21 @@ def test_alias_none_is_read_as_no_alias(relion_project):
     assert procs["MotionCorr/job002"]["alias"] == "my_motioncorr"
 
 
+def test_producers_are_read_from_relions_own_edge_tables(relion_project):
+    """RELION's node graph (pipeline_input_edges + pipeline_output_edges),
+    chained through the node each edge names, not a directory-path guess."""
+    info = project_manager.read_relion_pipeline(relion_project)
+    assert info["producers"] == {
+        "MotionCorr/job002": ["Import/job001"],
+        "CtfFind/job003": ["MotionCorr/job002"],
+        "Class2D/job005": ["CtfFind/job003"],
+        "Refine3D/job011": ["Class2D/job005"],
+    }
+
+
 def test_missing_pipeline_file_is_not_an_error(tmp_path):
     assert project_manager.read_relion_pipeline(tmp_path) == {
-        "job_counter": None, "processes": []}
+        "job_counter": None, "processes": [], "producers": {}}
 
 
 def test_corrupt_pipeline_file_does_not_block_opening_the_project(tmp_path):
@@ -172,6 +210,21 @@ def test_relion_jobs_appear_in_the_command_center(relion_project):
 def test_imported_jobs_are_sorted_by_job_number(relion_project):
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
     assert [r["job_number"] for r in runs] == [1, 2, 3, 5, 11]
+
+
+def test_relions_own_edges_become_command_center_lineage(relion_project):
+    """The producers graph read from default_pipeline.star (previous test)
+    must reach the Command Center as the same input_links shape this app's
+    own _attach_input_lineage produces for its own runs -- so a project built
+    entirely in RELION's GUI (where nothing here ever ran _detect_inputs on
+    any job) still gets a real, RELION-computed lineage instead of none."""
+    runs = {r["job_name"]: r for r in
+            job_runner.JobRunManager(relion_project).list_runs(relion_project)}
+    assert runs["job001"].get("input_links", []) == []   # nothing feeds Import
+    assert [l["job_name"] for l in runs["job002"]["input_links"]] == ["job001"]
+    assert runs["job002"]["input_links"][0]["run_id"] == runs["job001"]["run_id"]
+    assert [l["job_name"] for l in runs["job005"]["input_links"]] == ["job003"]
+    assert [l["job_name"] for l in runs["job011"]["input_links"]] == ["job005"]
 
 
 def test_relion_status_labels_map_onto_our_own(relion_project):

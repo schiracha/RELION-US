@@ -111,16 +111,48 @@ relion_us/
 
 An earlier iteration of this project (`relion_tomo_bridge`) used Streamlit
 for a quick browser-rendered front end. That was replaced once the actual
-requirements became clear: several draggable, resizable job windows open at
-once, a hideable job list, UI-wide zoom, and a live-streaming
-output pane alongside an editable command box — all things Streamlit's
-rerun-the-whole-script execution model can't do cleanly. RELION-US's
-frontend is instead a small vanilla JS app using WinBox.js for the popup
-windows and a raw websocket per job run for live stdout/stderr, which
-supports all of that directly. The `relion_tomo_bridge` converters
-(`star_io.py`, `imod_bridge.py`, `warp_bridge.py`, `deepetpicker_bridge.py`)
-carried over unchanged into `backend/converters/` — only the GUI wrapping
-them changed.
+requirements became clear: a draggable, resizable job window, a hideable job
+list, UI-wide zoom, and a live-streaming output pane alongside an editable
+command box — all things Streamlit's rerun-the-whole-script execution model
+can't do cleanly. RELION-US's frontend is instead a small vanilla JS app
+using WinBox.js for the popup window and a raw websocket per job run for
+live stdout/stderr, which supports all of that directly. The
+`relion_tomo_bridge` converters (`star_io.py`, `imod_bridge.py`,
+`warp_bridge.py`, `deepetpicker_bridge.py`) carried over unchanged into
+`backend/converters/` — only the GUI wrapping them changed.
+
+**Job popup sizing/rounding/single-instance.** `openJobPopup` (`app.js`)
+tracks the one open job popup in a module-level `currentJobWinbox`, closed
+(not just covered) right before the next one mounts, so its websocket and
+progress polling tear down instead of streaming into a hidden window — a
+`win.close()` from elsewhere (e.g. Overwrite's close-then-reopen) already
+clears it via `onclose`, so this never double-closes. `width`/`height` are
+percentage strings (`"94%"`/`"92%"`) — WinBox's own size parser (`V()` in the
+vendored bundle) accepts percentages natively, resolved against the viewport.
+Rounded corners are `border-radius` on `.job-popup-window.winbox` *and*
+`.wb-body` separately (`style.css`) rather than `overflow: hidden` on the
+outer `.winbox`: WinBox's resize-handle elements sit just outside its edges
+(negative offsets, for a larger grab target), and `overflow: hidden` there
+would clip them out of the clickable area. `.wb-header` has no background of
+its own — the outer radius alone rounds the top corners; `.wb-body`'s own
+opaque background needs its own bottom-corner radius or it squares off the
+window's bottom two corners. One consequence worth knowing for anyone adding
+UI: a popup this size visually covers the sidebar and Command Center behind
+it, so opening a *different* job from the sidebar requires closing/collapsing
+the current popup first — a real click can't reach through it. Browser tests
+that need to simulate "open a second job while the first is still open"
+therefore use `dispatch_event("click")` (fires the handler directly,
+bypassing DOM hit-testing) rather than a literal mouse click — see
+`test_frontend.py`.
+
+**Top bar color.** `#topbar` overrides `--panel`/`--panel-alt`/`--text`/
+`--text-dim`/`--border`/`--accent-dim` to fixed values, rather than a fixed
+blue background plus per-child color rules: every child selector already
+reads those custom properties for its own background/text/border/hover
+color (`--panel`, `--text`, etc.), and CSS custom properties cascade down
+the DOM, so overriding them once at `#topbar` makes the whole bar's buttons,
+labels and zoom control legible against the fixed blue automatically, in
+both themes, without a second copy of every rule.
 
 ### Where a job's options live
 
@@ -566,11 +598,74 @@ tomogram/map importer.
 
 ### Command Center lineage
 
-`list_runs` attaches `input_links`: each run's detected inputs that live under
-an earlier job's output directory are linked back to the job that produced
-them, which the timeline view renders as clickable "↳ from jobNNN" chips. This
-is best-effort attribution from file paths, not RELION's real pipeline graph
-(which this app doesn't build) — same caveat as `_detect_inputs`.
+`list_runs` attaches `input_links` to every run — `[{path, run_id, job_name}]`
+— from two different sources depending on who ran the job, merged into the
+same shape so the timeline's "↳ from jobNNN" chips and the network view (next
+section) work identically regardless of source:
+
+- **This app's own runs**: `_attach_input_lineage` (`job_runner.py`) —
+  best-effort attribution from file paths. Each run's `detected_inputs` (file
+  paths gathered from its field values by `_detect_inputs`) are matched
+  against every other run's own output directory; a file living under an
+  earlier job's directory is attributed to that job. This is a display
+  convenience, not RELION's real computed graph — a file that merely lives
+  under a job's output dir is attributed to it whether or not that job
+  actually produced it.
+- **Jobs RELION itself ran**: `_relion_pipeline_entries` (`job_runner.py`),
+  from `read_relion_pipeline`'s `producers` map (`project_manager.py`) — see
+  below. This *is* RELION's real computed graph, not a guess, because
+  `_detect_inputs` never runs on a RELION-imported job (its `detected_inputs`
+  is hardcoded `[]`); without reading RELION's own edge tables, a project
+  built entirely in RELION's GUI would show zero lineage anywhere in the
+  Command Center, in exactly the project where showing it matters most.
+
+`read_relion_pipeline`'s `producers: {process_name: [producer_process_name]}`
+comes from chaining two of `default_pipeline.star`'s five tables: first
+`pipeline_output_edges` (`process -> node`) builds `node_producer: {node:
+process}` — which process wrote each named output file — then
+`pipeline_input_edges` (`node -> process`) is walked and each edge's `node`
+looked up in `node_producer` to find that consumer's own producer process.
+Both tables were verified against `PipeLine::write()` (`src/pipeliner.cpp`,
+same source as `pipeline_general`/`pipeline_processes` — see "Adopting a
+project" above): RELION computes them from each job's own real
+`getCommands<Job>Job()` (`inputNodes`/`outputNodes`), so this reads RELION's
+actual answer for "what fed what" rather than reconstructing it.
+
+### Command Center network view
+
+`renderNetwork()` (`app.js`) draws `ccRuns`' `input_links` as a lineage DAG:
+oldest jobs at the top, every job directly beneath every job it took input
+from, connected by a curved branch. Layout is two passes over plain arrays —
+no graph/diagramming library, to stay consistent with the no-CDN,
+vendored-only frontend:
+
+1. **Row** (`computeLineageRows`): each run's row = 1 + the deepest row among
+   its parents, roots (no tracked parents) at row 0 — a small memoized
+   recursive walk over `parentsOf`, with a cycle guard that can't actually
+   trigger against a real pipeline but keeps a malformed one from hanging the
+   tab.
+2. **Column**, assigned row by row top-down: within a row, runs are ordered
+   by the *average column of their already-placed parents* (falling back to
+   job number for row 0, or when no parent has a column yet), so a branch
+   renders near its source instead of at an arbitrary position — this is
+   what keeps job011/job012 directly under job010 rather than scattered
+   across the row.
+
+Pixel coordinates for the SVG connectors are never computed by hand — after
+the DOM lays out (rows/nodes are plain flexbox), each node's position is read
+back via `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight` relative to
+`#ccNetworkRows` (the nearest `position: relative` ancestor, so these are
+already in the right coordinate space with no manual scroll-offset
+arithmetic), and each edge is a cubic Bézier from the parent's bottom-center
+to the child's top-center. This stays correct regardless of how wide any
+job's name or type text renders, at the cost of one forced-reflow read after
+layout — negligible at Command Center row counts.
+
+The `.hidden` class on `#ccNetworkView` is removed *before* `renderNetwork()`
+runs (`renderCommandCenterViews`'s toggle-then-render order): `offsetLeft`/
+`offsetTop` all read 0 on a `display: none` ancestor, so measuring while
+still hidden would silently produce a graph with every edge collapsed to a
+single point.
 
 ## Tomogram / particle-pick visualizer
 
