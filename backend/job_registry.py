@@ -5,12 +5,13 @@ data/extract_job_definitions.py) into the structure the API and frontend
 consume: one JobDefinition per job type.
 
 Field placement follows one rule: **everything RELION's own GUI shows goes in
-the popup's top panel**, grouped under RELION's own tab names (I/O, CTF,
+the popup's Inputs tab**, grouped under RELION's own tab names (I/O, CTF,
 Optimisation, ..., Running) and in RELION's own order — `standard_groups`.
-The popup's "Advanced" tab is for the opposite thing: command-line options the
-program accepts but the GUI never exposes, the ones you would otherwise find by
-running the binary with `--help` or reading the source. Those are discovered at
-runtime from the installed RELION (see program_help.py), not from this file.
+The Inputs tab's "Advanced" section (the last one, past Running/Other) is for
+the opposite thing: command-line options the program accepts but the GUI
+never exposes, the ones you would otherwise find by running the binary with
+`--help` or reading the source. Those are discovered at runtime from the
+installed RELION (see program_help.py), not from this file.
 
 Also builds a best-effort DRAFT command per job. This is intentionally
 NOT a full reimplementation of RELION's getCommands<Job>Job() C++ logic —
@@ -75,10 +76,10 @@ def _load_raw() -> dict[str, Any]:
 def _standard_groups(raw_job: dict) -> list[dict]:
     """RELION's own GUI layout for this job, as ordered, named groups.
 
-    Every field RELION's GUI shows goes in the job popup's top panel, grouped
+    Every field RELION's GUI shows goes in the job popup's Inputs tab, grouped
     under RELION's own tab names (I/O, CTF, Optimisation, ..., Running) and in
-    RELION's own order. The popup's "Advanced" tab is NOT for these -- it is
-    for command-line options the GUI never exposes (see program_help.py).
+    RELION's own order. The Inputs tab's "Advanced" section is NOT for these
+    -- it is for command-line options the GUI never exposes (see program_help.py).
 
     Falls back to one unnamed group holding every field if this job has no
     parsed tab_layout (the 3 custom import bridges, which define their own).
@@ -275,8 +276,8 @@ def _build_draft_command(
 
 
 def raw_job(internal_name: str) -> dict:
-    """The extracted RELION data for one job, as-is. Used by the Advanced tab,
-    which needs the job's program name and its already-exposed flags."""
+    """The extracted RELION data for one job, as-is. Used by the Advanced
+    section, which needs the job's program name and its already-exposed flags."""
     return _load_raw()[internal_name]
 
 

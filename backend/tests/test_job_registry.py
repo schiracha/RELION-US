@@ -50,18 +50,19 @@ def test_no_leftover_cpp_syntax_in_draft_or_defaults(internal_name):
 
 @pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))
 def test_standard_groups_cover_every_option_exactly_once(internal_name):
-    """Every field RELION's GUI defines is in the top panel, and only once.
+    """Every field RELION's GUI defines is in the Inputs tab, and only once.
 
-    This is the placement rule: the popup's top panel holds all of RELION's
-    own GUI options; its Advanced tab holds command-line options the GUI does
-    not expose (discovered from the binary, not from these definitions). A
+    This is the placement rule: the popup's Inputs tab holds all of RELION's
+    own GUI options, in RELION's own groups; its Advanced section (appended
+    last, inside that same tab) holds command-line options the GUI does not
+    expose (discovered from the binary, not from these definitions). A
     field missing here is one the user cannot set at all.
     """
     d = job_registry.build_job_definition(internal_name)
     known_keys = {o["key"] for o in d["options"]}
     placed = [k for g in d["standard_groups"] for k in g["fields"]]
     assert set(placed) == known_keys, (
-        f"{internal_name}: fields not in the top panel: {known_keys - set(placed)}; "
+        f"{internal_name}: fields not in the Inputs tab: {known_keys - set(placed)}; "
         f"unknown keys placed: {set(placed) - known_keys}"
     )
     assert len(placed) == len(set(placed)), f"{internal_name} places a field twice"

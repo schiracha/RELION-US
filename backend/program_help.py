@@ -1,6 +1,6 @@
 """
 program_help.py — enumerate a program's real command-line options by running it
-with `--help`, so the job popup's Advanced tab can offer the options RELION's
+with `--help`, so the job popup's Advanced section can offer the options RELION's
 own GUI never exposes.
 
 Why run the binary instead of reading the source: the GUI and the program are
@@ -174,7 +174,7 @@ def program_options(program: str) -> dict[str, Any]:
         argv = program_argv(program)
         raise ProgramHelpError(
             f"{argv[0] if argv else program!r} is not on this machine's PATH. "
-            "The Advanced tab lists options by asking the installed program, so "
+            "The Advanced section lists options by asking the installed program, so "
             "it needs the RELION binaries the backend would run."
         )
     try:
@@ -194,7 +194,7 @@ def program_options(program: str) -> dict[str, Any]:
 
 
 def gui_exposed_flags(job_def: dict) -> set[str]:
-    """Flags this job's form already covers, so the Advanced tab can show only
+    """Flags this job's form already covers, so the Advanced section can show only
     what the GUI does not.
 
     Three sources, all extracted rather than assumed: every flag literal in the
@@ -213,7 +213,7 @@ def gui_exposed_flags(job_def: dict) -> set[str]:
 
 
 def extra_options_for_job(job_def: dict, program: str) -> dict[str, Any]:
-    """The Advanced tab's payload: options the program accepts that the job's
+    """The Advanced section's payload: options the program accepts that the job's
     form does not already offer."""
     info = program_options(program)
     exposed = gui_exposed_flags(job_def)

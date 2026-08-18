@@ -1,7 +1,8 @@
 """
-Playwright test for where a job's options live: RELION's own GUI options in the
-top panel (collapsible sections, RELION's tab names and order), and the
-Advanced tab reserved for command-line options the GUI never exposes, read from
+Playwright test for where a job's options live: RELION's own GUI options in
+the Inputs tab (collapsible sections, RELION's tab names and order), and the
+Advanced section -- inside the Inputs tab, past every one of RELION's own
+groups -- reserved for command-line options the GUI never exposes, read from
 the installed program's --help.
 
 Needs a live backend whose PATH has a program answering to the job's binary
@@ -65,16 +66,23 @@ def main():
                       " w.style.height='900px'; w.style.top='20px'; }")
         page.wait_for_timeout(1200)
 
-        # ---- top panel: RELION's own tabs, as sections ----
+        # ---- Inputs tab: RELION's own tabs, as sections ----
+        check("Inputs tab is the one open by default",
+              "active" in (win.locator('.tab-btn[data-tab="inputs"]').get_attribute("class") or "")
+              and "active" in (win.locator('[data-tab-content="inputs"]').get_attribute("class") or ""))
         # (the headings are CSS-uppercased, so compare case-insensitively)
         names = [n.strip().lower() for n in win.locator(".opt-section-name").all_inner_texts()]
-        check(f"Top panel is grouped by RELION's own tab names ({names})",
+        check(f"Inputs tab is grouped by RELION's own tab names ({names})",
               names[:3] == ["i/o", "ctf", "optimisation"])
         check("Running is a section too (RELION's own Running tab)", "running" in names)
+        check(f"Advanced is its own section, last, past Running ({names})",
+              names[-1] == "advanced" and names.index("running") < len(names) - 1)
         check("First section starts expanded",
               win.locator(".opt-section").first.get_attribute("open") is not None)
+        check("Advanced section starts collapsed",
+              win.locator('[data-role="advanced-section"]').get_attribute("open") is None)
 
-        # every option RELION defines is reachable in the top panel
+        # every option RELION defines is reachable in the Inputs tab
         counts = page.evaluate(
             """async () => {
                  const def = await (await fetch('/api/jobs/Class2D')).json();
@@ -82,7 +90,7 @@ def main():
                  return [def.options.length, placed.length, new Set(placed).size];
                }"""
         )
-        check(f"Every RELION option is in the top panel, once ({counts})",
+        check(f"Every RELION option is in the Inputs tab, once ({counts})",
               counts[0] == counts[1] == counts[2])
 
         # collapsed sections still hold real fields; expanding reveals them
@@ -122,8 +130,15 @@ def main():
         check("Additional arguments are appended verbatim, last",
               cmd3.rstrip().endswith("--dont_check_norm --verb 2"))
 
-        # ---- Advanced tab: what the GUI does NOT expose ----
-        adv = win.locator('[data-tab-content="advanced"]')
+        # ---- Advanced section (inside Inputs): what the GUI does NOT expose ----
+        # Collapsed by default and loaded lazily on first expand (see app.js's
+        # "toggle" listener on advancedSection) -- open it before checking
+        # its content, and give the async cli-options fetch time to resolve.
+        adv = win.locator('[data-role="advanced-section"]')
+        adv.locator(".opt-section-head").click()
+        page.wait_for_timeout(900)
+        check("Advanced section is open after clicking it",
+              adv.get_attribute("open") is not None)
         flags = adv.locator(".cli-option-flag").all_inner_texts()
         check(f"Advanced lists the program's non-GUI options ({flags})",
               "--dont_check_norm" in flags and "--verb" in flags
@@ -176,7 +191,9 @@ def main():
 
         win3 = open_job(page, "AreTomo2", "AreTomo2")
         page.wait_for_timeout(1000)
-        note = win3.locator('[data-tab-content="advanced"] .cli-note').first.inner_text()
+        win3.locator('[data-role="advanced-section"] .opt-section-head').click()
+        page.wait_for_timeout(600)
+        note = win3.locator('[data-role="advanced-section"] .cli-note').first.inner_text()
         check(f"A custom bridge says so instead of listing CLI options ({note[:40]}…)",
               "import bridge" in note)
 

@@ -7,10 +7,11 @@ reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
 to build accurate forms for every RELION job type (32 of them, single-
 particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
 bridges as four more entries in the same Jobs list, and runs everything
-through one consistent popup-window UI: every option RELION's own GUI shows
-in the top panel, an Advanced tab for the command-line options it doesn't, an
-Errors tab, live streaming output at the bottom — and, critically, **an
-editable command box you approve before anything runs.**
+through one consistent popup-window UI: an Inputs tab with every option
+RELION's own GUI shows, plus an Advanced section at the bottom for the
+command-line options it doesn't, an Errors tab, live streaming output at the
+bottom — and, critically, **an editable command box you approve before
+anything runs.**
 
 The main panel is a **Command Center** showing every job you've run (a
 sortable table or a timeline that links each job to its inputs); iterative
@@ -54,8 +55,8 @@ environment works; a plain venv is the least assumption-laden option and
 works the same way on every distro:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv relion-us
+source relion-us/bin/activate
 pip install -r backend/requirements.txt
 ```
 
@@ -65,7 +66,7 @@ package manager first — e.g. `sudo apt install python3-venv` on Debian/
 Ubuntu, `sudo dnf install python3` on Fedora (venv is included), pacman's
 `python` package on Arch, or the equivalent for your system — then retry.
 `conda`/`mamba` environments work just as well if you prefer them:
-`conda create -n relion_us python=3.11 && conda activate relion_us && pip
+`conda create -n relion-us python=3.11 && conda activate relion-us && pip
 install -r backend/requirements.txt`.
 
 Once the environment is set up and active, launch it with:
@@ -123,23 +124,27 @@ internet access.
   with rounded corners, and only one open at a time (opening a different
   job closes whichever popup was already open, rather than stacking
   windows).
-- **Top panel**: **every option RELION's own GUI shows for that job**, in
-  RELION's own groups and order (I/O, Reference, CTF, Optimisation, Sampling,
-  Helix, Compute, Running), as collapsible sections — extracted directly from
+- **Inputs tab**: the popup's first, default-open tab, holding **every
+  option RELION's own GUI shows for that job**, in RELION's own groups and
+  order (I/O, Reference, CTF, Optimisation, Sampling, Helix, Compute,
+  Running), as collapsible sections — extracted directly from
   `gui_jobwindow.cpp` and `pipeline_jobs.cpp`, not guessed. The I/O section
   starts open; the rest are one click away. Nothing RELION shows is hidden
-  behind a tab.
-- **Running section**: MPI procs, threads, and **Additional arguments** —
-  RELION's own Running tab. Setting MPI procs above 1 does exactly what RELION
-  does: prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and switches to that
-  job's `_mpi` binary, with both binary names read out of the job's own C++
-  source rather than guessed by appending a suffix. Additional arguments are
-  appended verbatim at the end, as RELION appends them.
-- **Advanced tab**: the opposite of the top panel — command-line options the
-  program accepts that **RELION's GUI never exposes**, the ones you would
-  otherwise find by running the binary with `--help` or reading the source.
-  The list comes from asking your installed binary (see "The Advanced tab"
-  below), so it matches your build.
+  behind a different tab.
+  - **Running section**: MPI procs, threads, and **Additional arguments** —
+    RELION's own Running tab. Setting MPI procs above 1 does exactly what
+    RELION does: prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and
+    switches to that job's `_mpi` binary, with both binary names read out of
+    the job's own C++ source rather than guessed by appending a suffix.
+    Additional arguments are appended verbatim at the end, as RELION appends
+    them.
+  - **Advanced section** (past Running, and Other if the job has one): the
+    opposite of the rest of the Inputs tab — command-line options the
+    program accepts that **RELION's GUI never exposes**, the ones you would
+    otherwise find by running the binary with `--help` or reading the
+    source. Collapsed by default and loaded the first time you open it (see
+    "The Advanced section" below), so it matches your build without costing
+    every popup a subprocess call.
 - **Progress tab** (iterative jobs only): live charts of resolution and class
   distribution plus class images, with per-job controls for how often images
   refresh and whether earlier iterations are kept — see "Live progress for
@@ -189,18 +194,19 @@ binary at all — RELION runs whatever executable path you set in a
 "Location of X executable" field. The draft command resolves that
 automatically from the field's current value.
 
-## The Advanced tab (options the GUI doesn't show)
+## The Advanced section (options the GUI doesn't show)
 
 RELION's GUI exposes a subset of what each program actually accepts. The rest —
 expert and developmental flags — are what its "Additional arguments" box exists
 for, and finding them normally means running the binary with no arguments and
 reading the usage dump.
 
-The Advanced tab does that for you. On opening a job it runs the job's program
-with `--help`, parses RELION's own usage format, subtracts every flag the form
-above already covers, and lists what's left with its default, its section, and
-its help text. Filter the list, fill in a value, and **Add** appends it to the
-command box — where you can still edit or delete it, like everything else here.
+The Advanced section, at the bottom of the Inputs tab, does that for you. The
+first time you open it, it runs the job's program with `--help`, parses
+RELION's own usage format, subtracts every flag the form above already
+covers, and lists what's left with its default, its section, and its help
+text. Filter the list, fill in a value, and **Add** appends it to the command
+box — where you can still edit or delete it, like everything else here.
 
 Three things worth knowing:
 
@@ -539,7 +545,7 @@ parsing gaps introduced by a new RELION release show up as failures.
 ./run_tests.sh              # backend suite only — seconds, run it always
 ./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
 ./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
-./run_tests.sh options      # + option placement, MPI/threads, Advanced tab
+./run_tests.sh options      # + option placement, MPI/threads, Advanced section
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
 ./run_tests.sh legacy       # + opening a project built in RELION's own GUI

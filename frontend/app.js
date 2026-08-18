@@ -385,15 +385,16 @@ async function openJobPopup(internalName, displayName, existingRun) {
       <button class="btn" data-action="delete" hidden title="Delete this job (and optionally its output files)">🗑 Delete</button>
     </div>
     <div class="job-note-row hidden" data-role="note-row"></div>
-    <div class="job-standard-form" data-role="standard-form"></div>
     <div class="tab-bar" data-role="tab-bar">
-      <button class="tab-btn active" data-tab="advanced">Advanced</button>
+      <button class="tab-btn active" data-tab="inputs">Inputs</button>
       <button class="tab-btn" data-tab="progress" hidden>Progress</button>
       <button class="tab-btn" data-tab="outputs" hidden>Outputs</button>
       <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
-    <div class="tab-content active" data-tab-content="advanced"></div>
+    <div class="tab-content active" data-tab-content="inputs">
+      <div class="job-standard-form" data-role="standard-form"></div>
+    </div>
     <div class="tab-content" data-tab-content="progress"></div>
     <div class="tab-content" data-tab-content="outputs"></div>
     <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
@@ -419,11 +420,13 @@ async function openJobPopup(internalName, displayName, existingRun) {
     <div class="live-output" data-role="live-output"></div>
   `;
 
-  // ---- Top panel: every option RELION's own GUI shows -------------------
+  // ---- Inputs tab: every option RELION's own GUI shows -------------------
   // Grouped and ordered by RELION's own tab names (I/O, CTF, ..., Running) as
   // collapsible sections, so a long job (Class3D has ~60 fields) stays
-  // navigable without hiding anything behind a second tab. The Advanced tab
-  // is NOT for these -- it lists command-line options the GUI never exposes.
+  // navigable without hiding anything behind a second tab. The Advanced
+  // section (appended below, after this loop) is NOT for these -- it lists
+  // command-line options the GUI never exposes, and sits last so it reads as
+  // the "everything else" option past RELION's own Running/Other groups.
   const standardForm = body.querySelector('[data-role="standard-form"]');
   const groups = def.standard_groups || [];
   groups.forEach((group, index) => {
@@ -452,12 +455,27 @@ async function openJobPopup(internalName, displayName, existingRun) {
     standardForm.appendChild(section);
   });
 
-  // ---- Advanced tab: options the GUI does not expose ---------------------
+  // ---- Advanced: options the GUI does not expose -------------------------
   // Read from the installed binary's own --help output (GET .../cli-options),
   // not from the extracted definitions: the program accepts more than the GUI
   // offers, and those extras are exactly what you would otherwise dig out of
-  // --help or the source. Loaded on first open, not on every popup.
-  const advancedContent = body.querySelector('[data-tab-content="advanced"]');
+  // --help or the source. A collapsible section inside the Inputs tab, past
+  // every one of RELION's own groups (I/O, ..., Running, Other) rather than
+  // its own tab -- these are the options you reach for less often, so they
+  // sit last, collapsed by default, and load lazily the first time this
+  // section is actually opened (the "toggle" listener below) rather than on
+  // every popup.
+  const advancedSection = document.createElement("details");
+  advancedSection.className = "opt-section";
+  advancedSection.dataset.role = "advanced-section";
+  const advancedSummary = document.createElement("summary");
+  advancedSummary.className = "opt-section-head";
+  advancedSummary.innerHTML = `<span class="opt-section-name">Advanced</span>`;
+  advancedSection.appendChild(advancedSummary);
+  const advancedContent = document.createElement("div");
+  advancedContent.className = "cli-advanced-body";
+  advancedSection.appendChild(advancedContent);
+  standardForm.appendChild(advancedSection);
   let advancedLoaded = false;
 
   function renderAdvancedRows(host, options) {
@@ -532,6 +550,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
       `(${data.hidden_by_gui} are already fields above). ` +
       `Adding one appends it to the command box, where you can still edit it.`;
     advancedContent.appendChild(intro);
+    // Matches the count badge every other section shows, now that this is
+    // filled in asynchronously rather than known synchronously up front.
+    advancedSummary.innerHTML =
+      `<span class="opt-section-name">Advanced</span>` +
+      `<span class="opt-section-count">${data.options.length}</span>`;
 
     if (!data.parsed) {
       const pre = document.createElement("pre");
@@ -583,15 +606,16 @@ async function openJobPopup(internalName, displayName, existingRun) {
       body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
       if (btn.dataset.tab === "outputs") loadOutputsTab();
       if (btn.dataset.tab === "progress") refreshProgress();
-      if (btn.dataset.tab === "advanced") loadAdvancedTab();
     });
   });
 
-  // Advanced is the tab that's open when a popup appears, so fill it now
-  // rather than leaving an empty panel. The backend caches each binary's
-  // --help on (path, mtime, size), so this costs one subprocess per program
-  // per backend lifetime, not one per popup.
-  loadAdvancedTab();
+  // The Advanced section loads the first time it's actually opened, not on
+  // every popup -- most jobs, most of the time, never need it. The backend
+  // caches each binary's --help on (path, mtime, size) regardless, so this
+  // costs at most one subprocess per program per backend lifetime.
+  advancedSection.addEventListener("toggle", () => {
+    if (advancedSection.open) loadAdvancedTab();
+  });
 
   function collectValues() {
     const values = {};

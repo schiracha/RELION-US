@@ -15,9 +15,9 @@ Endpoints:
   GET  /api/jobs/{internal_name}/cli-options
                                           -> options the job's program accepts
                                              that RELION's own form does not
-                                             expose (Advanced tab), read by
-                                             running the installed binary with
-                                             --help
+                                             expose (the Advanced section of
+                                             the Inputs tab), read by running
+                                             the installed binary with --help
   POST /api/jobs/{internal_name}/draft    -> recompute the draft command
                                               for a given set of field values
                                               (called live as you edit the
@@ -236,7 +236,7 @@ class DraftRequest(BaseModel):
 @app.get("/api/jobs/{internal_name}/cli-options")
 def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
     """Options the job's program accepts that its RELION form does not offer —
-    the Advanced tab.
+    the Inputs tab's Advanced section.
 
     Discovered by running the installed binary with --help (see
     program_help.py), not from the extracted job definitions: the GUI shows a

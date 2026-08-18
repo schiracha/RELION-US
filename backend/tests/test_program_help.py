@@ -1,6 +1,7 @@
 """
 Tests for program_help.py — enumerating a program's real command-line options
-by running it with --help, which is what fills the job popup's Advanced tab.
+by running it with --help, which is what fills the job popup's Advanced
+section (in the Inputs tab).
 
 The fixtures are stub executables printing RELION's own IOParser usage format
 (src/args.cpp, IOParser::writeUsage): flag right-aligned in a 35-character
@@ -186,7 +187,7 @@ def test_rebuilt_binary_invalidates_the_cache(relion_stub):
 
 
 # --------------------------------------------------------------------------
-# the GUI diff — the point of the Advanced tab
+# the GUI diff — the point of the Advanced section
 # --------------------------------------------------------------------------
 
 

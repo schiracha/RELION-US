@@ -2,8 +2,9 @@
 custom_jobs.py — wires the IMOD / Warp-M / DeepETPicker / AreTomo2 import bridges
 (backend/converters/, built earlier in this project and unit-tested there)
 into this app's Jobs list as four more job types, run the same way as
-every RELION job: a popup with standard inputs, an Advanced tab, live
-output, and an Errors tab.
+every RELION job: a popup with an Inputs tab (standard inputs, plus an
+Advanced section for options the GUI never shows), live output, and an
+Errors tab.
 
 These don't spawn a relion_* subprocess — they call directly into
 converters/ in a worker thread (via asyncio.to_thread, since pandas/

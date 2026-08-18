@@ -62,10 +62,10 @@ relion_us/
 ├── backend/
 │   ├── main.py              # FastAPI app: REST + one websocket per job run
 │   ├── job_registry.py      # raw extraction -> API-ready job definitions,
-│   │                        #   RELION's own tab groups for the top panel,
+│   │                        #   RELION's own tab groups for the Inputs tab,
 │   │                        #   draft-command heuristic (see below)
 │   ├── program_help.py      # runs <program> --help to list the CLI options
-│   │                        #   RELION's GUI never exposes (Advanced tab)
+│   │                        #   RELION's GUI never exposes (Advanced section)
 │   ├── job_catalog.py       # curated display metadata (names, categories)
 │   ├── job_runner.py        # executes the approved command exactly as given;
 │   │                        #   per-project run history persistence
@@ -107,19 +107,10 @@ relion_us/
                               #   adopting a RELION-built project)
 ```
 
-### Why this instead of a Streamlit GUI
+### Job popup window and top bar
 
-An earlier iteration of this project (`relion_tomo_bridge`) used Streamlit
-for a quick browser-rendered front end. That was replaced once the actual
-requirements became clear: a draggable, resizable job window, a hideable job
-list, UI-wide zoom, and a live-streaming output pane alongside an editable
-command box — all things Streamlit's rerun-the-whole-script execution model
-can't do cleanly. RELION-US's frontend is instead a small vanilla JS app
-using WinBox.js for the popup window and a raw websocket per job run for
-live stdout/stderr, which supports all of that directly. The
-`relion_tomo_bridge` converters (`star_io.py`, `imod_bridge.py`,
-`warp_bridge.py`, `deepetpicker_bridge.py`) carried over unchanged into
-`backend/converters/` — only the GUI wrapping them changed.
+The frontend is a small vanilla JS app using WinBox.js for the popup window
+and a raw websocket per job run for live stdout/stderr.
 
 **Job popup sizing/rounding/single-instance.** `openJobPopup` (`app.js`)
 tracks the one open job popup in a module-level `currentJobWinbox`, closed
@@ -156,23 +147,35 @@ both themes, without a second copy of every rule.
 
 ### Where a job's options live
 
-Two panels, two different questions:
+One tab, two different questions, answered in order:
 
-- **Top panel — everything RELION's own GUI shows.** All of a job's JobOptions,
-  grouped under RELION's own tab names and in RELION's own order
-  (`standard_groups`, from the extracted `tab_layout`), as collapsible sections.
-  A test asserts the placement is total and unique: every extracted option
-  appears in exactly one section, so no field RELION offers is unreachable here.
-- **Advanced tab — what the GUI does not show.** Command-line options the
-  *program* accepts but the GUI never exposes, discovered by running the
-  installed binary with `--help` (see `backend/program_help.py`), minus every
-  flag the form above already covers. This is the "additional arguments" case:
-  expert flags you would otherwise find in a usage dump or the source.
+- **Inputs tab, RELION's own groups — everything RELION's own GUI shows.**
+  All of a job's JobOptions, grouped under RELION's own tab names and in
+  RELION's own order (`standard_groups`, from the extracted `tab_layout`), as
+  collapsible sections. A test asserts the placement is total and unique:
+  every extracted option appears in exactly one section, so no field RELION
+  offers is unreachable here.
+- **Inputs tab, Advanced section — what the GUI does not show.** A
+  collapsible `<details>` section appended after every one of RELION's own
+  groups (so it always lands past Running, and Other if the job has one).
+  Collapsed by default; the frontend loads its content lazily, the first time
+  it's opened (a `toggle` listener on the `<details>` element), rather than
+  on every popup. Its content is command-line options the *program* accepts
+  but the GUI never exposes, discovered by running the installed binary with
+  `--help` (see `backend/program_help.py`), minus every flag the form above
+  already covers. This is the "additional arguments" case: expert flags you
+  would otherwise find in a usage dump or the source. Because the query
+  includes the popup's current MPI-procs value (RELION's parallel binary can
+  accept flags the serial one doesn't), re-opening it after changing MPI
+  procs re-fetches rather than reusing a stale answer.
 
-The split is by *provenance*, not by how advanced an option feels. The
-alternative — first RELION tab on top, later tabs in Advanced — buried
-Optimisation and Compute behind a tab while leaving nothing for the options
-RELION's own GUI has no field for.
+The split is by *provenance*, not by how advanced an option feels, and not by
+being a separate tab: putting it in its own tab (as an earlier iteration did)
+implied it was a peer of Inputs/Progress/Outputs/Errors, when it is really
+more Inputs the GUI doesn't have a field for. The alternative to *that* split
+— first RELION tab on top, later tabs in Advanced — buried Optimisation and
+Compute behind a tab while leaving nothing for the options RELION's own GUI
+has no field for.
 
 #### RELION's Running tab
 

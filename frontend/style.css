@@ -548,14 +548,14 @@ html, body {
   font-family: inherit;
 }
 .mini-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
-/* The top panel: every option RELION's own GUI shows, in RELION's own tab
-   order, as collapsible sections. It gets the lion's share of the popup --
-   this is where the work happens; the tabs below are references. */
+/* The Inputs tab: every option RELION's own GUI shows, in RELION's own tab
+   order, as collapsible sections, plus the Advanced section (options the GUI
+   never shows) appended last, past Running/Other. Sizing/scrolling comes
+   from the "inputs" tab-content that wraps this (see .tab-content rules
+   below) rather than from this element itself, now that it lives in a tab
+   instead of being its own always-visible region above the tab bar. */
 .job-standard-form {
   padding: 8px 10px;
-  overflow-y: auto;
-  max-height: 52%;
-  border-bottom: 1px solid var(--border);
 }
 .opt-section { border-bottom: 1px solid var(--border); }
 .opt-section:last-child { border-bottom: none; }
@@ -629,11 +629,17 @@ html, body {
 
 .tab-content { flex: 0 0 auto; max-height: 22%; overflow-y: auto; padding: 8px 10px; display: none; }
 /* The Progress tab holds two charts plus a thumbnail grid, so it gets more
-   room than the text tabs (which only need a glance). */
+   room than the text tabs (which only need a glance). The Inputs tab holds
+   all of RELION's own groups (a long job like Class3D has ~60 fields, spread
+   across several sections) plus the Advanced section, so it gets the lion's
+   share of the popup -- this is where the work happens; only one tab is ever
+   visible at once, so this doesn't compete with the other tabs' own budgets. */
+.tab-content[data-tab-content="inputs"] { max-height: 68%; padding: 0; }
 .tab-content[data-tab-content="progress"] { max-height: 58%; }
 .tab-content.active { display: block; }
-/* Advanced tab: options the program accepts that RELION's GUI never exposes,
-   read from its own --help output. */
+/* Advanced section (inside the Inputs tab): options the program accepts
+   that RELION's GUI never exposes, read from its own --help output. */
+.cli-advanced-body { padding: 4px 0 10px; }
 .cli-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
 .cli-note code { color: var(--text); }
 .cli-search {

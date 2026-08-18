@@ -10,8 +10,8 @@
 #   ./run_tests.sh              # backend pytest only (the default; seconds)
 #   ./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
 #   ./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
-#   ./run_tests.sh options      # + where a job's options live (top panel /
-#                               #   Advanced tab) and the MPI/threads/extra-args
+#   ./run_tests.sh options      # + where a job's options live (Inputs tab /
+#                               #   Advanced section) and the MPI/threads/extra-args
 #                               #   wiring
 #   ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 #   ./run_tests.sh project      # + Change Project, recents, Create Folder
@@ -26,7 +26,7 @@
 #   the tomogram viewer or the file picker ............... viewer
 #   the Progress tab or the theme ........................ progress
 #   job popups, run/abort/overwrite, Outputs ............. jobs
-#   job_registry / the extractor / the Advanced tab ...... options
+#   job_registry / the extractor / the Advanced section .. options
 #   project_manager.py or the Change Project dialog ...... project
 #   job numbering, the Command Center, RELION's pipeline .. legacy
 #   frontend/app.js scaffolding shared by all popups ..... ui
@@ -37,9 +37,10 @@
 # project that has history, which is a false alarm, not a bug.
 #
 # The `options` suite needs a program on PATH answering to a RELION binary
-# name, so it can check what the Advanced tab lists. A stub printing RELION's
-# own --help format is generated for it -- point RELION_US_REAL_BINARIES at a
-# real RELION bin directory to run it against the genuine article instead.
+# name, so it can check what the Advanced section lists. A stub printing
+# RELION's own --help format is generated for it -- point
+# RELION_US_REAL_BINARIES at a real RELION bin directory to run it against the
+# genuine article instead.
 #
 # Environment:
 #   RELION_US_PYTHON    python to use (default: python3)
@@ -107,6 +108,13 @@ PY
 # A stand-in for `relion_refine --help`, in RELION's own IOParser usage format
 # (src/args.cpp). The Advanced-tab suite needs *a* program to interrogate; this
 # keeps the test hermetic on a machine with no RELION install.
+#
+# relion_refine_mpi is the same stub under RELION's own MPI-binary naming
+# convention, not a separate program: the Advanced section asks for the _mpi
+# binary's own options whenever the popup's MPI-procs field is > 1 (a real
+# RELION install ships both binaries, and both answer --help the same way via
+# the same IOParser), so the suite's MPI test needs it on PATH too, exactly
+# like the real thing.
 make_stub_bin() {
   local dir="$TMPROOT/stub-bin"
   [[ -d "$dir" ]] && { echo "$dir"; return; }
@@ -114,12 +122,12 @@ make_stub_bin() {
   cat > "$dir/relion_refine" <<'STUB'
 #!/usr/bin/env python3
 print("""+++ RELION: command line arguments (with defaults for optional ones between parantheses) +++
-====== General options ===== 
+====== General options =====
                                 --i : Input images (in a star-file)
                                 --o : Output rootname
                      --angpix (1.0) : Pixel size in Angstroms
                             --j (1) : Number of threads
-====== Expert options ===== 
+====== Expert options =====
           --dont_check_norm (false) : Skip the check whether images are normalised
                          --verb (1) : Verbosity (1=normal, 0=silent)
            --onlyflipphases (false) : Only flip phases, do not correct amplitudes
@@ -127,6 +135,8 @@ print("""+++ RELION: command line arguments (with defaults for optional ones bet
                           --version : Print RELION version and exit""")
 STUB
   chmod +x "$dir/relion_refine"
+  cp "$dir/relion_refine" "$dir/relion_refine_mpi"
+  chmod +x "$dir/relion_refine_mpi"
   echo "$dir"
 }
 
