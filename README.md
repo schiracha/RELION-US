@@ -357,11 +357,10 @@ paths — it's read straight from `default_pipeline.star`'s own
 itself computed when each job ran, so the network view (and the timeline's
 "Inputs from:" chips) work identically whether a job ran here or in RELION.
 
-Clicking a job reopens its popup — nearly window-filling, rounded corners,
-and only one open at a time (opening a new one closes whichever was open,
-rather than stacking windows) — showing the options it ran with, its live or
-final status, an **Outputs** tab (browse/download individual files or a
-`.zip` of any selection), the **Errors** tab, and the **RELION Source** tab.
+Clicking a job reopens its popup, one at a time, showing the options it ran 
+with, its live or final status, an **Outputs** tab (browse/download 
+individual files or a `.zip` of any selection), the **Errors** tab, and the
+**RELION Source** tab.
 
 The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
 close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
@@ -409,11 +408,10 @@ at once. If the tomogram's name doesn't match any `rlnTomoName` in the picks
 file, you get a warning with **Load anyway / Reload files / Cancel**.
 
 Both inputs have a **…** browse button. It lists files on the *machine
-running the backend*, not your own — which is the point when the backend is
-on a cluster login node and a native file dialog would show you the wrong
-filesystem. It filters to the relevant extensions (STAR/MRC for the tomogram
-field, STAR only for the picks field), remembers the folder you were last
-in, and fills the field with a project-relative path.
+running the backend*, not your own unless you are working from the same 
+workstation running your instance. It filters to the relevant extensions
+(STAR/MRC for the tomogramfield, STAR only for the picks field), remembers 
+the folder you were last in, and fills the field with a project-relative path.
 
 The volume is never loaded whole: the backend memory-maps the MRC and
 returns one slice at a time as a PNG, and only the panels whose own slice
@@ -538,6 +536,13 @@ parsing gaps introduced by a new RELION release show up as failures.
   normally either way.
 - No SLURM integration in the job popups yet (see "SLURM templates" above)
   — jobs run as direct subprocesses.
+
+
+## More Coming!
+
+Check the Issues Tab on Github to see what I have planned. Add your own issues
+if you find bugs or have ideas for improvements. better yet, fork the repository
+and code/vibe your own ideas and updates and push some commits to the commity.
 
 ## Testing
 
