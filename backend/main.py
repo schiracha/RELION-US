@@ -127,6 +127,16 @@ Endpoints:
                                               instead of raising if the
                                               location isn't writable.
   GET  /                                  -> the frontend (static files)
+  GET  /api/auth/status                   -> {enabled: bool} -- is password
+                                              protection turned on right now
+                                              (see backend/auth.py; managed
+                                              from the terminal via
+                                              Run-RelionUS --set-password /
+                                              --enable-auth / --disable-auth,
+                                              never from the browser)
+  POST /api/auth/login                    -> body {password}. Sets the
+                                              session cookie on success.
+  POST /api/auth/logout                   -> clears the session cookie.
 """
 from __future__ import annotations
 
@@ -136,13 +146,14 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+import auth
 import job_registry
 import progress
 import pipeline_bridge
@@ -188,6 +199,65 @@ run_manager = JobRunManager(PROJECT_DIR)
 # The project the app starts in counts as opened, so the very first entry in
 # the Change Project dialog's recent list is the one already on screen.
 project_manager.remember_project(PROJECT_DIR)
+
+
+# --- Password protection (backend/auth.py) ----------------------------------
+# Off unless a password has been set AND turned on from the terminal (see
+# Run-RelionUS --set-password / --enable-auth) -- most of the time this
+# middleware is a single dict lookup that changes nothing.
+
+# Reachable with no session cookie at all, so there's somewhere to log in
+# from and something the frontend can ask to avoid a redirect loop.
+_AUTH_PUBLIC_PATHS = {"/login.html", "/api/auth/status", "/api/auth/login", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    cfg = auth.load_config()
+    if not auth.is_enabled(cfg):
+        return await call_next(request)
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS or auth.session_is_valid(request.cookies.get(auth.COOKIE_NAME), cfg):
+        return await call_next(request)
+    if path.startswith("/api/") or path.startswith("/ws/"):
+        return JSONResponse({"detail": "Authentication required"}, status_code=401)
+    return RedirectResponse(url="/login.html", status_code=302)
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    return {"enabled": auth.is_enabled()}
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest):
+    cfg = auth.load_config()
+    if not auth.verify_password(req.password, cfg):
+        # A small fixed delay on a wrong guess -- cheap insurance against a
+        # trivial guessing script, in keeping with this being a deterrent
+        # rather than a hardened login (see auth.py's module docstring).
+        await asyncio.sleep(0.5)
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.new_session_token(cfg),
+        max_age=auth.SESSION_LIFETIME_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.COOKIE_NAME)
+    return response
 
 
 @app.get("/api/catalog")
@@ -686,6 +756,17 @@ def get_run(run_id: str):
 
 @app.websocket("/ws/runs/{run_id}")
 async def run_websocket(websocket: WebSocket, run_id: str):
+    # @app.middleware("http") (the auth_gate above) only ever sees "http"
+    # scope requests -- Starlette routes a websocket's ASGI scope around it
+    # entirely, so the same check has to happen again here, before accept(),
+    # or password protection would gate every page and every REST call except
+    # the one carrying a job's live output.
+    cfg = auth.load_config()
+    if auth.is_enabled(cfg) and not auth.session_is_valid(
+        websocket.cookies.get(auth.COOKIE_NAME), cfg
+    ):
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     run = run_manager.get(run_id)
     if run is None:

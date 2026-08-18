@@ -92,6 +92,68 @@ def main():
               "job001" in rows_top_to_bottom[0])
         check(f"job011 (the end of the chain) is in the bottom row ({rows_top_to_bottom[-1:]})",
               "job011" in rows_top_to_bottom[-1])
+
+        # Every edge's endpoints should land exactly on a node's bottom-center
+        # (its start) and another node's top-center (its end) -- not just
+        # "close", since app.js reads these back from the laid-out DOM rather
+        # than computing them by hand (see renderNetwork's comment).
+        def edges_touch_nodes():
+            return page.evaluate("""() => {
+                const nodes = Array.from(document.querySelectorAll('.cc-network-node')).map(n => ({
+                    cx: n.offsetLeft + n.offsetWidth / 2,
+                    top: n.offsetTop, bottom: n.offsetTop + n.offsetHeight,
+                }));
+                const near = (a, b) => Math.abs(a - b) < 0.5;
+                return Array.from(document.querySelectorAll('.cc-network-edge')).every((path) => {
+                    const parts = path.getAttribute('d').replace(/,/g, ' ').split(/\\s+/).filter(Boolean);
+                    const [x1, y1] = [parseFloat(parts[1]), parseFloat(parts[2])];
+                    const [x2, y2] = [parseFloat(parts[parts.length - 2]), parseFloat(parts[parts.length - 1])];
+                    const startsAtABottom = nodes.some((n) => near(n.cx, x1) && near(n.bottom, y1));
+                    const endsAtATop = nodes.some((n) => near(n.cx, x2) && near(n.top, y2));
+                    return startsAtABottom && endsAtATop;
+                });
+            }""")
+        check("Every edge touches a node's bottom at one end and a node's top at the other",
+              edges_touch_nodes())
+
+        # Edges are read back from the DOM, so anything that moves the boxes
+        # without changing the data (closing/reopening the Jobs sidebar) has
+        # to trigger a recompute -- see app.js's ensureNetworkResizeObserver
+        # and the toggleSidebarBtn listener -- or the lines stay drawn at
+        # their old coordinates while the boxes move out from under them.
+        first_node_x_before = page.locator(".cc-network-node").first.evaluate("el => el.offsetLeft")
+        page.locator("#toggleSidebarBtn").click()
+        page.wait_for_timeout(400)  # .15s CSS transition on #sidebar + a margin
+        first_node_x_after = page.locator(".cc-network-node").first.evaluate("el => el.offsetLeft")
+        check(f"Closing the sidebar actually moves the network's boxes "
+              f"({first_node_x_before} -> {first_node_x_after})",
+              first_node_x_before != first_node_x_after)
+        check("...and the edges follow them there",
+              edges_touch_nodes())
+        page.locator("#toggleSidebarBtn").click()  # reopen, for the rest of the test
+        page.wait_for_timeout(400)
+        check("Edges still touch after reopening the sidebar too",
+              edges_touch_nodes())
+
+        # ---- flipping newest/oldest, same control as the Timeline view ----
+        dir_btn = page.locator("#ccDirectionBtn")
+        check("Direction button is available in Network view too", dir_btn.is_visible())
+        check(f"Network defaults to oldest-first ({dir_btn.inner_text()!r})",
+              "Oldest" in dir_btn.inner_text())
+        dir_btn.click()
+        page.wait_for_timeout(300)
+        check(f"Clicking it switches to newest-first ({dir_btn.inner_text()!r})",
+              "Newest" in dir_btn.inner_text())
+        rows_flipped = page.locator(".cc-network-row").all_inner_texts()
+        check(f"job011 (newest) is now in the top row ({rows_flipped[:1]})",
+              "job011" in rows_flipped[0])
+        check(f"job001 (oldest) is now in the bottom row ({rows_flipped[-1:]})",
+              "job001" in rows_flipped[-1])
+        check("Edges still touch after flipping direction (parent/child, not top/bottom)",
+              edges_touch_nodes())
+        dir_btn.click()  # back to the default for the rest of the test
+        page.wait_for_timeout(300)
+
         page.locator('.cc-view-btn[data-view="table"]').click()
         page.wait_for_timeout(300)
 

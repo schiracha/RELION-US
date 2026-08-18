@@ -16,6 +16,8 @@
 #   ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 #   ./run_tests.sh project      # + Change Project, recents, Create Folder
 #   ./run_tests.sh legacy       # + opening a project built in RELION's own GUI
+#   ./run_tests.sh auth         # + password protection (login/logout, the
+#                               #   gate on pages/API/websocket)
 #   ./run_tests.sh ui           # + every browser suite
 #   ./run_tests.sh all          # everything (use before staging a milestone)
 #
@@ -29,6 +31,7 @@
 #   job_registry / the extractor / the Advanced section .. options
 #   project_manager.py or the Change Project dialog ...... project
 #   job numbering, the Command Center, RELION's pipeline .. legacy
+#   backend/auth.py, login.html, Run-RelionUS's auth flags auth
 #   frontend/app.js scaffolding shared by all popups ..... ui
 #
 # Every browser suite gets a fresh project directory and its own backend on its
@@ -140,6 +143,24 @@ STUB
   echo "$dir"
 }
 
+# The password protection suite needs a login already configured before its
+# backend even starts -- unlike every other suite, which never touches
+# backend/auth.py at all and so runs (correctly) with protection off, the
+# default. Calls straight into auth.py rather than shelling out to
+# Run-RelionUS, so this doesn't depend on that script's own interactive
+# first-run prompt or argument parsing.
+AUTH_TEST_PASSWORD="relion-us-test-password"
+make_auth_config() {
+  local config_home="$1"
+  XDG_CONFIG_HOME="$config_home" "$PYTHON" - <<PY
+import sys
+sys.path.insert(0, "$PWD_APP/backend")
+import auth
+auth.set_password("$AUTH_TEST_PASSWORD")
+auth.enable()
+PY
+}
+
 # start_backend <name>
 # Sets BACKEND_PORT / BACKEND_PROJ / BACKEND_PID. Deliberately not "echo the
 # port and capture it": a command substitution runs in a subshell, so the
@@ -162,8 +183,13 @@ start_backend() {
     echo "[]" > "$proj/.relion_us/run_history.json"
   fi
 
-  # XDG_CONFIG_HOME is redirected so the recent-projects cache written by the
-  # test run never touches the developer's real one.
+  # XDG_CONFIG_HOME is redirected so the recent-projects cache (and, for
+  # test_auth, the login config) written by the test run never touches the
+  # developer's real one.
+  if [[ "$name" == test_auth ]]; then
+    make_auth_config "$TMPROOT/$name-config"
+  fi
+
   # `exec` matters: without it, $! is the subshell's pid and killing the
   # subshell leaves uvicorn itself running -- the port stays busy and the next
   # run silently talks to a backend pointed at the wrong project.
@@ -184,12 +210,17 @@ start_backend() {
   BACKEND_PID="$!"
   BACKEND_PIDS+=("$BACKEND_PID")
 
-  # Wait for it to answer rather than sleeping a guessed amount.
+  # Wait for it to answer rather than sleeping a guessed amount. /api/auth/status
+  # rather than /api/project: it's the one endpoint the auth gate always
+  # answers with 200 regardless of whether THIS suite's backend has
+  # password protection on (see make_auth_config above) -- polling a gated
+  # endpoint would make urlopen see every response as an error (401) and
+  # this loop would time out waiting for a backend that is actually up.
   for _ in $(seq 1 60); do
     if "$PYTHON" - "$port" <<'PY' 2>/dev/null
 import sys, urllib.request
 try:
-    urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/api/project", timeout=1)
+    urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/api/auth/status", timeout=1)
 except Exception:
     sys.exit(1)
 PY
@@ -373,6 +404,7 @@ wants jobs     && run_browser_suite test_command_center.py
 wants jobs     && run_browser_suite test_command_center_abort_overwrite.py
 wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
+wants auth     && run_browser_suite test_auth.py
 
 echo
 echo "======================================================================"

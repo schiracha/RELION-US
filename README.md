@@ -72,25 +72,80 @@ install -r backend/requirements.txt`.
 Once the environment is set up and active, launch it with:
 
 ```bash
-./run.sh               # binds 0.0.0.0:8420 by default
+./Run-RelionUS         # binds 0.0.0.0:8420 by default
 ```
 
 Then open `http://<that machine's address>:8420/` in a browser — including
 from a different machine, since it binds `0.0.0.0`. On a remote server or
 HPC cluster login node, launch it there and either port-forward over SSH
 (`ssh -L 8420:localhost:8420 <host>`) or connect directly if your network
-allows it. `./run.sh --help` shows the `--host`/`--port` options.
+allows it. `./Run-RelionUS --help` shows the `--host`/`--port` options.
 
 **You don't have to run it from inside a project directory.** If you `cd`
-into an existing RELION project before running `./run.sh`, it's picked up
-automatically; otherwise it starts in a default project folder and you
+into an existing RELION project before running `./Run-RelionUS`, it's picked
+up automatically; otherwise it starts in a default project folder and you
 switch to the real one from the **Change Project** button in the top bar
 at any time — see "Using it" below.
+
+**Running it as a plain command.** Typing the full path to `Run-RelionUS`
+every time gets old fast; put a symlink to it somewhere already on your
+`PATH` instead, and `Run-RelionUS` works from any directory after that. Two
+common places to put it, depending on who should be able to run it:
+
+```bash
+# Just for you (only if you already keep a personal bin/ directory on PATH):
+ln -s "$(pwd)/Run-RelionUS" ~/bin/Run-RelionUS
+
+# For every user on this machine:
+sudo ln -s "$(pwd)/Run-RelionUS" /usr/local/bin/Run-RelionUS
+```
 
 No CDN dependency: WinBox.js (the popup-window library) is vendored under
 `frontend/vendor/` (Apache-2.0, see `WINBOX_LICENSE.txt`), specifically
 because many HPC cluster login nodes and workstations have no outbound
 internet access.
+
+## Password protection
+
+Off by default. Because RELION-US binds `0.0.0.0` so it's reachable from
+another machine (that's the point — see "Installing and running it" above),
+anyone who can reach the port can open jobs, run them, and delete run
+history, with no login at all. A password is a basic deterrent against that
+on a shared lab or cluster network — **not real security**: this app sets up
+no encryption, so the password crosses the network in plain text like
+everything else it sends. If you need actual confidentiality, put it behind
+a reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
+tunnel instead (`ssh -L 8420:localhost:8420 <host>`, the same approach the
+README already suggests for a remote/HPC-hosted instance).
+
+**Setting it up:** the first time `Run-RelionUS` runs at all on a machine,
+and only then, and only if you're at an interactive terminal, it asks
+whether to set a password. Say no (or just press Enter) and it won't ask
+again — from then on, everything is a terminal flag, on the machine running
+the backend, deliberately with no in-browser way to turn it on or change it
+(anyone who can already reach a shell on that machine can read/edit project
+files directly anyway, so gating password changes behind browser auth would
+add friction, not protection):
+
+```bash
+./Run-RelionUS --set-password        # set/change the password (hidden input, twice to confirm)
+./Run-RelionUS --enable-auth         # require it from now on, every run
+./Run-RelionUS --disable-auth        # stop requiring it (password is kept, not deleted)
+./Run-RelionUS --auth-status         # what's set, and whether it's currently on
+./Run-RelionUS --auth                # force it ON for just this one run
+./Run-RelionUS --no-auth             # force it OFF for just this one run
+```
+
+Changing the password logs out every existing session at once, on every
+device, immediately — there's no separate "log everyone out" step.
+
+**What it looks like when it's on:** anyone opening the app lands on a
+login page first (`frontend/login.html`, a self-contained page with no
+dependency on anything else here, since it has to render even while
+everything else is gated); the password gates every page, every API call,
+and the job-output websocket, not just the initial page load. A **🔒 Log
+out** button appears in the top bar once you're logged in. Sessions last 30
+days.
 
 ## Using it
 
@@ -357,10 +412,11 @@ paths — it's read straight from `default_pipeline.star`'s own
 itself computed when each job ran, so the network view (and the timeline's
 "Inputs from:" chips) work identically whether a job ran here or in RELION.
 
-Clicking a job reopens its popup, one at a time, showing the options it ran 
-with, its live or final status, an **Outputs** tab (browse/download 
-individual files or a `.zip` of any selection), the **Errors** tab, and the
-**RELION Source** tab.
+Clicking a job reopens its popup — nearly window-filling, rounded corners,
+and only one open at a time (opening a new one closes whichever was open,
+rather than stacking windows) — showing the options it ran with, its live or
+final status, an **Outputs** tab (browse/download individual files or a
+`.zip` of any selection), the **Errors** tab, and the **RELION Source** tab.
 
 The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
 close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
@@ -408,10 +464,11 @@ at once. If the tomogram's name doesn't match any `rlnTomoName` in the picks
 file, you get a warning with **Load anyway / Reload files / Cancel**.
 
 Both inputs have a **…** browse button. It lists files on the *machine
-running the backend*, not your own unless you are working from the same 
-workstation running your instance. It filters to the relevant extensions
-(STAR/MRC for the tomogramfield, STAR only for the picks field), remembers 
-the folder you were last in, and fills the field with a project-relative path.
+running the backend*, not your own — which is the point when the backend is
+on a cluster login node and a native file dialog would show you the wrong
+filesystem. It filters to the relevant extensions (STAR/MRC for the tomogram
+field, STAR only for the picks field), remembers the folder you were last
+in, and fills the field with a project-relative path.
 
 The volume is never loaded whole: the backend memory-maps the MRC and
 returns one slice at a time as a PNG, and only the panels whose own slice
@@ -537,13 +594,6 @@ parsing gaps introduced by a new RELION release show up as failures.
 - No SLURM integration in the job popups yet (see "SLURM templates" above)
   — jobs run as direct subprocesses.
 
-
-## More Coming!
-
-Check the Issues Tab on Github to see what I have planned. Add your own issues
-if you find bugs or have ideas for improvements. better yet, fork the repository
-and code/vibe your own ideas and updates and push some commits to the commity.
-
 ## Testing
 
 ```bash
@@ -554,6 +604,8 @@ and code/vibe your own ideas and updates and push some commits to the commity.
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
 ./run_tests.sh legacy       # + opening a project built in RELION's own GUI
+./run_tests.sh auth         # + password protection (login/logout, the gate
+                             #   on pages/API/websocket)
 ./run_tests.sh all          # everything (~80 s) — before you commit a milestone
 ```
 

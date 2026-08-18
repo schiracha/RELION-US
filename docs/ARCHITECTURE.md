@@ -80,6 +80,9 @@ relion_us/
 │   │                        #   PNG slices + pick JSON (see "Visualizer" below)
 │   ├── progress.py          # live per-iteration charts + class thumbnails for
 │   │                        #   iterative jobs (see "Live job progress" below)
+│   ├── auth.py              # optional password gate: hashing, sessions, the
+│   │                        #   Run-RelionUS --set-password/--enable-auth CLI
+│   │                        #   (see "Password protection" below)
 │   ├── converters/          # pure-Python + subprocess format bridges
 │   │   ├── star_io.py           # thin wrapper over `starfile`, RELION-5 tomo aware
 │   │   ├── coord_transform.py   # shared axis swap/mirror for coordinate importers
@@ -91,13 +94,17 @@ relion_us/
 │                              #   real extracted data) + converter unit tests
 ├── frontend/                 # vanilla JS/HTML/CSS, no build step; WinBox.js
 │                              #   (vendored, not CDN-loaded) for popup windows
+│   └── login.html             # self-contained login page (auth.py) -- no
+│                              #   dependency on app.js/style.css, since it has
+│                              #   to render while everything else is gated
 ├── data/
 │   └── extract_job_definitions.py  # parses real RELION source -> job_definitions_raw.json
 ├── slurm/                    # generic sbatch templates + submit.py, any SLURM cluster;
 │                              #   not yet wired into the job popups, see below
 ├── docs/                     # this file
-├── run.sh                    # launch helper (no install script -- see README.md
-│                              #   for building the Python environment yourself)
+├── Run-RelionUS              # launch helper (no install script -- see README.md
+│                              #   for building the Python environment yourself);
+│                              #   also the --set-password/--enable-auth/etc CLI
 ├── run_tests.sh              # tiered test runner: backend suite always, browser
 │                              #   suites by tier (see "Testing" in README.md)
 └── test_*.py                 # Playwright browser smoke tests (job list, Change
@@ -659,16 +666,49 @@ the DOM lays out (rows/nodes are plain flexbox), each node's position is read
 back via `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight` relative to
 `#ccNetworkRows` (the nearest `position: relative` ancestor, so these are
 already in the right coordinate space with no manual scroll-offset
-arithmetic), and each edge is a cubic Bézier from the parent's bottom-center
-to the child's top-center. This stays correct regardless of how wide any
-job's name or type text renders, at the cost of one forced-reflow read after
-layout — negligible at Command Center row counts.
+arithmetic), and each edge is a cubic Bézier between whichever of the two
+nodes is visually higher and whichever is lower (by `offsetTop`, not by
+which one is the "parent" — see "Newest/oldest at the top" below for why
+that distinction matters), bottom-center of the upper one to top-center of
+the lower one. This stays correct regardless of how wide any job's name or
+type text renders, at the cost of one forced-reflow read after layout —
+negligible at Command Center row counts.
 
 The `.hidden` class on `#ccNetworkView` is removed *before* `renderNetwork()`
 runs (`renderCommandCenterViews`'s toggle-then-render order): `offsetLeft`/
 `offsetTop` all read 0 on a `display: none` ancestor, so measuring while
 still hidden would silently produce a graph with every edge collapsed to a
 single point.
+
+**Keeping edges glued to their boxes.** Edges are a one-time read of the
+DOM's layout, not a live binding — so anything that moves the boxes without
+changing `ccRuns` has to explicitly trigger a re-render, or the lines stay
+drawn at their old coordinates while the boxes move out from under them.
+Two things move the boxes without RELION-US knowing at the call site:
+closing/opening the Jobs sidebar (`#sidebar` has a `.15s` CSS
+`transition: margin-left`, so the canvas keeps resizing for a beat after the
+click) and a browser window resize. Both are covered by one mechanism —
+`ensureNetworkResizeObserver()` attaches a `ResizeObserver` to
+`#ccNetworkCanvas`, which stretches to fill `#ccNetworkView`'s available
+width (`min-width: 100%` in style.css) and so resizes on either cause,
+`renderNetwork()`-ing again (debounced to one `requestAnimationFrame`) each
+time it fires. Because it keeps firing for the sidebar's whole transition, it
+lands on the correct final layout rather than a mid-transition snapshot — an
+earlier version that only recomputed once, on the click itself, is what
+produced the visibly-not-quite-touching lines this replaced. The sidebar
+toggle handler also calls `renderNetwork()` directly, belt-and-suspenders,
+so the boxes and lines never visibly disagree even for a frame.
+
+**Newest/oldest at the top.** A second, independent direction toggle from
+the Timeline's (`ccNetworkDirection`, its own `localStorage` key) — sharing
+the Timeline's would have meant Network inherited the Timeline's
+newest-first default the first time someone opened it, when the whole point
+of this view is oldest-at-top, branching down to what used it. The shared
+`#ccDirectionBtn` (only one of Timeline/Network is ever visible at once, so
+one button serves both) just reverses which end of the already-computed
+`rows` array is appended first; row/column assignment itself never changes.
+Because edge attachment (above) is by on-screen position rather than by
+parent/child, the lines don't need to know direction flipped at all.
 
 ## Tomogram / particle-pick visualizer
 
@@ -899,6 +939,75 @@ wins, and with nothing stored the app stays dark rather than following the OS
 became variables (`--console-bg`, `--console-bg-deep`, `--console-text`) so they
 restyle too. Chart series colours are separate, mode-specific values validated
 against each surface rather than an automatic flip.
+
+## Password protection
+
+Off by default, and deliberately not real security — see `backend/auth.py`'s
+module docstring for the full threat-model reasoning (no TLS is set up
+here, so the password crosses the network in plain text like everything
+else this app sends; this is a deterrent against casual access on a shared
+lab/cluster network, not a hardened login).
+
+**Storage.** `project_manager.config_root() / "auth.json"` — per-*user*,
+alongside the recent-projects cache (`project_manager.recents_path()`; both
+now go through the shared `config_root()` helper), not per-project, since
+the whole point is protecting the app before it even shows a project. Only
+a salted PBKDF2-SHA256 hash is stored (stdlib `hashlib.pbkdf2_hmac`, no new
+dependency for bcrypt/argon2 — the iteration count is tuned for "a real cost
+per guess," not for defending a password worth targeting with a GPU), never
+the password itself, and the file is chmod'd `0600` best-effort on save.
+
+**Sessions are stateless**, not a server-side table: the cookie is
+`{expiry}.{HMAC-SHA256(expiry, session_secret)}`, so validity is just
+recomputing the HMAC and comparing (`hmac.compare_digest`) plus an expiry
+check — no session store to leak, clean up, or lose on a backend restart. A
+random `session_secret` is stored alongside the password hash and rotated
+on every `set_password()` call, which is what invalidates *every* existing
+session everywhere at once on a password change, without tracking them
+individually.
+
+**Enforcement, two layers, because one doesn't reach everything:**
+- `@app.middleware("http")`'s `auth_gate` (`main.py`) covers every HTTP
+  request — page loads, static assets, all `/api/*` routes. A handful of
+  paths are exempt so there's somewhere to log in from at all:
+  `/login.html`, `/api/auth/status`, `/api/auth/login`, `/favicon.ico`.
+  Unauthenticated API/websocket-prefixed paths (`/api/*`, `/ws/*`) get a
+  plain 401; anything else (a page, a static asset) gets a 302 to
+  `/login.html`, since without a valid session nothing should render at all.
+- The `/ws/runs/{run_id}` websocket is checked separately, before
+  `.accept()`, because Starlette routes a "websocket"-scope connection
+  around `@app.middleware("http")` entirely — that decorator only ever sees
+  "http"-scope requests, so an unprotected websocket would have been the one
+  hole in an otherwise fully gated app. Closing before `.accept()` (rather
+  than accepting then closing) is what makes Starlette reject the connection
+  at the HTTP-upgrade handshake itself (a clean `403`, confirmed against a
+  real client in testing) instead of completing the handshake and closing
+  a second later.
+
+**The CLI is the only way in or out of this.** There is deliberately no
+in-browser "change password" or "turn this on" control — anyone who can
+already reach a shell on the machine running the backend can read/edit
+project files directly anyway, so gating password changes behind browser
+auth would add friction, not protection. `Run-RelionUS --set-password /
+--enable-auth / --disable-auth / --auth-status` all shell out to
+`python3 backend/auth.py <command>` and exit without starting the server;
+`--auth`/`--no-auth` instead set `RELION_US_FORCE_AUTH=1`/`0` for that one
+process only (`auth.is_enabled()` checks the env override before the
+persisted config) — handy for a one-off session the opposite of however
+it's normally configured, without touching the stored setting. Forcing "on"
+with no password ever set falls back to disabled rather than locking
+everyone out, since there would be nothing to check a login attempt
+against.
+
+**First-run prompt** lives in `Run-RelionUS` itself (bash), not in the
+Python backend: it checks `auth.py config-exists` (has *any* config file
+ever been written — declining still writes one, recording "asked, said no",
+so the prompt is genuinely one-time) and, only if stdin/stdout are both a
+TTY, asks interactively before the server starts. A non-interactive launch
+(cron, systemd, sbatch, anything with redirected stdin) skips the prompt
+without writing a config file at all, so the first person to run it by hand
+later still gets asked, rather than an automated first launch silently
+deciding "no" forever.
 
 ## References
 

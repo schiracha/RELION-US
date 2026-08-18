@@ -232,6 +232,11 @@ document.getElementById("jobSearch").addEventListener("input", applyJobFilters);
 
 document.getElementById("toggleSidebarBtn").addEventListener("click", () => {
   document.getElementById("sidebar").classList.toggle("hidden");
+  // Belt-and-suspenders alongside the ResizeObserver in ensureNetworkResizeObserver():
+  // that observer covers this already (the network canvas resizes as the
+  // sidebar's own CSS transition plays out), but re-rendering right away too
+  // means the boxes and lines never visibly disagree, even for a frame.
+  if (ccView === "network") renderNetwork();
 });
 
 const zoomSlider = document.getElementById("zoomSlider");
@@ -241,6 +246,26 @@ zoomSlider.addEventListener("input", () => {
   zoomValue.textContent = pct + "%";
   document.getElementById("layout").style.zoom = pct / 100;
 });
+
+// Password protection (backend/auth.py) is opt-in and managed from the
+// terminal only (Run-RelionUS --set-password / --enable-auth /
+// --disable-auth) -- there is no in-browser way to turn it on, set it, or
+// change it, just this one button to end the current session. If we got far
+// enough to run this script at all while it's enabled, the auth gate
+// middleware already required a valid session cookie to serve this page, so
+// "enabled" here just means "show the button", not a second auth check.
+fetch("/api/auth/status")
+  .then((r) => r.json())
+  .then((data) => {
+    if (!data.enabled) return;
+    const btn = document.getElementById("logoutBtn");
+    btn.classList.remove("hidden");
+    btn.addEventListener("click", async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+      window.location.replace("/login.html");
+    });
+  })
+  .catch(() => { /* status check is best-effort; no button if it fails */ });
 
 // --- Field rendering -------------------------------------------------------
 
@@ -1212,15 +1237,23 @@ loadCatalog().catch((err) => {
 
 const CC_VIEW_KEY = "relion_us_cc_view";
 const CC_DIRECTION_KEY = "relion_us_cc_direction";
+const CC_NETWORK_DIRECTION_KEY = "relion_us_cc_network_direction";
 let ccRuns = [];
 let ccView = "table";
 let ccSort = { key: "started_at", dir: "desc" };
 let ccDirection = "desc"; // timeline: 'desc' = newest first, 'asc' = oldest first
+// Network's own direction, kept separate from the timeline's: the network
+// view's whole point was oldest-at-top, branching down to what used it (see
+// the "network view of the job history" feature), so it defaults the other
+// way round from the timeline above -- 'asc' (oldest first, at the top).
+let ccNetworkDirection = "asc";
 try {
   const savedView = localStorage.getItem(CC_VIEW_KEY);
   if (savedView === "table" || savedView === "timeline" || savedView === "network") ccView = savedView;
   const savedDir = localStorage.getItem(CC_DIRECTION_KEY);
   if (savedDir === "asc" || savedDir === "desc") ccDirection = savedDir;
+  const savedNetDir = localStorage.getItem(CC_NETWORK_DIRECTION_KEY);
+  if (savedNetDir === "asc" || savedNetDir === "desc") ccNetworkDirection = savedNetDir;
 } catch (e) { /* fall back to defaults */ }
 
 function statusBadge(status) {
@@ -1417,7 +1450,14 @@ function renderNetwork() {
     rowRuns.forEach((run, i) => colOf.set(run.run_id, i));
   });
 
-  rows.forEach((rowRuns) => {
+  // Row 0 (the roots) is oldest, by construction (computeLineageRows). That's
+  // also this view's default top-to-bottom order; ccNetworkDirection flips
+  // which end sits on top, same as the Timeline direction button, without
+  // touching the row/column math above -- only the DOM order rows are
+  // appended in.
+  const visualRows = ccNetworkDirection === "desc" ? rows.slice().reverse() : rows;
+
+  visualRows.forEach((rowRuns) => {
     const rowEl = document.createElement("div");
     rowEl.className = "cc-network-row";
     rowRuns.forEach((run) => {
@@ -1441,21 +1481,29 @@ function renderNetwork() {
   // Edges, read back from the laid-out DOM. #ccNetworkRows is the SVG's
   // positioned ancestor (see style.css), so offsetLeft/Top on a node give
   // coordinates directly in the SVG's own coordinate space.
+  //
+  // Attachment is by which node is visually higher, not by which is the
+  // "parent" -- ccNetworkDirection can put the newest job on top, and the
+  // line should still run from the upper node's bottom edge to the lower
+  // node's top edge either way, rather than from a "parent" edge that might
+  // now be pointing the wrong way.
   const svgNS = "http://www.w3.org/2000/svg";
   const nodeEls = new Map();
   rowsEl.querySelectorAll(".cc-network-node").forEach((el) => nodeEls.set(el.dataset.runId, el));
-  const center = (el, edge) => ({
-    x: el.offsetLeft + el.offsetWidth / 2,
-    y: edge === "top" ? el.offsetTop : el.offsetTop + el.offsetHeight,
-  });
+  const centerX = (el) => el.offsetLeft + el.offsetWidth / 2;
+  const top = (el) => ({ x: centerX(el), y: el.offsetTop });
+  const bottom = (el) => ({ x: centerX(el), y: el.offsetTop + el.offsetHeight });
   ccRuns.forEach((run) => {
     const childEl = nodeEls.get(run.run_id);
     if (!childEl) return;
     (parentsOf.get(run.run_id) || new Set()).forEach((parentId) => {
       const parentEl = nodeEls.get(parentId);
       if (!parentEl) return;
-      const p = center(parentEl, "bottom");
-      const c = center(childEl, "top");
+      const parentIsHigher = parentEl.offsetTop <= childEl.offsetTop;
+      const upperEl = parentIsHigher ? parentEl : childEl;
+      const lowerEl = parentIsHigher ? childEl : parentEl;
+      const p = bottom(upperEl);
+      const c = top(lowerEl);
       const midY = (p.y + c.y) / 2;
       const path = document.createElementNS(svgNS, "path");
       path.setAttribute("d", `M ${p.x} ${p.y} C ${p.x} ${midY}, ${c.x} ${midY}, ${c.x} ${c.y}`);
@@ -1465,15 +1513,48 @@ function renderNetwork() {
   });
 }
 
+// Edges are computed from live DOM positions, so anything that moves the
+// job boxes without changing what data is shown (opening/closing the Jobs
+// sidebar, a browser window resize, the sidebar's own CSS transition still
+// settling) has to trigger a recompute, or the lines stay drawn at their old
+// coordinates while the boxes move out from under them. A ResizeObserver on
+// the canvas (which stretches to fill the view -- see style.css's min-width:
+// 100% -- so it resizes whenever the view's available width does) covers all
+// of those causes in one place, including the transition: it keeps firing
+// as the width animates and lands on the correct layout once it settles,
+// rather than reading a mid-transition snapshot.
+let networkResizeObserver = null;
+function ensureNetworkResizeObserver() {
+  if (networkResizeObserver || typeof ResizeObserver === "undefined") return;
+  const canvas = document.getElementById("ccNetworkCanvas");
+  if (!canvas) return;
+  let raf = null;
+  networkResizeObserver = new ResizeObserver(() => {
+    if (ccView !== "network") return;
+    if (raf) cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => renderNetwork());
+  });
+  networkResizeObserver.observe(canvas);
+}
+
 function renderCommandCenterViews() {
   document.getElementById("ccTableView").classList.toggle("hidden", ccView !== "table");
   document.getElementById("ccTimelineView").classList.toggle("hidden", ccView !== "timeline");
   document.getElementById("ccNetworkView").classList.toggle("hidden", ccView !== "network");
-  document.getElementById("ccDirectionBtn").style.display = ccView === "timeline" ? "inline-block" : "none";
-  document.getElementById("ccDirectionBtn").textContent = ccDirection === "desc" ? "Newest first ↓" : "Oldest first ↑";
+  // The direction button is shared between Timeline and Network (each keeps
+  // its own direction state -- see ccDirection vs. ccNetworkDirection above)
+  // rather than adding a second button, since only one of the two views is
+  // ever visible at a time.
+  const dirBtn = document.getElementById("ccDirectionBtn");
+  dirBtn.style.display = (ccView === "timeline" || ccView === "network") ? "inline-block" : "none";
+  if (ccView === "network") {
+    dirBtn.textContent = ccNetworkDirection === "asc" ? "Oldest first ↑" : "Newest first ↓";
+  } else {
+    dirBtn.textContent = ccDirection === "desc" ? "Newest first ↓" : "Oldest first ↑";
+  }
   if (ccView === "table") renderTable();
   else if (ccView === "timeline") renderTimeline();
-  else renderNetwork();
+  else { ensureNetworkResizeObserver(); renderNetwork(); }
 }
 
 async function refreshCommandCenter() {
@@ -1523,8 +1604,13 @@ document.querySelectorAll(".cc-view-btn").forEach((btn) => {
 document.querySelectorAll(".cc-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === ccView));
 
 document.getElementById("ccDirectionBtn").addEventListener("click", () => {
-  ccDirection = ccDirection === "desc" ? "asc" : "desc";
-  try { localStorage.setItem(CC_DIRECTION_KEY, ccDirection); } catch (e) { /* noop */ }
+  if (ccView === "network") {
+    ccNetworkDirection = ccNetworkDirection === "asc" ? "desc" : "asc";
+    try { localStorage.setItem(CC_NETWORK_DIRECTION_KEY, ccNetworkDirection); } catch (e) { /* noop */ }
+  } else {
+    ccDirection = ccDirection === "desc" ? "asc" : "desc";
+    try { localStorage.setItem(CC_DIRECTION_KEY, ccDirection); } catch (e) { /* noop */ }
+  }
   renderCommandCenterViews();
 });
 

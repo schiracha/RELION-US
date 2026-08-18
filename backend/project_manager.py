@@ -368,13 +368,21 @@ RECENTS_FILENAME = "recent_projects.json"
 RECENTS_LIMIT = 15
 
 
-def recents_path() -> Path:
-    """Location of the recent-projects cache. Honours XDG_CONFIG_HOME so it
-    lands wherever the user's other config does (and so tests can redirect it
-    without touching a real home directory)."""
+def config_root() -> Path:
+    """The user's RELION-US config directory: `$XDG_CONFIG_HOME/relion_us`,
+    or `~/.config/relion_us` if that's unset. Shared by everything that is
+    per-*user* rather than per-project -- the recent-projects cache here and
+    `backend/auth.py`'s login config -- so both land wherever the user's
+    other config does, and so tests can redirect either one (via
+    XDG_CONFIG_HOME) without touching a real home directory."""
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".config"
-    return root / "relion_us" / RECENTS_FILENAME
+    return root / "relion_us"
+
+
+def recents_path() -> Path:
+    """Location of the recent-projects cache."""
+    return config_root() / RECENTS_FILENAME
 
 
 def load_recent_projects() -> list[dict[str, Any]]:
