@@ -288,12 +288,50 @@ Point RELION-US at an existing project and it reads RELION's own
   any number whose directory is already on disk. In a project sitting at job011
   your next job is job012 — not job001 on top of somebody's Import.
 
-What it does **not** do: register its own runs back into
-`default_pipeline.star`. That file is RELION's own state, and writing it
-incorrectly would damage a project this app is only a companion to. The
-practical consequence is that the two tools each keep their own record — jobs
-you run here won't show in RELION's GUI, and RELION's counter won't know about
-them. If you work in both, check the job number before running.
+By default it does **not** register its own runs back into
+`default_pipeline.star` — that file is RELION's own state, and writing it
+incorrectly would damage a project this app is only a companion to. The two
+tools then keep separate records: jobs you run here won't show in RELION's
+GUI, and RELION's counter won't know about them. Turn on **⇄ RELION sync**
+(below) if you want to switch between the two GUIs on the same project.
+
+## ⇄ RELION sync (switching between the two GUIs)
+
+Click **⇄ RELION sync** in the top bar to turn on two-way sync for the
+current project. It's off by default, and it's a per-project setting, not a
+global one — the button is hidden entirely if `relion_pipeliner` isn't on
+this app's `PATH`.
+
+With it on, every job you run here is also registered in
+`default_pipeline.star`, so it shows up in RELION's own GUI too:
+
+- RELION-US still never writes `default_pipeline.star` itself. It writes the
+  job's settings to a `job.star` and hands that to RELION's own
+  `relion_pipeliner --addJobFromStar`, the same binary RELION's GUI would use
+  in your place. That binary decides the job number, creates the job
+  directory, works out the input/output node graph, and appends the process
+  to the pipeline — RELION-US only reads the result back.
+- The run then executes in the directory RELION allocated (renumbering the
+  draft command's `--o` if RELION picked a different slot than the one this
+  app proposed — this can happen if RELION's own GUI created a job in
+  between), with `--pipeline_control <job_dir>/` appended so the running
+  program reports its own completion the way RELION expects.
+- When the job finishes, RELION-US calls
+  `relion_pipeliner --check_job_completion` so the process's status in
+  `default_pipeline.star` (Succeeded/Failed/Aborted) is updated immediately,
+  instead of waiting for RELION's GUI to notice on its own.
+- If `relion_pipeliner` is busy — RELION's own GUI is mid-write and holding
+  the project's `.relion_lock` — registration waits (up to two minutes) for
+  the lock rather than skipping it. If it still can't register or can't
+  confirm completion, the run itself is unaffected; a note in that job's
+  output log says so and tells you to run
+  `relion_pipeliner --check_job_completion` yourself, or just open RELION's
+  GUI, to catch the pipeline file up.
+- Jobs already run here before you turned sync on are **not** added
+  retrospectively — sync only covers what happens from that point on.
+- Jobs RELION's own GUI already treats as read-only here (see above) are
+  unaffected either way; sync only changes what happens to jobs *you start in
+  RELION-US*.
 
 ## Command Center (job history)
 
@@ -459,10 +497,15 @@ parsing gaps introduced by a new RELION release show up as failures.
   in RELION's GUI"): abort, overwrite, rename, note and delete are refused on
   them, because RELION-US doesn't write `default_pipeline.star` and couldn't
   keep RELION's record straight afterwards.
-- RELION-US's own runs do **not** appear in RELION's pipeline file, so RELION's
-  GUI won't list them. It will also keep numbering from its own counter, which
-  can collide with a job RELION-US has already created — check the job number
-  if you go back and forth between the two.
+- By default, RELION-US's own runs do **not** appear in RELION's pipeline
+  file, so RELION's GUI won't list them, and RELION's own counter won't know
+  about them — check the job number if you go back and forth between the two.
+  Turn on **⇄ RELION sync** (above) to register runs into
+  `default_pipeline.star` as they happen instead.
+- Sync depends on `relion_pipeliner` being on RELION-US's `PATH` and, per
+  registration, on the project's `.relion_lock` being free within about two
+  minutes — if RELION's own GUI is mid-operation on the same project, a
+  registration can wait that long before the run starts.
 - Job history persists run *summaries* (command, status, timestamps) per
   project, not full stdout/stderr transcripts — reopening a job from
   history after the backend has restarted shows its last known status but

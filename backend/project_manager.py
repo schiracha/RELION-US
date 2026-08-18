@@ -72,9 +72,11 @@ def is_relion_project(path: Path) -> bool:
 # job001 in a project already on job012 -- i.e. draft an output path pointing
 # straight at somebody's existing results.
 #
-# RELION-US reads this file and never writes it. Registering its own runs back
-# into RELION's pipeline state is RELION's job, and getting it wrong would
-# corrupt a project this app is only a companion to.
+# This module only ever *reads* the file. When two-way sync is on, RELION-US's
+# own runs do get recorded in it -- but through RELION's own `relion_pipeliner`
+# binary, never by writing the STAR format here (see pipeline_bridge.py for
+# why: five linked tables, a node graph computed by RELION's C++, and a lock
+# protocol shared with any open RELION GUI).
 #
 # Schema verified against RELION's PipeLine::write() (src/pipeliner.cpp) and
 # the label table in src/metadata_label.h.
@@ -415,6 +417,60 @@ def forget_project(project_dir: str | Path) -> None:
     _write_recents([
         e for e in load_recent_projects() if e["path"] not in (resolved, raw)
     ])
+
+
+# --------------------------------------------------------------------------
+# Two-way pipeline sync, per project
+#
+# Opt-in per project rather than globally: whether RELION-US should add entries
+# to `default_pipeline.star` is a property of the project, not of the machine.
+# A colleague's project you were asked to look at should not gain rows in
+# RELION's own record because you ran one job in it.
+# --------------------------------------------------------------------------
+
+SETTINGS_FILENAME = "settings.json"
+PIPELINE_SYNC_KEY = "pipeline_sync"
+
+
+def _settings_path(project_dir: Path) -> Path:
+    return Path(project_dir) / MARKER_DIRNAME / SETTINGS_FILENAME
+
+
+def load_settings(project_dir: Path) -> dict[str, Any]:
+    p = _settings_path(project_dir)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_settings(project_dir: Path, settings: dict[str, Any]) -> None:
+    marker = Path(project_dir) / MARKER_DIRNAME
+    try:
+        marker.mkdir(parents=True, exist_ok=True)
+        _settings_path(project_dir).write_text(
+            json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError:
+        # A read-only project must still be usable; the setting simply won't
+        # persist past this backend session.
+        pass
+
+
+def pipeline_sync_setting(project_dir: Path) -> bool:
+    """Whether this project wants RELION-US's runs recorded in RELION's own
+    pipeline. Default off: writing another tool's state file is something to
+    ask for, not something to inherit."""
+    return bool(load_settings(project_dir).get(PIPELINE_SYNC_KEY, False))
+
+
+def set_pipeline_sync(project_dir: Path, enabled: bool) -> bool:
+    settings = load_settings(project_dir)
+    settings[PIPELINE_SYNC_KEY] = bool(enabled)
+    save_settings(project_dir, settings)
+    return pipeline_sync_setting(project_dir)
 
 
 def _history_path(project_dir: Path) -> Path:

@@ -107,6 +107,11 @@ Endpoints:
                                               pick a different folder" popup
   POST /api/project/init                  -> mark a folder as a new RELION-US
                                               project and switch to it
+  GET  /api/project/pipeline-sync         -> is this project's history shared
+                                              with RELION's own
+                                              default_pipeline.star, and is
+                                              relion_pipeliner available
+  POST /api/project/pipeline-sync         -> turn that on/off for this project
   GET  /api/project/recent                -> recently opened project dirs,
                                               most recent first, for the
                                               Change Project dialog's
@@ -140,6 +145,7 @@ from starlette.background import BackgroundTask
 
 import job_registry
 import progress
+import pipeline_bridge
 import program_help
 import project_manager
 import viz
@@ -552,6 +558,46 @@ def browse_project(req: ProjectPathRequest):
         raise HTTPException(status_code=404, detail=f"No such directory: {target}")
     except NotADirectoryError:
         raise HTTPException(status_code=400, detail=f"Not a directory: {target}")
+
+
+@app.get("/api/project/pipeline-sync")
+def get_pipeline_sync():
+    """Whether this project's jobs are recorded in RELION's own
+    `default_pipeline.star`, so both GUIs see the same history.
+
+    `available` is whether `relion_pipeliner` is installed at all — without it
+    there is no safe way to touch that file, since RELION's own binary is what
+    computes the node graph and honours the lock protocol.
+    """
+    pd = run_manager.project_dir
+    return {
+        "enabled": project_manager.pipeline_sync_setting(pd),
+        "available": pipeline_bridge.is_available(),
+        "pipeliner_path": pipeline_bridge.pipeliner_path(),
+        "locked": pipeline_bridge.is_locked(pd),
+        "project": str(pd),
+    }
+
+
+class PipelineSyncRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/project/pipeline-sync")
+def set_pipeline_sync(req: PipelineSyncRequest):
+    pd = run_manager.project_dir
+    if req.enabled and not pipeline_bridge.is_available():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{pipeline_bridge.PIPELINER_BINARY} is not on this machine's PATH. "
+                "It ships with RELION, and RELION-US uses it rather than writing "
+                "default_pipeline.star itself."
+            ),
+        )
+    enabled = project_manager.set_pipeline_sync(pd, req.enabled)
+    return {"enabled": enabled, "available": pipeline_bridge.is_available(),
+            "locked": pipeline_bridge.is_locked(pd), "project": str(pd)}
 
 
 @app.get("/api/project/recent")

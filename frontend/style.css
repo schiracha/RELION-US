@@ -86,7 +86,7 @@ html, body {
 }
 #toggleSidebarBtn:hover { background: var(--accent-dim); }
 #appTitle { font-weight: 600; letter-spacing: .02em; }
-#changeProjectBtn, #visualizeBtn, #themeBtn {
+#changeProjectBtn, #visualizeBtn, #themeBtn, #pipelineSyncBtn {
   background: var(--panel-alt);
   color: var(--text);
   border: 1px solid var(--border);
@@ -95,7 +95,11 @@ html, body {
   cursor: pointer;
   font-size: 12px;
 }
-#changeProjectBtn:hover, #visualizeBtn:hover, #themeBtn:hover { background: var(--accent-dim); }
+#changeProjectBtn:hover, #visualizeBtn:hover, #themeBtn:hover, #pipelineSyncBtn:hover { background: var(--accent-dim); }
+/* Hidden outright when relion_pipeliner isn't installed -- a control that
+   cannot do anything is worse than no control. */
+#pipelineSyncBtn.hidden { display: none; }
+#pipelineSyncBtn.active { border-color: var(--ok); color: var(--ok); }
 #projectDirLabel { color: var(--text-dim); font-size: 12px; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 #zoomControl { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
 #zoomValue { width: 42px; display: inline-block; }

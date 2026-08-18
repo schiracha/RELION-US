@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import job_catalog
+import pipeline_bridge
 import project_manager
 
 STATUS_PENDING = "pending"
@@ -419,6 +420,58 @@ class JobRunManager:
             if links:
                 r["input_links"] = links
 
+    # ---- Two-way sync with RELION's own pipeline ------------------------
+    #
+    # Off unless relion_pipeliner is installed AND the project has opted in
+    # (project_manager.pipeline_sync_setting). Both halves matter: without the
+    # binary there is no safe way to touch default_pipeline.star, and a project
+    # somebody only wants to look at should not gain new entries in RELION's
+    # record because a job was run here.
+
+    def pipeline_sync_enabled(self, project_dir: Optional[Path] = None) -> bool:
+        pd = Path(project_dir) if project_dir is not None else self.project_dir
+        return (project_manager.pipeline_sync_setting(pd)
+                and pipeline_bridge.is_available())
+
+    def _register_in_relion_pipeline(
+        self, project_dir: Path, internal_name: str, field_values: dict
+    ) -> Optional[dict]:
+        """Ask RELION to allocate and record this job. None on any failure.
+
+        Failing back to this app's own numbering is deliberate: a job the user
+        asked to run should still run when the pipeline is momentarily locked
+        by an open RELION GUI, or when relion_pipeliner errors on a job type it
+        does not recognise. The run then simply isn't in RELION's record, which
+        is the behaviour without two-way sync at all, and the reason is put in
+        the run's own output rather than swallowed.
+        """
+        meta = job_catalog.JOB_CATALOG.get(internal_name)
+        if not meta:
+            return None
+        type_label = meta[0]
+        try:
+            import job_registry
+
+            options_by_key = {
+                o["key"]: o for o in job_registry.raw_job(internal_name).get("options", [])
+            }
+        except Exception:
+            options_by_key = {}
+        try:
+            return pipeline_bridge.register_job(
+                project_dir, type_label, field_values or {}, options_by_key)
+        except pipeline_bridge.PipelineBridgeError as exc:
+            self._pipeline_sync_error = str(exc)
+            return None
+
+    def sync_completion_to_relion(self, project_dir: Optional[Path] = None) -> bool:
+        """Let RELION notice that a job finished (it reads the exit files the
+        `--pipeline_control` flag makes the program write)."""
+        pd = Path(project_dir) if project_dir is not None else self.project_dir
+        if not self.pipeline_sync_enabled(pd):
+            return False
+        return pipeline_bridge.check_job_completion(pd)
+
     def _next_job_number(self, project_dir: Path, internal_name: Optional[str] = None) -> int:
         """RELION's own job numbering is a single counter for the whole
         project, shared across every job type (see job_catalog.py's
@@ -564,8 +617,21 @@ class JobRunManager:
             alias, note = target["alias"], target["note"]
         else:
             run_id = self.new_run_id()
-            job_number = self._next_job_number(project_dir, internal_name)
-            authoritative_subdir = f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
+            registered = None
+            if self.pipeline_sync_enabled(project_dir):
+                # Two-way mode: RELION's own pipeliner allocates the job number,
+                # creates the directory and records the process (with its node
+                # graph) in default_pipeline.star. Whatever slot it gives back is
+                # authoritative from here on -- guessing our own number while the
+                # pipeline is also allocating them is how the two records drift.
+                registered = self._register_in_relion_pipeline(
+                    project_dir, internal_name, field_values or {})
+            if registered:
+                job_number = registered["job_number"]
+                authoritative_subdir = registered["process_name"]
+            else:
+                job_number = self._next_job_number(project_dir, internal_name)
+                authoritative_subdir = f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
             # `subdir` is the output path the draft embedded in the command's
             # `--o`/`--output-directory` (the prospective number shown when the
             # popup opened). If another job got recorded between then and now,
@@ -582,6 +648,18 @@ class JobRunManager:
                     f"[RELION-US] Output directory advanced to {authoritative_subdir}/ "
                     f"({proposed} was already taken); command's output path updated to match."
                 )
+            if registered:
+                # RELION's own completion mechanism: the program writes an exit
+                # file into this directory, which `relion_pipeliner
+                # --check_job_completion` reads to move the process out of
+                # "Running". Without the flag the job would sit as Running in
+                # RELION's GUI forever.
+                command = pipeline_bridge.pipeline_control_args(command, authoritative_subdir)
+                pipeline_note = (
+                    f"[RELION-US] Registered in RELION's pipeline as "
+                    f"{authoritative_subdir}/ — it will appear in RELION's own GUI."
+                )
+                rewrite_note = (rewrite_note + "\n" + pipeline_note) if rewrite_note else pipeline_note
         cwd.mkdir(parents=True, exist_ok=True)
 
         detect_text = command + " " + " ".join(str(v) for v in (field_values or {}).values())
@@ -710,6 +788,20 @@ class JobRunManager:
             run.ended_at = time.time()
             run.proc = None
             self._persist(run)
+            # Let RELION update its own record of this job, if two-way sync is
+            # on. Off the event loop: relion_pipeliner takes the pipeline lock
+            # and can wait on an open RELION GUI for up to a minute, which would
+            # otherwise stall every other websocket in the app.
+            if self.pipeline_sync_enabled(Path(run.project_dir)):
+                synced = await asyncio.to_thread(
+                    self.sync_completion_to_relion, Path(run.project_dir))
+                if not synced:
+                    note = ("[RELION-US] Could not update RELION's pipeline with this "
+                            "job's final status. The job itself is unaffected; run "
+                            "`relion_pipeliner --check_job_completion` in the project, "
+                            "or open RELION's GUI, to refresh it.")
+                    run.stdout_lines.append(note)
+                    await run.broadcast({"type": "stdout", "line": note})
             await run.broadcast(
                 {"type": "status", "status": run.status, "exit_code": exit_code}
             )

@@ -1361,6 +1361,63 @@ document.querySelectorAll("#ccTable th[data-sort]").forEach((th) => {
   });
 });
 
+// --- Two-way sync with RELION's own pipeline ---------------------------------
+// When on, a job run here is registered in the project's default_pipeline.star
+// (through RELION's own relion_pipeliner, never by writing that file directly),
+// so RELION's GUI lists it too and you can move between the two.
+
+const pipelineSyncBtn = document.getElementById("pipelineSyncBtn");
+let pipelineSyncState = { enabled: false, available: false, locked: false };
+
+function renderPipelineSyncButton() {
+  const { enabled, available, locked } = pipelineSyncState;
+  // Hidden entirely when relion_pipeliner isn't installed: a control that
+  // can't do anything is worse than no control.
+  pipelineSyncBtn.classList.toggle("hidden", !available);
+  if (!available) return;
+  pipelineSyncBtn.textContent = enabled ? "⇄ RELION sync: on" : "⇄ RELION sync: off";
+  pipelineSyncBtn.classList.toggle("active", enabled);
+  pipelineSyncBtn.title = enabled
+    ? "Jobs run here are recorded in this project's default_pipeline.star, so RELION's own GUI lists them too."
+      + (locked ? " (RELION currently holds the pipeline lock — updates will wait for it.)" : "")
+    : "Jobs run here are tracked only by RELION-US. Turn on to record them in RELION's own pipeline as well.";
+}
+
+async function refreshPipelineSync() {
+  try {
+    pipelineSyncState = await api("/api/project/pipeline-sync");
+  } catch (err) {
+    pipelineSyncState = { enabled: false, available: false, locked: false };
+  }
+  renderPipelineSyncButton();
+}
+
+pipelineSyncBtn.addEventListener("click", async () => {
+  const turningOn = !pipelineSyncState.enabled;
+  if (turningOn) {
+    const ok = await confirmDialog(
+      "Record jobs run here in this project's default_pipeline.star?\n\n" +
+      "RELION's own GUI will then list them, so you can switch between the two. " +
+      "RELION-US doesn't write that file itself — it asks RELION's own " +
+      "relion_pipeliner to add each job, which is what computes the job number, " +
+      "creates the directory and works out the input/output graph.\n\n" +
+      "Jobs already run here are not added retrospectively.",
+      { confirmLabel: "Turn on" }
+    );
+    if (!ok) return;
+  }
+  try {
+    pipelineSyncState = await api("/api/project/pipeline-sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: turningOn }),
+    });
+  } catch (err) {
+    errorDialog("Could not change RELION sync: " + err.message);
+  }
+  renderPipelineSyncButton();
+});
+
 // --- Project switching -------------------------------------------------
 
 const projectDirLabel = document.getElementById("projectDirLabel");
@@ -1550,7 +1607,9 @@ function closeProjectModal() {
 
 async function onProjectChanged() {
   await refreshProjectLabel();
+refreshPipelineSync();
   await refreshCommandCenter();
+  await refreshPipelineSync();   // the setting is per project
 }
 
 changeProjectBtn.addEventListener("click", openProjectModal);

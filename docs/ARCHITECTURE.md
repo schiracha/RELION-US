@@ -69,8 +69,12 @@ relion_us/
 │   ├── job_catalog.py       # curated display metadata (names, categories)
 │   ├── job_runner.py        # executes the approved command exactly as given;
 │   │                        #   per-project run history persistence
+│   ├── pipeline_bridge.py   # two-way default_pipeline.star sync via the real
+│   │                        #   relion_pipeliner binary (see below); never
+│   │                        #   writes RELION's pipeline format itself
 │   ├── project_manager.py   # RELION-project detection, project switching,
-│   │                        #   history load/save (see "Change Project" below)
+│   │                        #   history load/save (see "Change Project" below),
+│   │                        #   per-project settings incl. pipeline sync on/off
 │   ├── custom_jobs.py       # wires the 4 converters in as Job types
 │   ├── viz.py               # tomogram/pick VIEWER (not a job): mrcfile mmap ->
 │   │                        #   PNG slices + pick JSON (see "Visualizer" below)
@@ -340,6 +344,69 @@ project rather than a hand-made one:
   records `relion.class2d.em` where `job_catalog` holds `relion.class2d`.
   `internal_name_for_label()` matches on the longest base prefix. The same bug
   had been quietly disabling the SPA/Tomo auto-detect on every real project.
+
+### Two-way pipeline sync (`pipeline_bridge.py`)
+
+Adoption (above) is read-only: it lets RELION-US see a project RELION's GUI
+built, but a job run in RELION-US still didn't exist as far as
+`default_pipeline.star` was concerned. `pipeline_bridge.py` closes that loop,
+governed by a per-project, off-by-default setting
+(`project_manager.pipeline_sync_setting()` / `set_pipeline_sync()`, stored in
+`.relion_us/settings.json`) so nothing changes for a project unless the user
+opts in via **⇄ RELION sync** in the top bar.
+
+The standing rule from adoption still holds: **this app never writes
+`default_pipeline.star` itself.** Sync doesn't relax that — it delegates the
+write to RELION's own `relion_pipeliner` binary instead, the same program
+RELION's own GUI shells out to internally:
+
+- `write_job_star()` builds a `job.star` — `data_job` (`_rlnJobTypeLabel`,
+  `_rlnJobIsContinue`, `_rlnJobIsTomo`) plus a `data_joboptions_values` loop —
+  from the job's field values, using the same booleans-as-`"Yes"/"No"`
+  convention as RELION's `JobOption::getBoolean()`.
+- `register_job()` writes that to a temp file and calls
+  `relion_pipeliner --addJobFromStar <path> [--setJobAlias <alias>]` with
+  `cwd` set to the project directory. That binary — not this code — decides
+  the job number, creates `<JobDir>/jobNNN/`, computes the input/output node
+  graph by actually running the job's real command-builder, and appends the
+  process to the pipeline. `register_job()` diffs the pipeline before/after
+  the call to find which process is new, and returns its process name and job
+  number.
+- `job_runner.start_subprocess_job()` calls this *before* picking an output
+  directory. If registration succeeds, RELION's allocated
+  `<JobDir>/jobNNN` becomes authoritative — the draft command's `--o` is
+  rewritten to match if this app's own proposed number differed (possible if
+  RELION's GUI created a job in the same project in between). If registration
+  fails (`PipelineBridgeError` — binary missing, timeout, non-zero exit), the
+  run falls back to this app's own numbering, exactly as if sync were off; the
+  job still runs, it just isn't in RELION's pipeline.
+- `pipeline_control_args()` appends `--pipeline_control <job_dir>/` (or the
+  hyphenated `--pipeline-control` some of RELION's newer Python tomo tools
+  expect) to the command, mirroring `RelionJob::prepareFinalCommand()`. This is
+  what makes the running program write a `RELION_JOB_EXIT_*` file into its own
+  job directory on exit — RELION's completion signal, not this app's.
+- On completion, `job_runner._run_subprocess()`'s `finally` block calls
+  `relion_pipeliner --check_job_completion`, which reads any
+  `RELION_JOB_EXIT_SUCCESS` / `_FAILURE` / `_ABORTED` file and flips that
+  process's status in the pipeline immediately, rather than waiting for
+  RELION's own GUI to poll and notice.
+- Every `relion_pipeliner` call runs off the event loop
+  (`asyncio.to_thread`) because it can block for a while: `PipeLine::read()`
+  waits on the project's `.relion_lock` mutex — an atomic-mkdir lock RELION's
+  own GUI also takes — retrying for up to a minute before giving up.
+  `pipeline_bridge.py` sets a 120s subprocess timeout, comfortably above that.
+- Custom jobs (the four converters) are never registered — they have no
+  RELION job type label to write into `job.star`, and `_register_in_relion_pipeline`
+  short-circuits on an unknown `internal_name`.
+
+`backend/tests/fake_relion_pipeliner.py` stands in for the real binary in
+tests — it implements just the two subcommands above against a simplified
+pipeline format, explicitly documented in its own docstring as a test double
+rather than a reimplementation (it doesn't compute the real node graph or take
+the lock). `test_pipeline_bridge.py` covers job.star writing, registration
+(numbering, alias, unknown job type, missing binary), completion status
+flips, the per-project setting, and the runner's fallback behavior when
+`PipelineBridgeError` is raised.
 
 ### SPA / Tomo / All jobs-list toggle
 
