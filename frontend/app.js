@@ -1618,8 +1618,14 @@ function renderCommandCenterViews() {
   // same state-vs-action split themeBtn uses.
   const dirBtn = document.getElementById("ccDirectionBtn");
   dirBtn.style.display = (ccView === "timeline" || ccView === "network") ? "inline-block" : "none";
+  // No "Sort:" prefix -- a bare verb reads as an action to take, exactly the
+  // ambiguity this label exists to avoid; the label IS the current setting.
+  // Arrow follows the flow of time, not screen position: newest first is
+  // "moving further back as you go" (up, against time) and oldest first is
+  // "moving forward as you go" (down, with time) -- so newest points up and
+  // oldest points down, regardless of which view puts which end on top.
   const newestFirst = ccView === "network" ? ccNetworkDirection === "desc" : ccDirection === "desc";
-  dirBtn.textContent = newestFirst ? "Sort: Newest first ↓" : "Sort: Oldest first ↑";
+  dirBtn.textContent = newestFirst ? "Newest first ↑" : "Oldest first ↓";
   dirBtn.title = newestFirst
     ? "Currently showing newest jobs first — click to show oldest first"
     : "Currently showing oldest jobs first — click to show newest first";

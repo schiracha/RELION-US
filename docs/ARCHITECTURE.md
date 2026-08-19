@@ -827,9 +827,15 @@ one button serves both) just reverses which end of the already-computed
 Because edge attachment (above) is by on-screen position rather than by
 parent/child, the lines don't need to know direction flipped at all. The
 button's label always states the *current* setting rather than the action a
-click performs — `"Sort: Newest first ↓"` / `"Sort: Oldest first ↑"`, the
-same state-vs-action split as `themeBtn` (label = current state, `title` =
-what clicking does).
+click performs — `"Newest first ↑"` / `"Oldest first ↓"` (no leading verb
+like "Sort:"; a bare imperative reads as an action to take, exactly the
+ambiguity the label exists to avoid), the same state-vs-action split as
+`themeBtn` (label = current state, `title` = what clicking does). The arrow
+follows the flow of time rather than which end of the list is on top in a
+given view: newest-first points up (further back in time as you read down),
+oldest-first points down (forward in time as you read down) — consistent
+between Timeline and Network even though the two views put opposite ends on
+top by default.
 
 ## Tomogram / particle-pick visualizer
 
