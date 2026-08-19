@@ -542,3 +542,67 @@ def draft_output_flag(internal_name: str) -> str:
     """RELION's output-directory flag for this job type (`--o` for most,
     `--output-directory` for the RELION-5 Python tomo tools)."""
     return DRAFT_OUTPUT_FLAG.get(internal_name, DRAFT_OUTPUT_FLAG_DEFAULT)
+
+
+# --------------------------------------------------------------------------
+# Output-value suffix, per job type
+# --------------------------------------------------------------------------
+#
+# For most jobs RELION's `--o`/`--output-directory` value is the bare job
+# directory (e.g. `Import/job001/`), which is what the generic draft builder
+# already emits. But several jobs append a literal suffix to `outputname` to
+# form a FILE ROOTNAME PREFIX rather than a plain folder -- confirmed by
+# reading each job's getCommands*Job() in src/pipeline_jobs.cpp (RELION
+# cloned 2026-08-14). Missing this is what produces output files like
+# `_it000_class001.mrc` instead of `run_it000_class001.mrc`: this app was
+# always emitting the bare directory with no suffix, for every job,
+# unconditionally.
+#
+# The five classic iterative-refinement jobs all set `fn_run = "run"` in
+# their DEFAULT (non-continuation) branch -- RELION-US never models a
+# "continue this job" run (see the `!is_continue` note above), so "run" is
+# always correct here:
+#   Class2D    -- src/pipeline_jobs.cpp ~3183  (command += " --o " + outputname + fn_run;)
+#   Inimodel   -- src/pipeline_jobs.cpp ~3466  (same pattern)
+#   Class3D    -- src/pipeline_jobs.cpp ~3860  (same pattern)
+#   Autorefine -- src/pipeline_jobs.cpp ~4351  (same pattern)
+#   MultiBody  -- src/pipeline_jobs.cpp ~4736-4744, `else` (non-continue)
+#                 branch: fn_run = "run"; command += " --o " + outputname + fn_run;
+#                 (MultiBody's SECOND command, appending "analyse" to launch
+#                 relion_flex_analyse, is conditional on further GUI state
+#                 and is deliberately NOT reproduced here -- left for the
+#                 user to hand-edit, consistent with this project's policy
+#                 against guessing at real per-job branching.)
+#
+# Two more jobs append a fixed, unconditional literal (verified by reading
+# each function in full -- no branch controls this line):
+#   Maskcreate  -- src/pipeline_jobs.cpp ~4942 (command += " --o " + outputname + "mask.mrc";)
+#   Postprocess -- src/pipeline_jobs.cpp ~5340 (command += " --o " + outputname + "postprocess";)
+#
+# Deliberately NOT included (mode-branched or otherwise not safely
+# reducible to a single default suffix -- left for hand-editing rather than
+# risking a wrong guess):
+#   Joinstar   -- suffix depends on which of fn_part/fn_mic/fn_mov is filled
+#                 in (src/pipeline_jobs.cpp ~5069/5103/5137).
+#   Localres   -- only appends "relion" in the do_relion_locres branch; the
+#                 default ResMap branch uses a different program entirely
+#                 (src/pipeline_jobs.cpp ~5510).
+#   Select     -- the class_ranker branch appends bare `outputname` (no
+#                 suffix) plus two EXTRA fixed flags, not a suffix change
+#                 (src/pipeline_jobs.cpp ~2926).
+DRAFT_OUTPUT_SUFFIX: dict[str, str] = {
+    "Class2D": "run",
+    "Inimodel": "run",
+    "Class3D": "run",
+    "Autorefine": "run",
+    "MultiBody": "run",
+    "Maskcreate": "mask.mrc",
+    "Postprocess": "postprocess",
+}
+
+
+def draft_output_suffix(internal_name: str) -> Optional[str]:
+    """Literal suffix RELION appends to the output directory to form a file
+    rootname prefix (e.g. "run" -> `Refine3D/job001/run`), or None when the
+    bare directory is correct. See DRAFT_OUTPUT_SUFFIX."""
+    return DRAFT_OUTPUT_SUFFIX.get(internal_name)

@@ -636,6 +636,48 @@ class JobRunManager:
             cwd = Path(target["cwd"])
             job_number = target["job_number"]
             alias, note = target["alias"], target["note"]
+            # Overwrite reuses the SAME slot RELION already knows about (see
+            # the docstring above) -- unlike a fresh run, there is no new
+            # number to allocate, so _register_in_relion_pipeline() (which
+            # always calls --addJobFromStar and gets back a NEW number) is
+            # deliberately NOT called here; doing so would create a second,
+            # mismatched pipeline entry instead of reusing this job's own.
+            #
+            # Two things this branch used to skip entirely, both fixed here:
+            #   1. The command's `--o` path was trusted verbatim from
+            #      whatever was passed in, with no check against the actual
+            #      `cwd` this run uses -- unlike the fresh-run branch below,
+            #      which always re-verifies. Apply the same defensive
+            #      rewrite so a stale/mismatched path in the (user-editable)
+            #      command box can't send output somewhere `cwd` doesn't
+            #      point, which is consistent with a user having needed to
+            #      type an absolute path to work around a relative one that
+            #      didn't resolve as expected.
+            #   2. `--pipeline_control` was never appended, even when sync
+            #      is on -- this is what makes a relion_ program write the
+            #      exit-status files `--check_job_completion` reads (see
+            #      pipeline_bridge.pipeline_control_args), and its absence
+            #      is why an overwritten job could sit stuck in RELION's own
+            #      GUI. This only takes effect for a job RELION's pipeline
+            #      already knows about, matching RELION's real "Overwrite"
+            #      semantics (gui_mainwindow.cpp's cb_toggle_overwrite_
+            #      continue reuses the existing pipeline entry, it never
+            #      adds a new one).
+            try:
+                authoritative_subdir = str(cwd.relative_to(project_dir))
+            except ValueError:
+                authoritative_subdir = None
+            if authoritative_subdir:
+                proposed = (subdir or "").rstrip("/")
+                command, rewritten = _rewrite_output_subdir(command, proposed, authoritative_subdir)
+                if rewritten:
+                    rewrite_note = (
+                        f"[RELION-US] Output directory in the command didn't match "
+                        f"this job's actual directory ({authoritative_subdir}/); "
+                        f"command's output path updated to match."
+                    )
+                if self.pipeline_sync_enabled(project_dir):
+                    command = pipeline_bridge.pipeline_control_args(command, authoritative_subdir)
         else:
             run_id = self.new_run_id()
             registered = None
@@ -759,7 +801,30 @@ class JobRunManager:
             # Abort arrived while this process was still being spawned.
             self._terminate_process_group(run)
 
-        async def pump(stream, sink: list[str], msg_type: str):
+        # RELION's own GUI always tees each job's stdout/stderr into
+        # run.out/run.err inside the job's output directory -- it's not
+        # something relion_refine (etc.) writes itself, it's shell
+        # redirection RELION's GUI appends to the command before running it
+        # (RelionJob::prepareFinalCommand, src/pipeline_jobs.cpp ~line 760:
+        # `one_command += " >> " + outputname + "run.out 2>> " + outputname
+        # + "run.err";`, unconditional whenever the command doesn't already
+        # contain a redirect). RELION-US instead streams stdout/stderr live
+        # over the websocket via asyncio PIPEs -- shell-redirecting the
+        # command itself would swallow that live view -- so mirror the same
+        # convention here by teeing each line to a file as it's read, in
+        # append mode (">>"), matching RELION's own append (relevant for
+        # Overwrite: a re-run's output accumulates, it doesn't replace).
+        # Best-effort: a logging failure must never take down the job.
+        def _open_log(name: str):
+            try:
+                return open(Path(run.cwd) / name, "a", buffering=1, errors="replace")
+            except OSError:
+                return None
+
+        stdout_log = _open_log("run.out")
+        stderr_log = _open_log("run.err")
+
+        async def pump(stream, sink: list[str], msg_type: str, logfile):
             while True:
                 try:
                     line = await stream.readline()
@@ -776,6 +841,11 @@ class JobRunManager:
                     break
                 decoded = line.decode(errors="replace").rstrip("\n")
                 sink.append(decoded)
+                if logfile is not None:
+                    try:
+                        logfile.write(decoded + "\n")
+                    except OSError:
+                        pass
                 await run.broadcast({"type": msg_type, "line": decoded})
 
         # try/finally so the run ALWAYS reaches a terminal status and is
@@ -784,8 +854,8 @@ class JobRunManager:
         exit_code = None
         try:
             await asyncio.gather(
-                pump(proc.stdout, run.stdout_lines, "stdout"),
-                pump(proc.stderr, run.stderr_lines, "stderr"),
+                pump(proc.stdout, run.stdout_lines, "stdout", stdout_log),
+                pump(proc.stderr, run.stderr_lines, "stderr", stderr_log),
             )
             exit_code = await proc.wait()
         except Exception as exc:  # noqa: BLE001
@@ -793,6 +863,12 @@ class JobRunManager:
             run.stderr_lines.append(msg)
             await run.broadcast({"type": "stderr", "line": msg})
         finally:
+            for logfile in (stdout_log, stderr_log):
+                if logfile is not None:
+                    try:
+                        logfile.close()
+                    except OSError:
+                        pass
             if exit_code is None:
                 # never got a clean wait() -- make sure the child is reaped
                 try:

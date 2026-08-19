@@ -240,3 +240,100 @@ def test_abort_kills_the_whole_process_group(tmp_path):
     assert before >= 1, "test process never started"
     assert after == 0, f"{after} process(es) survived the abort"
     assert run.status == "aborted"
+
+
+def test_subprocess_output_is_teed_to_run_out_and_run_err(tmp_path):
+    """RELION's own GUI always tees a job's stdout/stderr into run.out/
+    run.err inside the job directory (RelionJob::prepareFinalCommand,
+    src/pipeline_jobs.cpp ~line 760). RELION-US streams live over the
+    websocket instead of shell-redirecting the command itself, but it must
+    still leave the same two files behind -- other RELION tooling (and
+    users used to RELION's own GUI) expect them there."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        sub = manager.prospective_subdir("Import")
+        run = await manager.start_subprocess_job(
+            "Import", "Import",
+            "echo stdout-line-1; echo stderr-line-1 1>&2",
+            subdir=sub,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == STATUS_COMPLETED, run.stderr_lines
+    out_text = (Path(run.cwd) / "run.out").read_text()
+    err_text = (Path(run.cwd) / "run.err").read_text()
+    assert "stdout-line-1" in out_text
+    assert "stderr-line-1" in err_text
+
+
+def test_overwrite_run_out_appends_rather_than_truncates(tmp_path):
+    """RELION appends (">>") to run.out/run.err, not overwrites -- a
+    re-run's output accumulates on top of the previous attempt's, matching
+    what RELION's own Overwrite does."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        sub = manager.prospective_subdir("Import")
+        first = await manager.start_subprocess_job(
+            "Import", "Import", "echo first-attempt", subdir=sub,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if first.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        second = await manager.start_subprocess_job(
+            "Import", "Import", "echo second-attempt",
+            subdir=sub, overwrite_run_id=first.run_id,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if second.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return first, second
+
+    first, second = asyncio.run(go())
+    assert second.status == STATUS_COMPLETED, second.stderr_lines
+    out_text = (Path(second.cwd) / "run.out").read_text()
+    assert "first-attempt" in out_text
+    assert "second-attempt" in out_text
+
+
+def test_overwrite_rewrites_a_mismatched_output_path(tmp_path):
+    """The command handed to Overwrite is trusted from the (user-editable)
+    command box; if its --o path doesn't match the job's real directory
+    (e.g. a stale value), it must be corrected the same way a fresh run's
+    stale prospective number is -- otherwise RELION writes output somewhere
+    the Command Center isn't tracking, or fails outright."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        sub = manager.prospective_subdir("Import")
+        first = await manager.start_subprocess_job(
+            "Import", "Import", "echo hi", subdir=sub,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if first.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        second = await manager.start_subprocess_job(
+            "Import", "Import", "echo hi --o Import/wrongdir/",
+            subdir="Import/wrongdir", overwrite_run_id=first.run_id,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if second.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return second
+
+    second = asyncio.run(go())
+    assert "Import/job001/" in second.command
+    assert "wrongdir" not in second.command

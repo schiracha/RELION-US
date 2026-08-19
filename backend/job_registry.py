@@ -51,6 +51,7 @@ from job_catalog import (
     draft_flag_for,
     draft_is_suppressed,
     draft_output_flag,
+    draft_output_suffix,
     draft_program_override,
     pipeline_type,
 )
@@ -231,6 +232,14 @@ def _build_draft_command(
     # after the program name — mirrors how getCommands*Job() appends it.
     if output_subdir and not is_exe_placeholder:
         subdir_arg = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+        # Some jobs don't take a bare directory here -- RELION appends a
+        # literal suffix to form a file rootname prefix (e.g. "run" ->
+        # ".../job001/run", so output files become "run_it000_..."  instead
+        # of a bare directory that would otherwise produce a wrong,
+        # un-prefixed filename like "_it000_..."). See DRAFT_OUTPUT_SUFFIX.
+        suffix = draft_output_suffix(internal_name)
+        if suffix:
+            subdir_arg += suffix
         parts.append(draft_output_flag(internal_name))
         parts.append(shlex.quote(subdir_arg))
     unmapped = []

@@ -267,6 +267,25 @@ RELION's real `--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/
 `--t`/`--mot` flags — those used to show up as "unmapped" and get silently
 dropped from the draft no matter what you filled in.
 
+A few job types don't take a bare output directory for `--o` either — RELION
+appends a literal suffix to it to form a file rootname prefix. 2D/3D
+classification, 3D initial model, 3D auto-refine and multi-body refinement
+all use `run` (so output files are `run_it000_...`, not `_it000_...`);
+Mask creation and Post-processing use `mask.mrc` / `postprocess`. This is
+also a curated, source-verified table (`docs/ARCHITECTURE.md`'s "Output-value
+suffix" section) — before this fix, every job's `--o` was a bare directory,
+so those output files were missing their expected prefix entirely.
+
+**Overwrite** and RELION sync: overwriting a job now applies
+`--pipeline_control` (when sync is on) the same way a fresh run does, so an
+overwritten job's completion is picked up by RELION's own GUI instead of
+sitting stuck at "Running" — see `docs/ARCHITECTURE.md`'s "Two-way pipeline
+sync" section for why this intentionally does *not* re-register the job as a
+new pipeline entry. Every run — fresh or Overwrite — also now leaves
+`run.out`/`run.err` files in its job directory, matching RELION's own GUI
+convention, even though RELION-US streams output live rather than
+shell-redirecting it.
+
 ## The Advanced section (options the GUI doesn't show)
 
 RELION's GUI exposes a subset of what each program actually accepts. The rest —

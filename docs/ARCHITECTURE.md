@@ -412,6 +412,36 @@ appends `--o outputname`, working directory = project root), which is the
 stated goal: when RELION changes, the overlays and the extraction pipeline are
 the small, well-marked places to update.
 
+#### Output-value suffix: `--o <JobDir>/jobNNN/` isn't always a bare directory
+
+For most jobs, RELION's `--o`/`--output-directory` value is the bare job
+directory — which is what the draft above already emits. But several jobs
+append a literal suffix to `outputname` to form a **file rootname prefix**,
+not just a folder, confirmed by reading each job's `getCommands*Job()` in
+`src/pipeline_jobs.cpp`. Missing this used to produce output files like
+`_it000_class001.mrc` instead of `run_it000_class001.mrc` — RELION-US always
+emitted the bare directory, for every job, unconditionally.
+
+The five classic iterative-refinement jobs set `fn_run = "run"` in their
+DEFAULT (non-continuation) branch — RELION-US never models a "continue this
+job" run (see the `!is_continue` note above), so "run" is always correct:
+`Class2D` (~3183), `Inimodel` (~3466), `Class3D` (~3860), `Autorefine`
+(~4351), `MultiBody` (~4736-4744, the `else`/non-continue branch). Two more
+jobs append a fixed, unconditional literal, verified by reading each function
+in full: `Maskcreate` → `"mask.mrc"` (~4942), `Postprocess` → `"postprocess"`
+(~5340).
+
+These seven are a curated table, `job_catalog.DRAFT_OUTPUT_SUFFIX` (consumed
+via `draft_output_suffix()` in `_build_draft_command()`), appended after the
+subdir whenever one is defined. Deliberately **not** included, because their
+suffix is mode-branched rather than a single safe default: `Joinstar`
+(depends on which of `fn_part`/`fn_mic`/`fn_mov` is filled in, ~5069-5137),
+`Localres` (only appends `"relion"` in the `do_relion_locres` branch — the
+default ResMap branch uses a different program entirely, ~5510), `Select`
+(the `class_ranker` branch appends bare `outputname` plus two *extra* fixed
+flags, not a suffix change, ~2926), and MultiBody's second "analyse" command
+(conditional on further GUI state, not reproduced — left for hand-editing).
+
 ### Change Project
 
 RELION-US isn't tied to the directory it was launched from. A folder counts
@@ -542,6 +572,34 @@ RELION's own GUI shells out to internally:
 - Custom jobs (the four converters) are never registered — they have no
   RELION job type label to write into `job.star`, and `_register_in_relion_pipeline`
   short-circuits on an unknown `internal_name`.
+
+**Overwrite is a different case from a fresh run.** RELION's own Overwrite
+(`gui_mainwindow.cpp`'s `cb_toggle_overwrite_continue`) reuses the job's
+*existing* pipeline entry — it never adds a new one. `start_subprocess_job()`'s
+`overwrite_run_id` branch mirrors that: it never calls
+`_register_in_relion_pipeline()` (which always allocates a *new* number via
+`--addJobFromStar`, the wrong semantics for reusing a slot). It does still,
+when sync is on, (a) apply `pipeline_control_args()` so the re-run's
+`relion_` binary writes the exit-status file `--check_job_completion` reads —
+this used to be skipped for every Overwrite, which is why an overwritten job
+could sit stuck in RELION's own GUI — and (b) defensively re-verify the
+command's `--o` path against the run's actual `cwd` the same way a fresh
+run's stale prospective number gets corrected, since Overwrite trusts the
+(user-editable) command box's existing text rather than rebuilding it.
+
+**`run.out` / `run.err`.** RELION's own GUI always tees a job's stdout/stderr
+into these two files inside the job directory — not something the RELION
+binaries write themselves, but shell redirection RELION's GUI appends to the
+command before running it (`RelionJob::prepareFinalCommand`,
+`src/pipeline_jobs.cpp` ~line 760: `one_command += " >> " + outputname +
+"run.out 2>> " + outputname + "run.err";`, unconditional whenever the command
+doesn't already contain a redirect). RELION-US streams stdout/stderr live
+over a websocket via asyncio pipes instead of shell-redirecting the command
+itself (which would swallow that live view) — `job_runner._run_subprocess()`
+now tees each line to `run.out`/`run.err` as it's read, in append mode to
+match RELION's own `>>` (so an Overwrite's output accumulates on top of the
+previous attempt's, not replaces it). Best-effort: a logging failure never
+takes down the job itself.
 
 `backend/tests/fake_relion_pipeliner.py` stands in for the real binary in
 tests — it implements just the two subcommands above against a simplified

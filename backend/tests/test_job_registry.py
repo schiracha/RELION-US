@@ -444,3 +444,37 @@ def test_tomo_optimisation_set_inputs_are_mapped(
         assert expected in cmd, f"{internal_name}: {cmd!r} missing {expected!r}"
     assert not (expect_not_unmapped & set(unmapped)), \
         f"{internal_name}: {expect_not_unmapped & set(unmapped)} unexpectedly unmapped in {unmapped}"
+
+
+@pytest.mark.parametrize("internal_name,output_flag,suffix", [
+    # The five classic iterative-refinement jobs append fn_run = "run" to
+    # outputname in their DEFAULT (non-continuation) branch -- verified
+    # against src/pipeline_jobs.cpp: Class2D ~3183, Inimodel ~3466,
+    # Class3D ~3860, Autorefine ~4351, MultiBody ~4736-4744 (`else` branch,
+    # since RELION-US never models a continuation run). Without this,
+    # RELION-US emitted a bare directory and RELION's own binaries wrote
+    # files like "_it000_class001.mrc" instead of "run_it000_class001.mrc".
+    ("Class2D", "--o", "run"),
+    ("Inimodel", "--o", "run"),
+    ("Class3D", "--o", "run"),
+    ("Autorefine", "--o", "run"),
+    ("MultiBody", "--o", "run"),
+    # Fixed, unconditional literal suffixes, verified by reading each
+    # function in full (no branch controls the line): Maskcreate ~4942,
+    # Postprocess ~5340.
+    ("Maskcreate", "--o", "mask.mrc"),
+    ("Postprocess", "--o", "postprocess"),
+])
+def test_output_suffix_jobs_get_run_rootname_prefix(internal_name, output_flag, suffix):
+    raw = job_registry.raw_job(internal_name)
+    cmd, _ = job_registry._build_draft_command(raw, {}, internal_name, f"{internal_name}/job001")
+    assert f"{output_flag} {internal_name}/job001/{suffix}" in cmd, cmd
+
+
+def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
+    """Most jobs take a plain directory for --o -- e.g. Import, which isn't
+    in DRAFT_OUTPUT_SUFFIX -- and must NOT gain an unexpected suffix."""
+    raw = job_registry.raw_job("Import")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Import", "Import/job001")
+    assert "Import/job001/" in cmd
+    assert "Import/job001/run" not in cmd

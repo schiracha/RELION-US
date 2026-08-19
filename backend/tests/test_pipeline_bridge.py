@@ -11,6 +11,7 @@ the job anyway rather than losing it.
 The stand-in binary is backend/tests/fake_relion_pipeliner.py; see its docstring
 for what it does and does not imitate.
 """
+import asyncio
 import os
 import stat
 import sys
@@ -268,3 +269,96 @@ def test_lock_is_visible_so_it_can_be_explained(project):
     assert pipeline_bridge.is_locked(project) is False
     (project / ".relion_lock").mkdir()
     assert pipeline_bridge.is_locked(project) is True
+
+
+# --------------------------------------------------------------------------
+# Overwrite + sync: gui_mainwindow.cpp's cb_toggle_overwrite_continue reuses
+# the SAME pipeline slot rather than adding a new one, so start_subprocess_
+# job's overwrite_run_id branch must never call _register_in_relion_pipeline
+# (that always allocates a NEW number via --addJobFromStar). It must,
+# however, still append --pipeline_control when sync is on, so a re-run's
+# relion_ binary writes the exit-status files --check_job_completion reads
+# -- this used to be skipped entirely for every Overwrite, which is why an
+# overwritten job never updated its status in RELION's own GUI.
+# --------------------------------------------------------------------------
+
+
+def test_overwrite_does_not_register_a_second_pipeline_entry(project):
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+
+    async def go():
+        first = await m.start_subprocess_job(
+            "Class2D", "Class2D", "echo hi", subdir="Class2D/job001")
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if first.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        second = await m.start_subprocess_job(
+            "Class2D", "Class2D", "`which relion_refine` --o Class2D/job007/run",
+            subdir="Class2D/job007", overwrite_run_id=first.run_id,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if second.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return first, second
+
+    first, second = asyncio.run(go())
+    # Same run_id / job_number / directory reused, not a second entry.
+    assert second.run_id == first.run_id
+    assert second.job_number == first.job_number
+    assert second.cwd == first.cwd
+
+
+def test_overwrite_appends_pipeline_control_when_sync_is_on(project):
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+
+    async def go():
+        first = await m.start_subprocess_job(
+            "Class2D", "Class2D", "echo hi", subdir="Class2D/job001")
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if first.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        authoritative = Path(first.cwd).name
+        second = await m.start_subprocess_job(
+            "Class2D", "Class2D",
+            f"`which relion_refine` --o Class2D/{authoritative}/run",
+            subdir=f"Class2D/{authoritative}", overwrite_run_id=first.run_id,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if second.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return second
+
+    second = asyncio.run(go())
+    assert "--pipeline_control Class2D/job007/" in second.command
+
+
+def test_overwrite_leaves_command_alone_when_sync_is_off(project):
+    """Sync stays opt-in: an Overwrite run in a project that hasn't turned
+    it on must not gain a --pipeline_control flag."""
+    m = job_runner.JobRunManager(project)
+
+    async def go():
+        first = await m.start_subprocess_job(
+            "Class2D", "Class2D", "echo hi", subdir="Class2D/job001")
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if first.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        second = await m.start_subprocess_job(
+            "Class2D", "Class2D", "`which relion_refine` --o Class2D/job001/run",
+            subdir="Class2D/job001", overwrite_run_id=first.run_id,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if second.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return second
+
+    second = asyncio.run(go())
+    assert "--pipeline_control" not in second.command
