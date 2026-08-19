@@ -144,6 +144,20 @@ def _self_guarded(condition: str, key: str) -> bool:
     """
     if not condition:
         return True
+    # RELION-US never models a "continue this job" run (see module
+    # docstring) -- every draft it builds is for a fresh job, so is_continue
+    # is always false here. A condition of EXACTLY "!is_continue" (nothing
+    # else combined with it) is therefore vacuously true in this app's
+    # context, same as no condition at all. Deliberately narrow: this does
+    # NOT extend to conditions merely containing "!is_continue" alongside
+    # other terms (e.g. "!is_continue && else") -- an "else" token can guard
+    # on a *different* option's boolean (confirmed for real: Motioncorr's
+    # fn_motioncor2_exe is only added in the do_own_motioncor==false branch,
+    # a condition extracted as the identical-looking bare "else"), so those
+    # still need per-field verification against the real source instead
+    # (see job_catalog.DRAFT_FLAG_MAP for the fields that got it).
+    if condition.strip() == "!is_continue":
+        return True
     referenced = set(re.findall(r'joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]', condition))
     if referenced - {key}:
         return False

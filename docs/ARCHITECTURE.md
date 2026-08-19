@@ -276,6 +276,24 @@ Parsing that condition correctly requires handling RELION's brace-less
 `else if (x) command += ...;` one-liners — treating those as unconditional is
 exactly how a branch-only flag lands in every draft.
 
+One more condition is treated as satisfied rather than as a real branch:
+a condition of exactly `!is_continue` (nothing combined with it — Class2D's
+`nr_classes` -> `--K`, e.g.). RELION-US never models a "continue this job"
+run (there is no Continue mode in this app — see the module docstring in
+`job_registry.py`), so `is_continue` is always false in every draft it
+builds, making a bare `!is_continue` vacuously true here. This is
+deliberately narrow: `_self_guarded()` only special-cases the condition
+being *exactly* that string. A condition merely containing `!is_continue`
+alongside something else (`"!is_continue && else"`, seen on Class3D's/
+Autorefine's `fn_ref`) is left alone, because the extra term can still guard
+on a genuinely different option — confirmed against real RELION source for
+Motioncorr's `fn_motioncor2_exe`, whose own condition extracts to the
+identical-looking bare `"else"` but actually means "only when NOT using your
+own MotionCor2 build" (`do_own_motioncor == false`), not "when this field is
+set." Telling those apart requires reading the real branch, which is exactly
+what `DRAFT_FLAG_MAP` is for (next section) — it's how `fn_ref`/`fn_img`
+themselves get mapped despite their condition not being bare `!is_continue`.
+
 **Default program.** `program_guess` skips two kinds of literal that are not
 what a fresh job runs: the `_mpi` half of each `if (nr_mpi > 1)` pair, and
 anything inside a continue-only branch (Autopick's first literal is
@@ -318,6 +336,52 @@ drafts with every field flagged unmapped and the real source shown, rather
 than risk a subtly-wrong reconstruction. `TomoImport` and
 `TomoExcludeTiltImages`, whose default builders are single clean commands, are
 drafted in full.
+
+#### Draft-command overlay for tomography's shared "optimisation set" input group
+
+Seven jobs (`Inimodel`, `Class3D`, `Autorefine`, `TomoSubtomo`,
+`TomoCtfRefine`, `TomoAlign`, `TomoReconPart`) share one input group for their
+tomo-mode particle/reference data: `in_optimisation` (an optimisation-set
+STAR file bundling everything) as an alternative to filling in
+`in_particles` / `in_tomograms` / `in_trajectories` directly, toggled by
+"OR: use direct entries?" (`use_direct_entries`). RELION builds these flags
+in a shared helper, `RelionJob::getTomoInputCommmand()`
+(`src/pipeline_jobs.cpp` ~6328-6430), called from each job's own
+`getCommands*Job()` rather than inlined there — so the extractor's
+`commands_source`/`flags_used` (which only capture the calling function's own
+body) never see a flag for any of these four keys, and the generic rule
+silently dropped whichever one the user filled in, no matter which job or
+which of the two input modes. `fn_ref` and `fn_img` (the classic-SPA
+counterpart of the same "which particles/reference" input, on the same four
+non-Tomo-only jobs) hit the same failure for an unrelated reason: their real
+flags (`--ref`, `--i`) are extracted correctly into `option_flags`, but their
+condition text is `"!is_continue && else"` / `"!is_continue && else && else"`
+— not the bare `!is_continue` the self-guard special-case above allows — so
+they were rejected as an unverified branch too.
+
+All of these are now curated `DRAFT_FLAG_MAP`/`DRAFT_SUPPRESS` entries in
+`job_catalog.py`, verified against `getTomoInputCommmand()` directly rather
+than the calling job's own source. The flag differs by whether the caller
+passes `is_for_refine=true` (Inimodel/Class3D/Autorefine) or `false`
+(the four Tomo* jobs):
+
+| field | refine callers | non-refine callers |
+|---|---|---|
+| `in_optimisation` | `--ios` | `--i` |
+| `in_particles` | `--i` | `--p` |
+| `in_tomograms` | `--tomograms` | `--t` |
+| `in_trajectories` | `--trajectories` | `--mot` |
+
+Mapping every key unconditionally (rather than branching on
+`use_direct_entries` in code) is safe: RELION's own GUI presents
+`in_optimisation` and the `in_particles`/`in_tomograms`/`in_trajectories`
+trio as mutually exclusive, both default to empty, and the draft already
+skips empty values — so whichever mode the user isn't using stays absent from
+the command on its own. `in_particles` sharing `--i` with `fn_img` (the
+classic-SPA field on the same job) is safe for the identical reason: a job is
+filled in as either SPA or tomo, never both. `use_direct_entries` itself is
+`DRAFT_SUPPRESS`-ed on all seven jobs — it never becomes a flag on its own,
+only chooses which of the two branches above applies.
 
 #### Execution model: run from the project root (matches RELION)
 

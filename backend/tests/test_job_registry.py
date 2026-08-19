@@ -382,3 +382,65 @@ def test_self_guarded_flags_are_still_emitted():
     cmd, _ = job_registry._build_draft_command(
         raw, {"scratch_dir": "/ssd/scratch"}, "Class2D", "")
     assert "--scratch_dir /ssd/scratch" in cmd
+
+
+def test_bare_is_continue_condition_is_treated_as_unconditional():
+    """RELION-US never drafts a "continue this job" run (see the module
+    docstring), so is_continue is always false here -- a condition of
+    exactly "!is_continue" (Class2D's nr_classes -> --K, e.g.) is therefore
+    vacuously satisfied and should be emitted like any unconditional field,
+    not left out as an unmapped "real branch"."""
+    raw = job_registry.raw_job("Class2D")
+    assert raw["option_flags"]["nr_classes"]["condition"] == "!is_continue"
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"nr_classes": 50}, "Class2D", "")
+    assert "--K 50" in cmd
+    assert "nr_classes" not in unmapped
+
+
+def test_is_continue_combined_with_another_term_stays_unmapped():
+    """A condition merely containing "!is_continue" alongside something else
+    (e.g. "!is_continue && else") must NOT be treated as unconditional --
+    unlike the bare "!is_continue" case, "else" can guard a *different*
+    option (confirmed against real RELION source for Motioncorr's
+    fn_motioncor2_exe, only added when do_own_motioncor is false)."""
+    raw = job_registry.raw_job("Class3D")
+    cond = raw["option_flags"]["fn_ref"]["condition"]
+    assert cond == "!is_continue && else"
+    assert not job_registry._self_guarded(cond, "fn_ref")
+
+
+@pytest.mark.parametrize("internal_name,fields,expect_in_cmd,expect_not_unmapped", [
+    # fn_ref/fn_img/in_optimisation/in_particles/in_tomograms/in_trajectories
+    # are all built by helper functions RELION calls from getCommands*Job()
+    # (getTomoInputCommmand() for the tomo group -- src/pipeline_jobs.cpp
+    # ~6328) rather than assembling the flag inline, so the generic
+    # `--<key>` rule never sees a matching flags_used entry and the whole
+    # group used to be silently dropped no matter what the user filled in.
+    # See job_catalog.DRAFT_FLAG_MAP.
+    ("Class3D", {"fn_img": "particles.star", "fn_ref": "ref.mrc"},
+     ["--i particles.star", "--ref ref.mrc"], {"fn_img", "fn_ref"}),
+    ("Autorefine", {"fn_img": "particles.star", "fn_ref": "ref.mrc"},
+     ["--i particles.star", "--ref ref.mrc"], {"fn_img", "fn_ref"}),
+    ("Autorefine", {"in_optimisation": "opt_set.star"},
+     ["--ios opt_set.star"], {"in_optimisation"}),
+    ("Autorefine", {"use_direct_entries": True, "in_particles": "p.star",
+                     "in_tomograms": "t.star", "in_trajectories": "traj.star"},
+     ["--i p.star", "--tomograms t.star", "--trajectories traj.star"],
+     {"in_particles", "in_tomograms", "in_trajectories", "use_direct_entries"}),
+    ("Inimodel", {"in_optimisation": "opt_set.star"},
+     ["--ios opt_set.star"], {"in_optimisation"}),
+    ("TomoReconPart", {"in_optimisation": "opt_set.star"},
+     ["--i opt_set.star"], {"in_optimisation"}),
+    ("TomoSubtomo", {"use_direct_entries": True, "in_particles": "p.star",
+                      "in_tomograms": "t.star"},
+     ["--p p.star", "--t t.star"], {"in_particles", "in_tomograms"}),
+])
+def test_tomo_optimisation_set_inputs_are_mapped(
+        internal_name, fields, expect_in_cmd, expect_not_unmapped):
+    raw = job_registry.raw_job(internal_name)
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, internal_name, "")
+    for expected in expect_in_cmd:
+        assert expected in cmd, f"{internal_name}: {cmd!r} missing {expected!r}"
+    assert not (expect_not_unmapped & set(unmapped)), \
+        f"{internal_name}: {expect_not_unmapped & set(unmapped)} unexpectedly unmapped in {unmapped}"

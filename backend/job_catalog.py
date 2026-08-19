@@ -391,6 +391,64 @@ DRAFT_FLAG_MAP: dict[str, dict[str, str]] = {
         "in_tiltseries": "--tilt-series-star-file",
         "cache_size": "--cache-size",
     },
+    # Tomography's shared "optimisation set OR direct entries" input group
+    # (in_optimisation / in_particles / in_tomograms / in_trajectories),
+    # built by RelionJob::getTomoInputCommmand() (src/pipeline_jobs.cpp
+    # ~6328-6430) rather than inlined in each job's own getCommands*Job() --
+    # so the generic rule (which only reads the visible getCommands*Job()
+    # body) never sees a flag for any of these four keys and silently drops
+    # them all, no matter which one the user fills in. Flags differ by
+    # whether the job is a "refine"-style caller (is_for_refine=true) or not:
+    #   refine callers   (Inimodel, Class3D, Autorefine; is_for_refine=true):
+    #     in_optimisation -> --ios   |  in_particles -> --i
+    #     in_tomograms -> --tomograms  |  in_trajectories -> --trajectories
+    #   non-refine callers (TomoSubtomo, TomoCtfRefine, TomoAlign,
+    #   TomoReconPart; is_for_refine=false):
+    #     in_optimisation -> --i    |  in_particles -> --p
+    #     in_tomograms -> --t       |  in_trajectories -> --mot
+    # Only one of in_optimisation vs. the in_particles/in_tomograms/
+    # in_trajectories trio is ever filled in (RELION's own GUI shows them as
+    # mutually exclusive, toggled by "OR: use direct entries?" --
+    # use_direct_entries, which never itself becomes a flag -- see
+    # DRAFT_SUPPRESS below); the unused set stays empty and the generic
+    # empty-value skip already drops it, so mapping every key unconditionally
+    # here is safe regardless of which mode the user is in. in_particles
+    # sharing "--i" with fn_img (the classic-SPA counterpart of the same
+    # job) is likewise safe: a job is filled in as either SPA or tomo, never
+    # both. Verified against pipeline_jobs.cpp's call sites (is_for_refine
+    # and the has_tomograms/has_particles/has_trajectories/has_manifolds
+    # HAS_COMPULSORY/HAS_OPTIONAL/HAS_NOT args) for each job below.
+    "Inimodel": {
+        "in_optimisation": "--ios", "in_particles": "--i",
+        "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
+        "fn_img": "--i",
+    },
+    "Class3D": {
+        "in_optimisation": "--ios", "in_particles": "--i",
+        "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
+        "fn_img": "--i", "fn_ref": "--ref",
+    },
+    "Autorefine": {
+        "in_optimisation": "--ios", "in_particles": "--i",
+        "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
+        "fn_img": "--i", "fn_ref": "--ref",
+    },
+    "TomoSubtomo": {
+        "in_optimisation": "--i", "in_particles": "--p",
+        "in_tomograms": "--t", "in_trajectories": "--mot",
+    },
+    "TomoCtfRefine": {
+        "in_optimisation": "--i", "in_particles": "--p",
+        "in_tomograms": "--t", "in_trajectories": "--mot",
+    },
+    "TomoAlign": {
+        "in_optimisation": "--i", "in_particles": "--p",
+        "in_tomograms": "--t", "in_trajectories": "--mot",
+    },
+    "TomoReconPart": {
+        "in_optimisation": "--i", "in_particles": "--p",
+        "in_tomograms": "--t", "in_trajectories": "--mot",
+    },
 }
 
 # internal_name -> program string, for jobs whose extracted program_guess is
@@ -420,6 +478,19 @@ DRAFT_SUPPRESS: dict[str, set[str]] = {
         "scale_factor",
         "add_factor",
     },
+    # "OR: use direct entries?" (use_direct_entries) never itself becomes a
+    # CLI flag in getTomoInputCommmand() (src/pipeline_jobs.cpp ~6328) -- it
+    # only selects, GUI-side, whether in_optimisation or the in_particles/
+    # in_tomograms/in_trajectories trio gets used (see DRAFT_FLAG_MAP above).
+    # Leaving it unmapped would flag a field that will never map to anything,
+    # in every one of these jobs, not just a non-default branch.
+    "Inimodel": {"use_direct_entries"},
+    "Class3D": {"use_direct_entries"},
+    "Autorefine": {"use_direct_entries"},
+    "TomoSubtomo": {"use_direct_entries"},
+    "TomoCtfRefine": {"use_direct_entries"},
+    "TomoAlign": {"use_direct_entries"},
+    "TomoReconPart": {"use_direct_entries"},
 }
 
 

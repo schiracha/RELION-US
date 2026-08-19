@@ -256,6 +256,17 @@ binary at all — RELION runs whatever executable path you set in a
 "Location of X executable" field. The draft command resolves that
 automatically from the field's current value.
 
+A curated, source-verified list of overrides fills in the handful of cases
+the two rules above can't reach on their own — see `docs/ARCHITECTURE.md`'s
+"Draft command heuristic" section for the full list, including the
+tomography jobs (Inimodel, Class3D, 3D auto-refine, Subtomogram averaging,
+CTF refinement (tomo), Frame alignment (tomo), Reconstruct particle) whose
+**Optimisation set STAR file** / **Reference map** / direct-entry
+(particles/tomograms/trajectories) inputs are now correctly mapped to
+RELION's real `--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/
+`--t`/`--mot` flags — those used to show up as "unmapped" and get silently
+dropped from the draft no matter what you filled in.
+
 ## The Advanced section (options the GUI doesn't show)
 
 RELION's GUI exposes a subset of what each program actually accepts. The rest —
