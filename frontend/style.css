@@ -605,6 +605,13 @@ html, body {
   font-family: inherit;
 }
 .field-input input[type=checkbox] { transform: scale(1.2); }
+/* A STAR-file field (renderField, filename/inputnode with a *.star pattern)
+   gets a Browse button alongside its text input instead of filling the row
+   alone -- the input keeps growing to fill the space, the button stays a
+   fixed small width next to it. */
+.field-browse-row { display: flex; gap: 4px; align-items: center; }
+.field-browse-row input[type=text] { width: auto; flex: 1; min-width: 0; }
+.field-browse-row .btn { flex-shrink: 0; }
 
 .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--panel); }
 .tab-btn {

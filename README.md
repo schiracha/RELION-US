@@ -185,7 +185,13 @@ days.
   Running), as collapsible sections — extracted directly from
   `gui_jobwindow.cpp` and `pipeline_jobs.cpp`, not guessed. The I/O section
   starts open; the rest are one click away. Nothing RELION shows is hidden
-  behind a different tab.
+  behind a different tab. Any field that takes a single named STAR file gets
+  a **Browse** button (…) next to it, opening the same server-side file
+  picker the tomogram viewer uses — the backend often runs on a different
+  machine than your browser, so it browses that machine's filesystem, not
+  yours. A field that takes a wildcard/glob pattern instead (e.g. Import's
+  raw-movies field) has no Browse button, since there's no single file to
+  pick.
   - **Running section**: MPI procs, threads, and **Additional arguments** —
     RELION's own Running tab. Setting MPI procs above 1 does exactly what
     RELION does: prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and

@@ -254,6 +254,34 @@ fetch("/api/auth/status")
 
 // --- Field rendering -------------------------------------------------------
 
+// RELION's field `pattern` (e.g. "Input micrographs (*.{star,mrc})",
+// "Optimisation set STAR file (*optimisation_set.star)") names the
+// extensions Qt's file dialog would filter to in RELION's own GUI --
+// extracted here instead of hardcoding ".star", so a field that also takes
+// e.g. an .mrc reference isn't limited to STAR files in the picker. Falls
+// back to [".star"] if the pattern doesn't parse into anything (this is
+// only called on patterns that already matched /star/i).
+function extensionsFromPattern(pattern) {
+  const exts = new Set();
+  const groups = (pattern.match(/\(([^)]*)\)/g) || []).map((g) => g.slice(1, -1));
+  groups.forEach((g) => {
+    const braceMatch = g.match(/\{([^}]*)\}/);
+    if (braceMatch) {
+      braceMatch[1].split(",").forEach((t) => {
+        const ext = t.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (ext) exts.add("." + ext);
+      });
+    } else {
+      const dot = g.lastIndexOf(".");
+      if (dot >= 0 && dot < g.length - 1) {
+        const ext = g.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (ext) exts.add("." + ext);
+      }
+    }
+  });
+  return exts.size ? Array.from(exts) : [".star"];
+}
+
 function renderField(key, option, value) {
   const wrap = document.createElement("div");
   wrap.className = "field-input";
@@ -295,6 +323,37 @@ function renderField(key, option, value) {
       input.type = "text";
       input.value = value || "";
       input.placeholder = option.pattern || "";
+      // RELION's own field pattern (e.g. "Particle STAR file (*.star)",
+      // extracted straight from its JobOption definitions) says what kind of
+      // file this is -- a Browse button only makes sense for the ones that
+      // are a single named STAR file, not a wildcard/glob field like
+      // Import's "Raw input files:" (fn_in_raw, pattern is an image glob) or
+      // a bare directory.
+      if (/star/i.test(option.pattern || "")) {
+        const row = document.createElement("span");
+        row.className = "field-browse-row";
+        input.classList.add("field-browse-input");
+        row.appendChild(input);
+        const browseBtn = document.createElement("button");
+        browseBtn.type = "button";
+        browseBtn.className = "btn btn-icon";
+        browseBtn.title = `Browse for a STAR file on the machine running the backend (${option.pattern})`;
+        browseBtn.textContent = "…";
+        browseBtn.addEventListener("click", async () => {
+          const picked = await pickFileDialog({
+            title: option.label || "Select a STAR file",
+            extensions: extensionsFromPattern(option.pattern || ""),
+            startPath: currentDirOf(input.value),
+          });
+          if (picked) {
+            input.value = picked;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        });
+        row.appendChild(browseBtn);
+        wrap.appendChild(row);
+        break;
+      }
       wrap.appendChild(input);
       break;
     }

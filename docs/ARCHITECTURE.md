@@ -214,6 +214,25 @@ job that fails at launch.
 **Additional arguments** are appended verbatim at the very end, unquoted,
 exactly as `command += " " + joboptions["other_args"].getString();` does.
 
+#### Browse buttons on STAR-file fields
+
+A `filename`/`inputnode` field (`renderField` in `app.js`) gets a Browse
+button next to its text input when RELION's own extracted `pattern` for that
+field (e.g. `"Particle STAR file (*.star)"`, `"Input micrographs
+(*.{star,mrc})"`) contains "star" — the same `pickFileDialog()` server-side
+picker the tomogram viewer uses (see "Browse buttons" under the viewer,
+below), so the backend machine's filesystem is what gets browsed, not the
+browser's. A field whose pattern is a wildcard/glob rather than a single
+named file — Import's `fn_in_raw` ("Raw input files:", pattern is an image
+extension list meant for something like `Micrographs/*.tif`) — gets no
+button; browsing can't usefully fill in a glob.
+
+`extensionsFromPattern()` parses the actual extensions out of the pattern
+(handling both `*.star` and `*.{star,mrc}` forms) rather than hardcoding
+`.star`, so a field that also accepts a companion file type isn't limited to
+STAR files in the picker. It falls back to `[".star"]` if a pattern
+matched `/star/i` but didn't parse into anything.
+
 ### Draft command heuristic
 
 The command box in every job popup is pre-filled by a **best-effort** rule,

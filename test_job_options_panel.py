@@ -189,6 +189,34 @@ def main():
         check("Import still has Additional arguments",
               win2.locator('[data-field-key="other_args"]').count() == 1)
 
+        # ---- STAR-file fields get a Browse button, glob/wildcard fields don't ----
+        # Import's own options mix both: fn_in_raw is a wildcard glob
+        # ("Micrographs/*.tif", pattern is an image extension list) and
+        # fn_mtf is a genuine single STAR file ("MTF of the detector:",
+        # pattern "STAR Files (*.star)") -- expand every section so both are
+        # in the DOM regardless of which RELION tab they live in.
+        # (excludes [data-role="advanced-section"] -- also an .opt-section,
+        # but opening it triggers its own lazy --help fetch, unrelated here)
+        for section in win2.locator(".opt-section:not([data-role='advanced-section'])").all():
+            if section.get_attribute("open") is None:
+                section.locator(".opt-section-head").click()
+        page.wait_for_timeout(300)
+        check("The wildcard/glob field (fn_in_raw) has no Browse button",
+              win2.locator('[data-field-key="fn_in_raw"] .field-browse-row').count() == 0)
+        mtf_browse = win2.locator('[data-field-key="fn_mtf"] .field-browse-row')
+        check("The single-STAR-file field (fn_mtf) has a Browse button",
+              mtf_browse.count() == 1 and mtf_browse.locator("button").count() == 1)
+
+        mtf_browse.locator("button").click()
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
+        check("Browse opens the same file picker the visualizer uses",
+              ".star" in page.locator(".file-picker .modal-hint").inner_text().lower())
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        check("Escape cancels the picker without touching the field",
+              page.locator(".file-picker").count() == 0
+              and win2.locator('[data-field-key="fn_mtf"] input[type="text"]').input_value() == "")
+
         win3 = open_job(page, "AreTomo2", "AreTomo2")
         page.wait_for_timeout(1000)
         win3.locator('[data-role="advanced-section"] .opt-section-head').click()
