@@ -619,8 +619,21 @@ def extract_run_tab_options(text: str) -> dict[str, dict]:
 # point of this extractor: the alternative is guessing, and a guessed flag is
 # a job that either fails or, worse, runs with a default the user thought they
 # had changed.
+#
+# The optional `(?:\\")?` before the closing quote handles a second shape
+# RELION also uses, most consistently for GPU: `command += " --gpu \"" +
+# joboptions["gpu_ids"].getString() + "\"";` -- the value is wrapped in
+# (escaped, since it's inside a C++ string literal) double quotes, so the
+# flag's own string literal doesn't close until AFTER that escaped quote.
+# Without this, the plain `\s*"` right after the flag name never matches
+# (the next character is a literal backslash, not the closing quote), and
+# the whole pairing is silently missed -- confirmed for real: every job
+# that gates `--gpu` on "Use GPU acceleration?" (Autopick, Class2D,
+# Inimodel, Class3D, Autorefine, MultiBody, Motioncorr) uses exactly this
+# quoted form, so `gpu_ids` had NO entry in `option_flags` at all for any
+# of them before this, and the app's GPU fields never drafted anything.
 OPTION_FLAG_RE = re.compile(
-    r'command\s*\+=\s*"\s*(--[A-Za-z][A-Za-z0-9_-]*)\s*"\s*\+\s*'
+    r'command\s*\+=\s*"\s*(--[A-Za-z][A-Za-z0-9_-]*)\s*(?:\\")?\s*"\s*\+\s*'
     r'joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]'
 )
 

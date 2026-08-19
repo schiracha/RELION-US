@@ -294,6 +294,75 @@ set." Telling those apart requires reading the real branch, which is exactly
 what `DRAFT_FLAG_MAP` is for (next section) — it's how `fn_ref`/`fn_img`
 themselves get mapped despite their condition not being bare `!is_continue`.
 
+**The `flags_used` shortcut used to bypass a real condition (fixed).** A
+field is only worth calling "unconditional" if RELION's own source agrees.
+`_build_draft_command()` used to check the blunt `flags_used` list (does
+`"--<key>"` merely appear anywhere in the function, ignoring any `if` around
+it) *before* ever consulting the condition-aware `option_flags` pairing above
+— so any field whose real flag happens to equal `"--" + key` (the common
+case) took that shortcut and got emitted unconditionally, even when its real
+append line sits behind an `if` on a *different* option. Confirmed for real
+via a full audit of every job's `option_flags` against `flags_used`: **72
+fields** across the job set have this exact shape, including the one a user
+actually hit — Class3D's/Autorefine's `helical_nr_asu`/`helical_twist_initial`/
+`helical_rise_initial` were passed to `relion_refine` even with "Do helical
+reconstruction?" unchecked, because their flags (`--helical_nr_asu`, etc.)
+equal `"--" + key` and so never reached the real `do_helix`/
+`do_apply_helical_symmetry` condition check at all.
+
+Fixed by reordering: `option_flags.get(key)` is now consulted *first*,
+whenever it exists, regardless of whether its flag matches `--<key>`. The
+blunt `flags_used` fallback only runs when there's no `option_flags` entry
+for that key at all (the extractor found no clean `command += " --flag " +
+joboptions["key"]` line to read a condition from). This alone would have
+just moved all 72 fields into "unmapped" — technically honest, but a
+regression in usefulness for the 6-of-8 helical fields that are genuinely
+resolvable, and a much bigger loss for GPU (below). Instead, a small
+runtime evaluator (`_evaluate_condition()`) replays the SAME field values
+RELION's own `getCommands*Job()` would read for the narrow, safely-parseable
+shape this covers well: a chain of `&&`-joined clauses, each either
+`joboptions["X"].getBoolean()` (optionally negated) or the `!is_continue`
+invariant. This is not a guess — it's reading the identical `joboptions[...]`
+values a user already submitted, the same way RELION's own C++ would. The
+moment a condition contains an `||`, the literal token `else` (RELION's
+brace-less "other branch" marker), a numeric/string comparison, or anything
+else this evaluator doesn't recognize, it returns `None` and the field falls
+back to exactly today's "unmapped" behavior — no guessing beyond what's
+provably safe. A condition that evaluates to `False` is silently omitted
+(RELION itself wouldn't emit it either right now), not flagged "unmapped":
+there's nothing there for the user to fix. Gating-only booleans that never
+become a flag on their own (`do_helix`, `do_apply_helical_symmetry`,
+`do_local_search_helical_symmetry`, `use_gpu`) are added to `DRAFT_SUPPRESS`
+so they don't show up as spurious "unmapped" noise either — same reasoning
+as `use_direct_entries` above.
+
+**GPU acceleration (fixed).** Reordering alone didn't fix GPU, because
+`option_flags` had *no entry at all* for `gpu_ids` on any of the 6 jobs that
+gate it behind "Use GPU acceleration?" (Autopick, Class2D, Inimodel, Class3D,
+Autorefine, MultiBody). The reason: RELION wraps the value in escaped quotes
+— `command += " --gpu \"" + joboptions["gpu_ids"].getString() + "\"";` — so
+the extractor's `OPTION_FLAG_RE`, which expected the flag's string literal to
+close right after the flag name, never matched (the character right after
+`--gpu ` is a literal backslash, not the closing `"`). Fixed by allowing an
+optional `\"` before the closing quote in the regex (see
+`extract_job_definitions.py`'s `OPTION_FLAG_RE`); re-running the extractor
+against the same RELION checkout picked up `gpu_ids` → `--gpu` (condition
+`joboptions["use_gpu"].getBoolean()`) for exactly those 6 jobs, purely
+additive — nothing else in `job_definitions_raw.json` changed. Combined with
+the reordering fix above, `_evaluate_condition()` now correctly gates `--gpu`
+on the checkbox.
+
+One more piece: RELION emits `--gpu ""` (letting the job auto-allocate GPUs)
+even when "Which GPUs to use" is left blank, as long as the checkbox is
+checked — an intentional, meaningful empty value, unlike every other text
+field this app skips when blank. `_build_draft_command()` special-cases
+exactly this (`key == "gpu_ids" and flag == "--gpu"`) to pass the value
+through rather than skip it. Two GPU-using jobs are deliberately **not**
+fixed by this: Autopick's `--gpu` only exists inside its Topaz branch
+(condition contains a bare `else`) and Motioncorr's is gated on the *other*
+branch of `do_own_motioncor` (same `else` shape) — both stay honestly
+unmapped rather than guessed at, consistent with the rest of this section.
+
 **Default program.** `program_guess` skips two kinds of literal that are not
 what a fresh job runs: the `_mpi` half of each `if (nr_mpi > 1)` pair, and
 anything inside a continue-only branch (Autopick's first literal is

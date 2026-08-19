@@ -167,6 +167,101 @@ def _self_guarded(condition: str, key: str) -> bool:
     return bool(referenced)
 
 
+_BOOL_CLAUSE_RE = re.compile(
+    r'^!?\s*joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]\.getBoolean\(\)$'
+)
+
+
+def _strip_matched_outer_parens(clause: str) -> str:
+    """Strip one or more layers of parens that wrap the WHOLE clause (not
+    just its start), e.g. "(joboptions[\"do_helix\"].getBoolean())" ->
+    "joboptions[\"do_helix\"].getBoolean()". Stops as soon as the outer
+    parens don't actually match end-to-end, so "(a)+(b)" is left alone."""
+    while clause.startswith("(") and clause.endswith(")"):
+        depth = 0
+        wraps_all = True
+        for i, ch in enumerate(clause):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(clause) - 1:
+                    wraps_all = False
+                    break
+        if not wraps_all:
+            break
+        clause = clause[1:-1].strip()
+    return clause
+
+
+def _split_top_level_and(condition: str) -> list[str] | None:
+    """Split `condition` on `&&` that sits outside any parentheses. None
+    (defer to the caller's existing "unmapped" fallback) the moment the
+    condition contains an `||` or the literal token `else` anywhere -- both
+    mean real branch logic this app deliberately doesn't try to interpret
+    (see the module docstring)."""
+    if "||" in condition or re.search(r"\belse\b", condition):
+        return None
+    clauses: list[str] = []
+    current: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(condition):
+        ch = condition[i]
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif depth == 0 and condition[i : i + 2] == "&&":
+            clauses.append("".join(current))
+            current = []
+            i += 1  # skip the second '&'
+        else:
+            current.append(ch)
+        i += 1
+    clauses.append("".join(current))
+    return [c.strip() for c in clauses if c.strip()]
+
+
+def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | None:
+    """Best-effort evaluation of a RELION `if (...)` condition against the
+    CURRENT field values -- not a guess, but replaying the exact same
+    `joboptions["X"].getBoolean()` check RELION's own getCommands*Job()
+    would make, using the identical field data the user submitted (e.g.
+    "only pass --helical_nr_asu when the Helical processing checkbox is
+    actually on").
+
+    Returns True/False when every top-level `&&`-joined clause is one of
+    two recognized, safely-evaluable shapes: a boolean field's own value
+    (optionally negated), or the `!is_continue` invariant (always true --
+    this app never models a "continue this job" run). Returns None the
+    moment anything else shows up -- an `||`, an `else` branch marker, a
+    numeric/string comparison, a call this function doesn't recognize --
+    so the caller falls back to marking the field "unmapped" exactly as it
+    did before this evaluator existed, rather than risk a wrong guess.
+    """
+    if not condition:
+        return True
+    clauses = _split_top_level_and(condition)
+    if clauses is None:
+        return None
+    result = True
+    for raw_clause in clauses:
+        clause = _strip_matched_outer_parens(raw_clause.strip())
+        if clause == "!is_continue":
+            continue
+        m = _BOOL_CLAUSE_RE.match(clause)
+        if not m:
+            return None
+        value = bool(field_values.get(m.group(1)))
+        if clause.startswith("!"):
+            value = not value
+        result = result and value
+    return result
+
+
 def _build_draft_command(
     raw_job: dict,
     field_values: dict[str, Any],
@@ -256,24 +351,59 @@ def _build_draft_command(
         if key in ("nr_mpi", "other_args"):
             continue
         # A verified per-job flag override wins and is always emitted; only
-        # fall back to the generic `--<key>` rule (gated on flags_used) when
-        # no override exists for this key.
+        # fall back to the generic `--<key>` rule when no override exists.
         mapped = draft_flag_for(internal_name, key)
         if mapped is not None:
             flag = mapped
         else:
-            flag = f"--{key}"
-            if flag not in flags_used:
-                # Second chance: this job's own builder may append the option
-                # under a flag that isn't "--" + key (--i for input_star_mics,
-                # --Box for box, --j for nr_threads), extracted verbatim from
-                # the source. Only when it isn't inside a branch that depends
-                # on some *other* option -- those stay unmapped rather than
-                # producing a command with contradictory flags.
-                pair = option_flags.get(key)
-                if pair and _self_guarded(pair.get("condition", ""), key):
+            # Always consult the exact flag+condition the extractor read
+            # straight out of this job's own getCommands*Job() when one
+            # exists for this key -- it's ground truth for both the real
+            # flag name AND whatever actually guards it. Checking
+            # flags_used FIRST (the raw "does '--<key>' appear anywhere in
+            # the function" signal) used to short-circuit past this for
+            # every option whose flag happens to equal "--" + its own key
+            # (the common case), silently skipping the condition check --
+            # confirmed for real: Autorefine's/Class3D's helical_nr_asu,
+            # helical_twist_initial and 6 similar fields all have flag ==
+            # "--" + key, so they were ALWAYS emitted unconditionally even
+            # with "Do helical reconstruction?" unchecked (their real
+            # condition depends on do_helix/do_apply_helical_symmetry/
+            # do_local_search_helical_symmetry, not on themselves). An
+            # audit against every job's option_flags found 72 fields with
+            # this exact shape.
+            pair = option_flags.get(key)
+            if pair is not None:
+                condition = pair.get("condition", "")
+                if _self_guarded(condition, key):
                     flag = pair["flag"]
                 else:
+                    # Not self-guarded doesn't have to mean "give up": this
+                    # app has the SAME field_values RELION's own
+                    # getCommands*Job() would read, so replay simple
+                    # boolean-gate conditions (see _evaluate_condition)
+                    # against them instead of guessing.
+                    verdict = _evaluate_condition(condition, field_values)
+                    if verdict is True:
+                        flag = pair["flag"]
+                    elif verdict is False:
+                        # RELION itself wouldn't emit this either right
+                        # now -- the gate it depends on reads false.
+                        # Silently omit (like draft_is_suppressed above),
+                        # not "unmapped": there's nothing here to fix.
+                        continue
+                    else:
+                        unmapped.append(key)
+                        continue
+            else:
+                # No option_flags entry at all -- the extractor found no
+                # clean `command += " --flag " + joboptions["key"]`
+                # assignment to read a real flag/condition from. Fall back
+                # to the blunt "does '--<key>' appear anywhere in this
+                # function" signal (today's only remaining information),
+                # treated as unconditional.
+                flag = f"--{key}"
+                if flag not in flags_used:
                     unmapped.append(key)
                     continue
 
@@ -284,7 +414,20 @@ def _build_draft_command(
             # RELION convention: absent flag == false; nothing to append otherwise
         else:
             if value is None or value == "":
-                continue
+                if not (key == "gpu_ids" and flag == "--gpu"):
+                    continue
+                # RELION emits `--gpu ""` (letting the job auto-allocate)
+                # whenever "Use GPU acceleration?" is checked, even with
+                # "Which GPUs to use" left blank -- confirmed via
+                # pipeline_jobs.cpp's `command += " --gpu \"" +
+                # joboptions["gpu_ids"].getString() + "\"";`, unconditional
+                # on gpu_ids's own value once the use_gpu gate (evaluated
+                # above, since flag can only resolve to "--gpu" here via
+                # that gate reading true) holds. An empty string is a
+                # meaningful, intentional value for this field, not "unset"
+                # -- so it's passed through rather than skipped, unlike
+                # every other text field.
+                value = ""
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
 

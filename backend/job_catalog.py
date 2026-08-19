@@ -484,13 +484,36 @@ DRAFT_SUPPRESS: dict[str, set[str]] = {
     # in_tomograms/in_trajectories trio gets used (see DRAFT_FLAG_MAP above).
     # Leaving it unmapped would flag a field that will never map to anything,
     # in every one of these jobs, not just a non-default branch.
-    "Inimodel": {"use_direct_entries"},
-    "Class3D": {"use_direct_entries"},
-    "Autorefine": {"use_direct_entries"},
+    "Inimodel": {"use_direct_entries", "use_gpu"},
+    "Class3D": {
+        "use_direct_entries", "use_gpu",
+        "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",
+    },
+    "Autorefine": {
+        "use_direct_entries", "use_gpu",
+        "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",
+    },
     "TomoSubtomo": {"use_direct_entries"},
     "TomoCtfRefine": {"use_direct_entries"},
     "TomoAlign": {"use_direct_entries"},
-    "TomoReconPart": {"use_direct_entries"},
+    "TomoReconPart": {"use_direct_entries", "do_helix"},
+    # Same reasoning as use_direct_entries above, for two more gating-only
+    # booleans that never become a flag themselves -- they only control
+    # whether OTHER fields' flags get emitted (see job_registry._evaluate_
+    # condition, which now actually reads these values rather than
+    # skipping their condition check entirely):
+    #   use_gpu           -- gates --gpu (built from gpu_ids' value), never
+    #                         a flag on its own (pipeline_jobs.cpp, all 6
+    #                         jobs below use the identical
+    #                         `if (joboptions["use_gpu"].getBoolean()) ...
+    #                         command += " --gpu \"" + joboptions["gpu_ids"]
+    #                         .getString() + "\"";` shape).
+    #   do_helix           -- gates the helical_* fields on Maskcreate too
+    #                         (Class3D/Autorefine already listed above).
+    "Autopick": {"use_gpu"},
+    "Class2D": {"use_gpu", "do_helix"},
+    "MultiBody": {"use_gpu"},
+    "Maskcreate": {"do_helix"},
 }
 
 

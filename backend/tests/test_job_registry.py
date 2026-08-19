@@ -478,3 +478,183 @@ def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
     cmd, _ = job_registry._build_draft_command(raw, {}, "Import", "Import/job001")
     assert "Import/job001/" in cmd
     assert "Import/job001/run" not in cmd
+
+
+# --------------------------------------------------------------------------
+# The flags_used shortcut used to bypass a real condition whenever a field's
+# flag happened to equal "--" + its own key (user report: helical fields
+# passed even with "Do helical reconstruction?" unchecked; GPU acceleration
+# checked but neither --gpu nor which GPU ever got passed). An audit of
+# every job's option_flags against flags_used found 72 fields with this
+# exact shape across the job set -- see _evaluate_condition's docstring and
+# the reordered flag-resolution block in _build_draft_command.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("condition,field_values,expected", [
+    ("", {}, True),
+    ("!is_continue", {}, True),
+    ('joboptions["do_helix"].getBoolean()', {"do_helix": True}, True),
+    ('joboptions["do_helix"].getBoolean()', {"do_helix": False}, False),
+    ('joboptions["do_helix"].getBoolean()', {}, False),
+    ('!joboptions["do_own_motioncor"].getBoolean()', {"do_own_motioncor": False}, True),
+    ('!joboptions["do_own_motioncor"].getBoolean()', {"do_own_motioncor": True}, False),
+    (
+        '!is_continue && joboptions["do_helix"].getBoolean() && '
+        'joboptions["do_apply_helical_symmetry"].getBoolean()',
+        {"do_helix": True, "do_apply_helical_symmetry": True},
+        True,
+    ),
+    (
+        '!is_continue && joboptions["do_helix"].getBoolean() && '
+        'joboptions["do_apply_helical_symmetry"].getBoolean()',
+        {"do_helix": True, "do_apply_helical_symmetry": False},
+        False,
+    ),
+    (
+        '(!is_continue) && (joboptions["do_helix"].getBoolean()) && '
+        'joboptions["do_apply_helical_symmetry"].getBoolean()',
+        {"do_helix": True, "do_apply_helical_symmetry": True},
+        True,
+    ),
+    # Unevaluable shapes defer to the caller's existing "unmapped" fallback.
+    ('joboptions["a"].getBoolean() || joboptions["b"].getBoolean()', {"a": True}, None),
+    ('else && joboptions["do_topaz"].getBoolean()', {"do_topaz": True}, None),
+    ('joboptions["nr_split"].getNumber(error_message) > 0', {"nr_split": 5}, None),
+])
+def test_evaluate_condition(condition, field_values, expected):
+    assert job_registry._evaluate_condition(condition, field_values) is expected
+
+
+def test_helical_fields_are_omitted_when_the_checkbox_is_unchecked():
+    """The exact user report: helical parameters were getting passed even
+    with "Do helical reconstruction?" unchecked, because their flag name
+    (--helical_nr_asu, --helical_twist_initial, --helical_rise_initial)
+    equals "--" + their own key, which used to short-circuit past the real
+    do_helix/do_apply_helical_symmetry condition entirely."""
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "do_helix": False,
+            "helical_tube_outer_diameter": 250,
+            "helical_nr_asu": 1,
+            "helical_twist_initial": 0,
+            "helical_rise_initial": 0,
+        },
+        "Autorefine", "",
+    )
+    for flag in ("--helical_outer_diameter", "--helical_nr_asu",
+                 "--helical_twist_initial", "--helical_rise_initial"):
+        assert flag not in cmd, cmd
+    # Nothing here is broken or needs manual attention -- do_helix being
+    # false means RELION itself wouldn't emit these either.
+    assert not unmapped, unmapped
+
+
+def test_helical_fields_are_included_when_the_checkbox_is_checked():
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "do_helix": True,
+            "do_apply_helical_symmetry": True,
+            "helical_tube_outer_diameter": 250,
+            "helical_nr_asu": 1,
+            "helical_twist_initial": 0,
+            "helical_rise_initial": 0,
+        },
+        "Autorefine", "",
+    )
+    assert "--helical_outer_diameter 250" in cmd
+    assert "--helical_nr_asu 1" in cmd
+    assert "--helical_twist_initial 0" in cmd
+    assert "--helical_rise_initial 0" in cmd
+    assert not unmapped, unmapped
+
+
+def test_helical_symmetry_sub_fields_respect_their_own_extra_gate():
+    """helical_nr_asu/twist_initial/rise_initial need BOTH do_helix AND
+    do_apply_helical_symmetry; helical_tube_outer_diameter needs only
+    do_helix. With do_helix on but do_apply_helical_symmetry off, only the
+    outer-diameter field should appear."""
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "do_helix": True,
+            "do_apply_helical_symmetry": False,
+            "helical_tube_outer_diameter": 250,
+            "helical_nr_asu": 1,
+        },
+        "Autorefine", "",
+    )
+    assert "--helical_outer_diameter 250" in cmd
+    assert "--helical_nr_asu" not in cmd
+    assert not unmapped, unmapped
+
+
+@pytest.mark.parametrize("internal_name", ["Class2D", "Inimodel", "Class3D", "Autorefine"])
+def test_gpu_flag_is_gated_on_the_use_gpu_checkbox(internal_name):
+    """The exact user report: the GPU acceleration checkbox was checked but
+    neither --gpu nor which GPU to use ever got passed. gpu_ids' real flag
+    (--gpu) is wrapped in escaped quotes in RELION's own source (`command +=
+    " --gpu \\"" + joboptions["gpu_ids"].getString() + "\\"";`), which the
+    extractor's OPTION_FLAG_RE didn't recognize at all before this fix, so
+    option_flags had no entry for gpu_ids and it fell through to the
+    generic --<key> rule using the wrong flag name ("--gpu_ids")."""
+    raw = job_registry.raw_job(internal_name)
+    on, unmapped_on = job_registry._build_draft_command(
+        raw, {"use_gpu": True, "gpu_ids": "0,1"}, internal_name, "")
+    assert '--gpu 0,1' in on, on
+    assert not unmapped_on, unmapped_on
+
+    off, unmapped_off = job_registry._build_draft_command(
+        raw, {"use_gpu": False, "gpu_ids": "0,1"}, internal_name, "")
+    assert "--gpu" not in off, off
+    assert not unmapped_off, unmapped_off
+
+
+def test_gpu_flag_is_still_passed_with_blank_gpu_ids():
+    """RELION emits `--gpu ""` (letting the job auto-allocate) whenever the
+    checkbox is on, even with "Which GPUs to use" left blank -- an empty
+    value is meaningful here (auto-allocate), not "unset", unlike every
+    other text field this app skips when blank."""
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"use_gpu": True, "gpu_ids": ""}, "Autorefine", "")
+    assert "--gpu" in cmd.split()
+    assert not unmapped, unmapped
+
+
+def test_gpu_mpi_and_helical_all_combine_in_one_command():
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "nr_mpi": 4, "use_gpu": True, "gpu_ids": "0:1:2:3",
+            "do_helix": True, "do_apply_helical_symmetry": True,
+            "helical_nr_asu": 1,
+        },
+        "Autorefine", "Refine3D/job001",
+    )
+    assert cmd.startswith("mpirun -n 4 ")
+    assert "--gpu 0:1:2:3" in cmd
+    assert "--helical_nr_asu 1" in cmd
+    assert not unmapped, unmapped
+
+
+@pytest.mark.parametrize("internal_name,fields", [
+    # Autopick's GPU is only reachable in the Topaz branch (condition
+    # contains a bare "else" -- genuinely mode-branched, not something this
+    # app tries to interpret) and Motioncorr's is gated on the *other*
+    # branch of "do_own_motioncor" (same "else" shape) -- both must stay
+    # honestly unmapped rather than silently guessed at.
+    ("Autopick", {"use_gpu": True, "gpu_ids": "0"}),
+    ("Motioncorr", {"gpu_ids": "0"}),
+])
+def test_gpu_fields_needing_real_branch_logic_stay_unmapped(internal_name, fields):
+    raw = job_registry.raw_job(internal_name)
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, internal_name, "")
+    assert "--gpu" not in cmd
+    assert "gpu_ids" in unmapped

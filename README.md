@@ -267,6 +267,44 @@ RELION's real `--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/
 `--t`/`--mot` flags — those used to show up as "unmapped" and get silently
 dropped from the draft no matter what you filled in.
 
+**A field whose flag name equals `--<key>` used to skip its real condition
+entirely (fixed).** This was a bigger bug than it sounds: whenever a field's
+CLI flag happens to be exactly `--` + its own key (the common case), the
+draft used to treat it as always-safe-to-emit *without ever checking what
+actually guards it in RELION's source* — so a field genuinely gated behind a
+different checkbox got passed regardless of that checkbox's state. Confirmed
+concretely: 3D classification's/3D auto-refine's helical parameters
+(`--helical_nr_asu`, `--helical_twist_initial`, `--helical_rise_initial`)
+were being passed to `relion_refine` even with **Do helical
+reconstruction?** unchecked. An audit found **72 fields** across the job set
+with this same shape. Fixed by always checking the real, source-extracted
+condition first, and — since this app already has the exact field values the
+user submitted, the same ones RELION's own code would read — evaluating
+straightforward checkbox-gated conditions (`do_helix`, `do_apply_helical_symmetry`,
+and similar `&&`-chains of checkboxes) against them live, rather than either
+blindly emitting or blindly dropping. A condition too complex to evaluate
+safely (an `||`, RELION's brace-less `else` branch marker, a numeric
+comparison) still falls back to "unmapped," exactly as before — nothing new
+is guessed at.
+
+**GPU acceleration wasn't being passed at all (fixed).** "Use GPU
+acceleration?" checked, MPI running fine, but no `--gpu` and no GPU IDs ever
+reached the command. Root cause: RELION wraps the GPU-IDs value in escaped
+quotes in its own source (`--gpu \"<ids>\"`), a shape the source extractor's
+flag-detection regex didn't recognize at all — so this app had *zero*
+information linking the "Which GPUs to use" field to the real `--gpu` flag
+on any of the 6 jobs that support it (2D/3D classification, 3D initial
+model, 3D auto-refine, multi-body refinement, and particle picking's Topaz
+mode). Fixed by extending the extractor's regex to recognize this pattern
+and re-running it against RELION's real source — now `--gpu` correctly
+appears exactly when "Use GPU acceleration?" is checked, together with
+whichever MPI/threads settings are also in effect. It's also correctly
+passed as `--gpu ""` (not omitted) when the checkbox is on but "Which GPUs
+to use" is left blank, matching RELION's own "auto-allocate" convention.
+Particle picking's Topaz-mode GPU use and MotionCorr's (both genuinely
+mode-branched in RELION's own source, not simple checkbox gates) are left
+as known gaps rather than guessed at — add `--gpu` manually there if needed.
+
 A few job types don't take a bare output directory for `--o` either — RELION
 appends a literal suffix to it to form a file rootname prefix. 2D/3D
 classification, 3D initial model, 3D auto-refine and multi-body refinement

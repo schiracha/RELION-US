@@ -538,6 +538,14 @@
         "flag": "--motioncor2_exe",
         "condition": "else"
       },
+      "other_motioncor2_args": {
+        "flag": "--other_motioncor2_args",
+        "condition": "else && (joboptions[\"other_motioncor2_args\"].getString()).length() > 0"
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "else"
+      },
       "fn_defect": {
         "flag": "--defect_file",
         "condition": "(joboptions[\"fn_defect\"].getString()).length() > 0"
@@ -1798,6 +1806,14 @@
       "topaz_hough_length": {
         "flag": "--helical_tube_length_min",
         "condition": "else && joboptions[\"do_topaz\"].getBoolean() && joboptions[\"do_topaz_pick\"].getBoolean() && joboptions[\"do_topaz_filaments\"].getBoolean() && joboptions[\"topaz_hough_length\"].getNumber(error_message) > 0."
+      },
+      "topaz_other_args": {
+        "flag": "--topaz_args",
+        "condition": "else && joboptions[\"do_topaz\"].getBoolean() && (joboptions[\"topaz_other_args\"].getString()).length() > 0"
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "else && joboptions[\"do_topaz\"].getBoolean() && joboptions[\"use_gpu\"].getBoolean()"
       },
       "log_diam_min": {
         "flag": "--LoG_diam_min",
@@ -3154,6 +3170,10 @@
       "nr_threads": {
         "flag": "--j",
         "condition": ""
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "joboptions[\"use_gpu\"].getBoolean()"
       }
     },
     "flags_used": [
@@ -3536,6 +3556,10 @@
       "nr_threads": {
         "flag": "--j",
         "condition": ""
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "joboptions[\"use_gpu\"].getBoolean()"
       }
     },
     "flags_used": [
@@ -4261,6 +4285,10 @@
       "nr_threads": {
         "flag": "--j",
         "condition": ""
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "joboptions[\"use_gpu\"].getBoolean()"
       }
     },
     "flags_used": [
@@ -4994,6 +5022,10 @@
       "nr_threads": {
         "flag": "--j",
         "condition": ""
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "joboptions[\"use_gpu\"].getBoolean()"
       }
     },
     "flags_used": [
@@ -5387,6 +5419,10 @@
       "nr_threads": {
         "flag": "--j",
         "condition": "!is_continue || (is_continue && joboptions[\"fn_cont\"].getString() != \"\")"
+      },
+      "gpu_ids": {
+        "flag": "--gpu",
+        "condition": "!is_continue || (is_continue && joboptions[\"fn_cont\"].getString() != \"\") && joboptions[\"use_gpu\"].getBoolean()"
       },
       "fn_bodies": {
         "flag": "--bodies",
@@ -7955,6 +7991,10 @@
     "program_guess": "relion_tomo_import_coordinates",
     "program_mpi": null,
     "option_flags": {
+      "in_coords": {
+        "flag": "--i",
+        "condition": "joboptions[\"do_coords\"].getBoolean()"
+      },
       "remove_substring": {
         "flag": "--remove_substring",
         "condition": "joboptions[\"do_coords\"].getBoolean() && joboptions[\"remove_substring\"].getString() != \"\""
@@ -7970,6 +8010,14 @@
       "add_factor": {
         "flag": "--add_factor",
         "condition": "joboptions[\"do_coords\"].getBoolean()"
+      },
+      "movie_files": {
+        "flag": "--tilt-image-movie-pattern",
+        "condition": "else"
+      },
+      "mdoc_files": {
+        "flag": "--mdoc-file-pattern",
+        "condition": "else"
       },
       "tilt_axis_angle": {
         "flag": "--nominal-tilt-axis-angle",
@@ -7989,6 +8037,10 @@
       },
       "Q0": {
         "flag": "--amplitude-contrast",
+        "condition": "else"
+      },
+      "optics_group_name": {
+        "flag": "--optics-group-name",
         "condition": "else"
       },
       "dose_rate": {
@@ -8261,6 +8313,10 @@
       "aretomo_tiltcorrect_angle": {
         "flag": "--aretomo_tiltcorrect_angle",
         "condition": "joboptions[\"do_aretomo2\"].getBoolean() && joboptions[\"do_aretomo_tiltcorrect\"].getBoolean()"
+      },
+      "other_aretomo_args": {
+        "flag": "--other_wrapper_args",
+        "condition": "joboptions[\"do_aretomo2\"].getBoolean()"
       },
       "gpu_ids": {
         "flag": "--gpu",
