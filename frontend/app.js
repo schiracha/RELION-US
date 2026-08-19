@@ -239,14 +239,6 @@ document.getElementById("toggleSidebarBtn").addEventListener("click", () => {
   if (ccView === "network") renderNetwork();
 });
 
-const zoomSlider = document.getElementById("zoomSlider");
-const zoomValue = document.getElementById("zoomValue");
-zoomSlider.addEventListener("input", () => {
-  const pct = zoomSlider.value;
-  zoomValue.textContent = pct + "%";
-  document.getElementById("layout").style.zoom = pct / 100;
-});
-
 // Password protection (backend/auth.py) is opt-in and managed from the
 // terminal only (Run-RelionUS --set-password / --enable-auth /
 // --disable-auth) -- there is no in-browser way to turn it on, set it, or

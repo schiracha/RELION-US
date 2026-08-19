@@ -97,23 +97,47 @@ def main():
         # (its start) and another node's top-center (its end) -- not just
         # "close", since app.js reads these back from the laid-out DOM rather
         # than computing them by hand (see renderNetwork's comment).
+        #
+        # This deliberately re-derives both sides in real page pixels via
+        # getBoundingClientRect() rather than comparing offsetTop/Left (as
+        # app.js itself does) against the path's raw `d` coordinates. Those
+        # two are the same numbers by construction -- app.js computes one
+        # from the other -- so that comparison can never catch app.js
+        # computing the *wrong* numbers in the first place. It didn't: the
+        # overlay SVG is a sibling of #ccNetworkRows, both children of
+        # #ccNetworkCanvas, and #ccNetworkCanvas used to carry the padding
+        # that visually insets the whole view. An absolutely positioned
+        # child's inset:0 is measured from its containing block's *padding
+        # edge*, which ignores that block's own padding -- so the SVG (sized
+        # to the canvas) rendered padding-px above and left of where
+        # #ccNetworkRows (a normal-flow child, which the padding does push
+        # in) actually sat on screen. Every edge landed that far short of the
+        # node it was meant to touch, on every project, not just wide or
+        # tall ones -- exactly "the lines never quite reach the top of the
+        # following job". Fixed by moving the padding to #ccNetworkView (the
+        # scrolling viewport) instead, so #ccNetworkCanvas carries none and
+        # the SVG's inset:0 lines up with #ccNetworkRows's top-left again.
         def edges_touch_nodes():
             return page.evaluate("""() => {
-                const nodes = Array.from(document.querySelectorAll('.cc-network-node')).map(n => ({
-                    cx: n.offsetLeft + n.offsetWidth / 2,
-                    top: n.offsetTop, bottom: n.offsetTop + n.offsetHeight,
-                }));
+                const nodes = Array.from(document.querySelectorAll('.cc-network-node')).map((n) => {
+                    const r = n.getBoundingClientRect();
+                    return { cx: r.left + r.width / 2, top: r.top, bottom: r.bottom };
+                });
+                const svgRect = document.getElementById('ccNetworkEdges').getBoundingClientRect();
                 const near = (a, b) => Math.abs(a - b) < 0.5;
                 return Array.from(document.querySelectorAll('.cc-network-edge')).every((path) => {
                     const parts = path.getAttribute('d').replace(/,/g, ' ').split(/\\s+/).filter(Boolean);
-                    const [x1, y1] = [parseFloat(parts[1]), parseFloat(parts[2])];
-                    const [x2, y2] = [parseFloat(parts[parts.length - 2]), parseFloat(parts[parts.length - 1])];
+                    const x1 = svgRect.left + parseFloat(parts[1]);
+                    const y1 = svgRect.top + parseFloat(parts[2]);
+                    const x2 = svgRect.left + parseFloat(parts[parts.length - 2]);
+                    const y2 = svgRect.top + parseFloat(parts[parts.length - 1]);
                     const startsAtABottom = nodes.some((n) => near(n.cx, x1) && near(n.bottom, y1));
                     const endsAtATop = nodes.some((n) => near(n.cx, x2) && near(n.top, y2));
                     return startsAtABottom && endsAtATop;
                 });
             }""")
-        check("Every edge touches a node's bottom at one end and a node's top at the other",
+        check("Every edge touches a node's bottom at one end and a node's top at the other, "
+              "in real screen pixels",
               edges_touch_nodes())
 
         # Edges are read back from the DOM, so anything that moves the boxes

@@ -217,8 +217,14 @@ days.
   via a websocket, and keeps the full transcript if you close and reopen.
 - **Theme switch** (top bar): dark (the default) or light; your choice is
   remembered.
-- **Scale slider** (top right): zooms the whole UI — useful on a small
-  laptop screen or a large shared display.
+
+There used to be a Scale slider here too, zooming the whole UI via the CSS
+`zoom` property. It's gone: `zoom` doesn't compose with a phone's native
+pinch-to-zoom (the two nest, so zooming in on mobile could leave the page
+laid out at some compounded, unrecoverable scale) and the browser's own
+zoom already does this job well without that failure mode — use it
+directly (pinch, `Ctrl`/`Cmd` `+`/`-`, or your browser's zoom control)
+instead.
 
 ## How the draft command is built
 
@@ -520,9 +526,8 @@ each background rather than a naive inversion, so they stay legible either
 way.
 
 The top bar itself is a fixed blue (`#134394`) in both themes rather than a
-theme-swapped color — everything on it (buttons, the project path label, the
-zoom control) still adjusts for legible contrast against that blue in either
-mode.
+theme-swapped color — everything on it (buttons, the project path label)
+still adjusts for legible contrast against that blue in either mode.
 
 ## SLURM templates (any cluster)
 
@@ -603,7 +608,9 @@ parsing gaps introduced by a new RELION release show up as failures.
 ./run_tests.sh options      # + option placement, MPI/threads, Advanced section
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
-./run_tests.sh legacy       # + opening a project built in RELION's own GUI
+./run_tests.sh legacy       # + opening a project built in RELION's own GUI,
+                             #   and the network view's geometry on a wide,
+                             #   branching, long-job-name pipeline
 ./run_tests.sh auth         # + password protection (login/logout, the gate
                              #   on pages/API/websocket)
 ./run_tests.sh all          # everything (~80 s) — before you commit a milestone

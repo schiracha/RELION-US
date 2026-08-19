@@ -90,12 +90,16 @@ with sync_playwright() as p:
     page.locator(".winbox .wb-close").first.click()
     page.wait_for_timeout(200)
 
-    # Test the zoom slider
-    page.locator("#zoomSlider").fill("130")
-    page.locator("#zoomSlider").dispatch_event("input")
-    page.wait_for_timeout(200)
+    # The Scale slider (CSS `zoom` on #layout) is gone -- it didn't compose
+    # with a touch browser's native pinch-to-zoom (the two would nest rather
+    # than one replacing the other), which is what "scaling on mobile is
+    # broken, the page ends up nesting" was. The browser's own zoom does this
+    # job without that failure mode, so page scale is left to it entirely now.
+    if page.locator("#zoomSlider").count() or page.locator("#zoomControl").count():
+        errors.append("The Scale slider (#zoomSlider/#zoomControl) should have been removed")
     zoom_style = page.locator("#layout").evaluate("el => el.style.zoom")
-    print("Zoom after setting slider to 130:", zoom_style)
+    if zoom_style:
+        errors.append(f"#layout should have no inline zoom style anymore, found: {zoom_style!r}")
 
     # Test sidebar hide toggle
     page.locator("#toggleSidebarBtn").click()

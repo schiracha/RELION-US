@@ -15,7 +15,9 @@
 #                               #   wiring
 #   ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 #   ./run_tests.sh project      # + Change Project, recents, Create Folder
-#   ./run_tests.sh legacy       # + opening a project built in RELION's own GUI
+#   ./run_tests.sh legacy       # + opening a project built in RELION's own GUI,
+#                               #   and the network view's geometry on a wide,
+#                               #   branching, long-job-name pipeline
 #   ./run_tests.sh auth         # + password protection (login/logout, the
 #                               #   gate on pages/API/websocket)
 #   ./run_tests.sh ui           # + every browser suite
@@ -178,6 +180,8 @@ start_backend() {
     # Deliberately NO .relion_us marker: the point is a project RELION built
     # and this app has never seen.
     make_legacy_project "$proj"
+  elif [[ "$name" == test_network_branching ]]; then
+    make_legacy_branchy_project "$proj"
   else
     mkdir -p "$proj/.relion_us"
     echo "[]" > "$proj/.relion_us/run_history.json"
@@ -351,6 +355,86 @@ for it in (1, 2, 3):
 PY
 }
 
+# A wider, taller lineage than make_legacy_project's straight 5-job chain:
+# one job fans out to four children, one of those fans out to two more, and
+# every job carries one of RELION's real (and long -- some wrap to a second
+# line at the network view's 176px node width) tomography display names.
+# Exists to catch network-view geometry bugs a simple linear chain can't --
+# see test_network_branching.py, added for exactly that after the padding
+# bug described in style.css's "Network view" comment above #ccNetworkView.
+make_legacy_branchy_project() {
+  local proj="$1"
+  mkdir -p "$proj"
+  cat > "$proj/default_pipeline.star" <<'STAR'
+
+# version 30001
+
+data_pipeline_general
+
+_rlnPipeLineJobCounter                      22
+
+
+# version 30001
+
+data_pipeline_processes
+
+loop_
+_rlnPipeLineProcessName #1
+_rlnPipeLineProcessAlias #2
+_rlnPipeLineProcessTypeLabel #3
+_rlnPipeLineProcessStatusLabel #4
+TomoExcludeTilt/job004/       None            relion.excludetilts          Succeeded
+TomoAlign/job005/             None            relion.aligntiltseries       Succeeded
+TomoRecon/job010/             None            relion.reconstructtomograms  Succeeded
+TomoSubtomo/job011/           None            relion.pseudosubtomo         Succeeded
+TomoRecon/job015/             None            relion.reconstructtomograms  Succeeded
+TomoAlign/job013/             None            relion.aligntiltseries       Succeeded
+TomoExcludeTilt/job014/       None            relion.excludetilts          Succeeded
+TomoSubtomo/job018/           None            relion.pseudosubtomo         Succeeded
+TomoRecon/job021/             None            relion.reconstructtomograms  Succeeded
+
+
+# version 30001
+
+data_pipeline_output_edges
+
+loop_
+_rlnPipeLineEdgeProcess #1
+_rlnPipeLineEdgeToNode #2
+TomoExcludeTilt/job004/ TomoExcludeTilt/job004/tilts.star
+TomoAlign/job005/       TomoAlign/job005/aligned.star
+TomoRecon/job010/       TomoRecon/job010/tomograms.star
+TomoSubtomo/job011/     TomoSubtomo/job011/subtomo.star
+TomoRecon/job015/       TomoRecon/job015/tomograms.star
+TomoAlign/job013/       TomoAlign/job013/aligned.star
+TomoExcludeTilt/job014/ TomoExcludeTilt/job014/tilts.star
+TomoSubtomo/job018/     TomoSubtomo/job018/subtomo.star
+TomoRecon/job021/       TomoRecon/job021/tomograms.star
+
+
+# version 30001
+
+data_pipeline_input_edges
+
+loop_
+_rlnPipeLineEdgeFromNode #1
+_rlnPipeLineEdgeProcess #2
+TomoExcludeTilt/job004/tilts.star   TomoAlign/job005/
+TomoAlign/job005/aligned.star       TomoRecon/job010/
+TomoRecon/job010/tomograms.star     TomoSubtomo/job011/
+TomoRecon/job010/tomograms.star     TomoRecon/job015/
+TomoRecon/job010/tomograms.star     TomoAlign/job013/
+TomoRecon/job010/tomograms.star     TomoExcludeTilt/job014/
+TomoExcludeTilt/job014/tilts.star   TomoSubtomo/job018/
+TomoExcludeTilt/job014/tilts.star   TomoRecon/job021/
+STAR
+  mkdir -p "$proj/TomoExcludeTilt/job004" "$proj/TomoAlign/job005" \
+           "$proj/TomoRecon/job010" "$proj/TomoSubtomo/job011" \
+           "$proj/TomoRecon/job015" "$proj/TomoAlign/job013" \
+           "$proj/TomoExcludeTilt/job014" "$proj/TomoSubtomo/job018" \
+           "$proj/TomoRecon/job021"
+}
+
 # run_browser_suite <script> [pass_project_dir]
 run_browser_suite() {
   local script="$1" pass_proj="${2:-no}"
@@ -404,6 +488,7 @@ wants jobs     && run_browser_suite test_command_center.py
 wants jobs     && run_browser_suite test_command_center_abort_overwrite.py
 wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
+wants legacy   && run_browser_suite test_network_branching.py yes
 wants auth     && run_browser_suite test_auth.py
 
 echo
