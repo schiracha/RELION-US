@@ -218,13 +218,8 @@ days.
 - **Theme switch** (top bar): dark (the default) or light; your choice is
   remembered.
 
-There used to be a Scale slider here too, zooming the whole UI via the CSS
-`zoom` property. It's gone: `zoom` doesn't compose with a phone's native
-pinch-to-zoom (the two nest, so zooming in on mobile could leave the page
-laid out at some compounded, unrecoverable scale) and the browser's own
-zoom already does this job well without that failure mode — use it
-directly (pinch, `Ctrl`/`Cmd` `+`/`-`, or your browser's zoom control)
-instead.
+No in-app page-scale control — use your browser's own zoom (pinch,
+`Ctrl`/`Cmd` `+`/`-`, or its zoom control) instead.
 
 ## How the draft command is built
 
@@ -603,8 +598,9 @@ parsing gaps introduced by a new RELION release show up as failures.
 
 ```bash
 ./run_tests.sh              # backend suite only — seconds, run it always
-./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
-./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
+./run_tests.sh viewer       # + tomogram viewer, recent-projects, Progress
+                             #   tab, theme, file-picker (one shared suite;
+                             #   "progress" is an alias for the same tier)
 ./run_tests.sh options      # + option placement, MPI/threads, Advanced section
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
@@ -613,7 +609,7 @@ parsing gaps introduced by a new RELION release show up as failures.
                              #   branching, long-job-name pipeline
 ./run_tests.sh auth         # + password protection (login/logout, the gate
                              #   on pages/API/websocket)
-./run_tests.sh all          # everything (~80 s) — before you commit a milestone
+./run_tests.sh all          # everything — before you commit a milestone
 ```
 
 The browser suites are tiered because each one needs its own backend on its own
@@ -641,8 +637,8 @@ To run one suite by hand, point it at any live instance — each takes a base UR
 (and the two that write fixtures also take a project directory):
 
 ```bash
-python3 test_command_center.py http://127.0.0.1:8420
-python3 test_viewer_and_recents.py http://127.0.0.1:8420 /path/to/empty/project
+python3 test_jobs.py http://127.0.0.1:8420
+python3 test_viz_and_progress.py http://127.0.0.1:8420 /path/to/empty/project
 ```
 
 Set `RELION_US_CHROMIUM` if Playwright can't find a usable Chromium itself

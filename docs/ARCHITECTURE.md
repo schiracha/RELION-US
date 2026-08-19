@@ -141,7 +141,7 @@ the current popup first — a real click can't reach through it. Browser tests
 that need to simulate "open a second job while the first is still open"
 therefore use `dispatch_event("click")` (fires the handler directly,
 bypassing DOM hit-testing) rather than a literal mouse click — see
-`test_frontend.py`.
+`test_jobs.py`.
 
 **Top bar color.** `#topbar` overrides `--panel`/`--panel-alt`/`--text`/
 `--text-dim`/`--border`/`--accent-dim` to fixed values, rather than a fixed
@@ -152,22 +152,12 @@ the DOM, so overriding them once at `#topbar` makes the whole bar's buttons
 and labels legible against the fixed blue automatically, in both themes,
 without a second copy of every rule.
 
-**No page-scale control.** There used to be a Scale slider here, applying
-the CSS `zoom` property to `#layout`. Removed: `zoom` doesn't compose with a
-touch browser's native pinch-to-zoom — the two nest instead of one replacing
-the other, so zooming in on mobile could leave the page laid out at some
-compounded, unrecoverable scale (this is what "the scaling on mobile is
-broken... the page ends up nesting" was — not a bug in this app's `zoom`
-usage so much as `zoom` and native pinch-zoom fundamentally not getting
-along on that platform). The browser's own zoom already does this job well
-without that failure mode, so the fix was deletion, not a mobile-specific
-workaround: the slider (`#zoomControl` in index.html), its `input` handler
-in app.js, and `#layout { zoom: 1; }` in style.css. `#logoutBtn` (the
-password-protection "Log out" button — see "Password protection" below)
-took over the `margin-left: auto` that used to keep the slider pinned to the
-top bar's right edge; it also picked up a `.hidden` rule it had been
-missing since it was added, which meant it had been rendering unstyled and
-unconditionally visible regardless of that class — caught in the same pass.
+**No page-scale control.** No in-app zoom/scale slider: the CSS `zoom`
+property doesn't compose with a touch browser's native pinch-to-zoom (the
+two nest instead of one replacing the other), so the browser's own zoom is
+used directly instead. `#logoutBtn` (the password-protection "Log out"
+button — see "Password protection" below) owns `margin-left: auto`, pinning
+trailing top bar controls to the right edge.
 
 ### Where a job's options live
 
@@ -194,12 +184,9 @@ One tab, two different questions, answered in order:
   procs re-fetches rather than reusing a stale answer.
 
 The split is by *provenance*, not by how advanced an option feels, and not by
-being a separate tab: putting it in its own tab (as an earlier iteration did)
-implied it was a peer of Inputs/Progress/Outputs/Errors, when it is really
-more Inputs the GUI doesn't have a field for. The alternative to *that* split
-— first RELION tab on top, later tabs in Advanced — buried Optimisation and
-Compute behind a tab while leaving nothing for the options RELION's own GUI
-has no field for.
+being a separate tab: a separate tab would imply it's a peer of
+Inputs/Progress/Outputs/Errors, when it is really more Inputs the GUI
+doesn't have a field for.
 
 #### RELION's Running tab
 
@@ -699,26 +686,20 @@ single point.
 
 The overlay `<svg id="ccNetworkEdges">` is a sibling of `#ccNetworkRows`,
 both children of `#ccNetworkCanvas` — `position: absolute; inset: 0` on the
-SVG is what makes it cover exactly the same box `#ccNetworkRows` occupies,
-which only holds if the two share a coordinate space. They didn't, for a
-while: `#ccNetworkCanvas` used to carry the view's 24px breathing-room
-padding directly. `inset: 0` on an absolutely positioned element is measured
-from its containing block's *padding edge*, which ignores that block's own
-padding — so the SVG rendered flush with the canvas's border, 24px above and
-left of where `#ccNetworkRows` (an ordinary flow child, which the padding
-*does* push in) actually sat on screen. Every edge landed 24px short of the
-node it was meant to touch, on every project shape, not just wide or
-branching ones — "the lines never quite reach the top of the following job".
-The padding now lives on `#ccNetworkView` (the scrolling viewport) instead,
-so `#ccNetworkCanvas` carries none and its content edge — which is what both
-`#ccNetworkRows` and the SVG's `inset: 0` measure from — is the same point
-for both. `test_legacy_project.py`'s and `test_network_branching.py`'s
-`edges_touch_nodes()` checks compare real `getBoundingClientRect()` pixels
-for exactly this reason: comparing `offsetTop`/`offsetLeft` against the SVG
-path's own `d` coordinates (as `renderNetwork()` computes one from the
-other) is tautological and would have passed throughout — it can only catch
-`renderNetwork()` disagreeing with itself, never the overlay disagreeing
-with the screen.
+SVG is what makes it cover exactly the same box `#ccNetworkRows` occupies.
+That only holds because `#ccNetworkCanvas` itself carries no padding: `inset:
+0` on an absolutely positioned element is measured from its containing
+block's *padding* edge, which ignores that block's own padding, so any
+padding on `#ccNetworkCanvas` would put the SVG out of alignment with
+`#ccNetworkRows` (an ordinary flow child, which padding *does* push in) by
+that same amount. The view's breathing-room padding lives on `#ccNetworkView`
+(the scrolling viewport) instead. `test_legacy_project.py`'s and
+`test_network_branching.py`'s `edges_touch_nodes()` checks compare real
+`getBoundingClientRect()` pixels rather than `offsetTop`/`offsetLeft` against
+the SVG path's own `d` coordinates, since the latter is tautological —
+`renderNetwork()` computes one from the other, so that comparison can only
+catch it disagreeing with itself, never the overlay disagreeing with the
+screen.
 
 **Keeping edges glued to their boxes.** Edges are a one-time read of the
 DOM's layout, not a live binding — so anything that moves the boxes without
@@ -732,12 +713,10 @@ click) and a browser window resize. Both are covered by one mechanism —
 `#ccNetworkCanvas`, which stretches to fill `#ccNetworkView`'s available
 width (`min-width: 100%` in style.css) and so resizes on either cause,
 `renderNetwork()`-ing again (debounced to one `requestAnimationFrame`) each
-time it fires. Because it keeps firing for the sidebar's whole transition, it
-lands on the correct final layout rather than a mid-transition snapshot — an
-earlier version that only recomputed once, on the click itself, is what
-produced the visibly-not-quite-touching lines this replaced. The sidebar
-toggle handler also calls `renderNetwork()` directly, belt-and-suspenders,
-so the boxes and lines never visibly disagree even for a frame.
+time it fires, so it keeps landing on the correct layout for the sidebar's
+whole transition rather than a mid-transition snapshot. The sidebar toggle
+handler also calls `renderNetwork()` directly, belt-and-suspenders, so the
+boxes and lines never visibly disagree even for a frame.
 
 **Newest/oldest at the top.** A second, independent direction toggle from
 the Timeline's (`ccNetworkDirection`, its own `localStorage` key) — sharing

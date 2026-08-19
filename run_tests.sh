@@ -8,8 +8,11 @@
 # no information. So they are grouped into tiers you pick from.
 #
 #   ./run_tests.sh              # backend pytest only (the default; seconds)
-#   ./run_tests.sh viewer       # + the tomogram viewer / recent-projects suite
-#   ./run_tests.sh progress     # + the Progress tab / theme / file-picker suite
+#   ./run_tests.sh viewer       # + the tomogram viewer, recent-projects, the
+#                               #   Progress tab, theme, and file-picker suite
+#                               #   (viewer and progress share one script/
+#                               #   backend -- pick either name, same suite)
+#   ./run_tests.sh progress     # (see viewer, above)
 #   ./run_tests.sh options      # + where a job's options live (Inputs tab /
 #                               #   Advanced section) and the MPI/threads/extra-args
 #                               #   wiring
@@ -41,11 +44,12 @@
 # project is touched -- a suite that asserts "no jobs yet" fails against a
 # project that has history, which is a false alarm, not a bug.
 #
-# The `options` suite needs a program on PATH answering to a RELION binary
-# name, so it can check what the Advanced section lists. A stub printing
-# RELION's own --help format is generated for it -- point
-# RELION_US_REAL_BINARIES at a real RELION bin directory to run it against the
-# genuine article instead.
+# Every suite's backend gets a stub `relion_refine`/`relion_refine_mpi` on
+# PATH answering to RELION's own --help format (make_stub_bin) -- the
+# `options` suite is the one that actually reads it (to check what the
+# Advanced section lists), but it's generated unconditionally since it's
+# cheap. Point RELION_US_REAL_BINARIES at a real RELION bin directory to run
+# against the genuine article instead.
 #
 # Environment:
 #   RELION_US_PYTHON    python to use (default: python3)
@@ -480,12 +484,13 @@ else
   FAILED+=("backend pytest")
 fi
 
-wants viewer   && run_browser_suite test_viewer_and_recents.py yes
-wants progress && run_browser_suite test_progress_and_theme.py yes
+# viewer and progress share one script/backend now (test_viz_and_progress.py
+# covers both) -- run it once if either tier was requested, not twice.
+if wants viewer || wants progress; then
+  run_browser_suite test_viz_and_progress.py yes
+fi
 wants options  && run_browser_suite test_job_options_panel.py
-wants jobs     && run_browser_suite test_frontend.py
-wants jobs     && run_browser_suite test_command_center.py
-wants jobs     && run_browser_suite test_command_center_abort_overwrite.py
+wants jobs     && run_browser_suite test_jobs.py
 wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
 wants legacy   && run_browser_suite test_network_branching.py yes

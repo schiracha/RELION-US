@@ -470,10 +470,8 @@ def update_run(run_id: str, req: RunUpdateRequest):
     independent metadata edits. Any combination of fields may be given in
     one call; each is applied in turn.
 
-    Everything is validated BEFORE anything is written: an invalid status
-    used to be rejected only after the alias/note edits had already been
-    persisted, so the caller got an error while two of three changes had
-    silently landed on disk."""
+    Everything is validated before anything is written, so a rejected status
+    can't leave the alias/note edits from the same call partially applied."""
     if req.alias is None and req.note is None and req.status is None:
         raise HTTPException(
             status_code=400,

@@ -36,8 +36,6 @@ PathLike = Union[str, Path]
 # on every load, since not every STAR file needs every column.
 TOMOGRAM_NAME_COL = "rlnTomoName"
 COORD_COLS = ("rlnCoordinateX", "rlnCoordinateY", "rlnCoordinateZ")
-PARTICLE_ID_COL = "rlnTomoParticleId"
-TILT_SERIES_STARFILE_COL = "rlnTomoTiltSeriesStarFile"
 
 
 class MissingColumnError(KeyError):

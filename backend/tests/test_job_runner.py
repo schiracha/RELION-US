@@ -68,16 +68,6 @@ def test_switching_project_scopes_list_runs(tmp_path):
     assert run_b.run_id not in ids_in_a
 
 
-def _wait(run):
-    async def go():
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
-                break
-        return run
-    return asyncio.run(go())
-
-
 def test_job_runs_from_project_root_relative_paths_resolve(tmp_path):
     """RELION-matching execution model: the subprocess runs from the PROJECT
     ROOT, so a project-root-relative input (like RELION's `frames/*.mrc`)
@@ -189,8 +179,8 @@ def test_list_runs_merges_persisted_history_from_a_prior_session(tmp_path):
 
 def test_abort_before_process_exists_does_not_orphan(tmp_path):
     """Aborting in the window between start_subprocess_job() returning and the
-    launcher task spawning the process used to return False and leave the job
-    running. It must now abort cleanly, with no process spawned at all."""
+    launcher task spawning the process must abort cleanly, with no process
+    spawned at all."""
     import subprocess
     project_manager.init_new_project(tmp_path)
     manager = JobRunManager(tmp_path)
@@ -202,7 +192,9 @@ def test_abort_before_process_exists_does_not_orphan(tmp_path):
         )
         # no await in between -> the launcher hasn't run, run.proc is None
         aborted = await manager.abort_run(run.run_id)
-        await asyncio.sleep(1.0)
+        # abort_run already completed synchronously above; this is just a
+        # margin in case a late spawn slips in after it.
+        await asyncio.sleep(0.3)
         return run, aborted
 
     run, aborted = asyncio.run(go())
@@ -219,19 +211,32 @@ def test_abort_kills_the_whole_process_group(tmp_path):
     manager = JobRunManager(tmp_path)
     marker = "relion_us_group_abort_test"
 
+    def count(marker):
+        return int(subprocess.run(["pgrep", "-fc", marker],
+                                   capture_output=True, text=True).stdout.strip() or "0")
+
+    async def poll_until(cond, cap_s=1.0, step_s=0.05):
+        elapsed = 0.0
+        while elapsed < cap_s:
+            if cond():
+                return True
+            await asyncio.sleep(step_s)
+            elapsed += step_s
+        return cond()
+
     async def go():
         run = await manager.start_subprocess_job(
             "Import", "Import", f"sleep 30 # {marker}", subdir="Import/job001"
         )
-        await asyncio.sleep(0.8)
-        before = subprocess.run(["pgrep", "-fc", marker], capture_output=True, text=True)
+        await poll_until(lambda: count(marker) >= 1)
+        before = count(marker)
         aborted = await manager.abort_run(run.run_id)
-        await asyncio.sleep(1.2)
-        after = subprocess.run(["pgrep", "-fc", marker], capture_output=True, text=True)
-        return run, aborted, before.stdout.strip(), (after.stdout.strip() or "0")
+        await poll_until(lambda: count(marker) == 0)
+        after = count(marker)
+        return run, aborted, before, after
 
     run, aborted, before, after = asyncio.run(go())
     assert aborted is True
-    assert int(before) >= 1, "test process never started"
-    assert after == "0", f"{after} process(es) survived the abort"
+    assert before >= 1, "test process never started"
+    assert after == 0, f"{after} process(es) survived the abort"
     assert run.status == "aborted"

@@ -51,13 +51,11 @@ function formatDuration(startedAt, endedAt) {
   return `${hrs}h ${remMins}m`;
 }
 
-// --- Lightweight custom confirm/prompt dialogs -----------------------------
-// Deliberately never native confirm()/prompt() (or errorDialog()): those are
-// modal at the OS/browser level and block the whole page, including
-// anything driving it programmatically (e.g. Playwright) -- this app
-// already avoids native errorDialog() for project-switch errors for the same
-// reason (see the #projectModalError/#notAProjectError banners). These
-// build a throwaway overlay, resolve a promise, and remove themselves.
+// --- Lightweight custom confirm/prompt/error dialogs -----------------------
+// Never the browser's native confirm()/prompt()/alert(): those are modal at
+// the OS level and block the whole page, including anything driving it
+// programmatically (e.g. Playwright). These build a throwaway overlay,
+// resolve a promise, and remove themselves.
 
 function statusLineClass(status) {
   if (status === "completed") return "status-line ok";
@@ -65,10 +63,6 @@ function statusLineClass(status) {
   return "status-line";
 }
 
-// Error reporting matches the confirm/prompt dialogs below. Native errorDialog() is
-// deliberately avoided everywhere in this file (see the note on confirmDialog):
-// it blocks the whole page at the browser level, including anything driving
-// the UI programmatically, which is exactly what the Playwright suites do.
 function errorDialog(message) {
   return confirmDialog(message, { confirmLabel: "OK", danger: false });
 }
@@ -203,10 +197,9 @@ function applyJobFilters() {
 }
 
 function setPipelineFilter(value, { persist = true } = {}) {
-  // persist=false is used for the project's auto-detected pipeline hint. That
-  // hint is a convenience, not a preference: writing it to localStorage
-  // overwrote the user's own deliberate choice (it shares the same key), so
-  // picking "All" in a tomo project was silently undone on the next reload.
+  // persist=false is used for the project's auto-detected pipeline hint --
+  // a convenience, not a preference, so it must never overwrite the user's
+  // own deliberate choice in localStorage (they share the same key).
   pipelineFilter = value;
   if (persist) {
     try {
@@ -567,8 +560,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       `(${data.hidden_by_gui} are already fields above). ` +
       `Adding one appends it to the command box, where you can still edit it.`;
     advancedContent.appendChild(intro);
-    // Matches the count badge every other section shows, now that this is
-    // filled in asynchronously rather than known synchronously up front.
+    // Matches the count badge every other section shows.
     advancedSummary.innerHTML =
       `<span class="opt-section-name">Advanced</span>` +
       `<span class="opt-section-count">${data.options.length}</span>`;
@@ -859,9 +851,8 @@ async function openJobPopup(internalName, displayName, existingRun) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      // Only close once the run actually started -- closing first meant a
-      // failed overwrite destroyed the user's edited command and field values
-      // with nothing but an error message left behind.
+      // Close only after the run starts, so a failed overwrite leaves the
+      // user's edited command and field values intact instead of destroyed.
       win.close();
       openJobPopup(internalName, displayName, run);
       refreshCommandCenter();
@@ -1186,9 +1177,9 @@ async function openJobPopup(internalName, displayName, existingRun) {
         refreshCommandCenter();
       } catch (err) {
         appendOutputLine("Failed to start run: " + err.message, true);
-        // Only re-enable on failure -- leaving it enabled after a successful
-        // start let a second click launch a whole second job (new jobNNN) and
-        // orphan the first job's websocket.
+        // Re-enable only on failure, so a successful start can't be double
+        // clicked into launching a second job and orphaning the first
+        // job's websocket.
         runBtn.disabled = false;
       }
     });
@@ -1864,7 +1855,6 @@ function closeProjectModal() {
 
 async function onProjectChanged() {
   await refreshProjectLabel();
-refreshPipelineSync();
   await refreshCommandCenter();
   await refreshPipelineSync();   // the setting is per project
 }
@@ -2196,7 +2186,6 @@ async function openVisualizer() {
   // ---- slice fetching ----------------------------------------------------
   // Only panels whose own slice index actually moved are refetched: clicking
   // in XY moves x and y, which changes the ZY and XZ cuts but not XY's own.
-  const lastIndex = { xy: null, zy: null, xz: null };
   let pending = new Set();
   let sliceTimer = null;
 
@@ -2226,7 +2215,6 @@ async function openVisualizer() {
     const img = q(p.img);
     img.onload = () => drawOverlay(key);
     img.src = `/api/viz/slice?${params.toString()}`;
-    lastIndex[key] = index;
   }
 
   function refreshAllPanels() {
@@ -2328,10 +2316,8 @@ async function openVisualizer() {
   async function loadVolume(mrcPath) {
     statusEl.textContent = "Loading volume…";
     try {
-      // Fetch FIRST, commit after: assigning state.mrc up front meant a failed
-      // load left state.mrc pointing at the new volume while state.vinfo still
-      // described the old one, so the next nudge requested slices of the new
-      // MRC using the old volume's index range.
+      // Fetch first, commit state after -- a failed load must not leave
+      // state.mrc/state.vinfo describing two different volumes.
       const info = await api(`/api/viz/volume-info?mrc_path=${encodeURIComponent(mrcPath)}`);
       state.mrc = mrcPath;
       state.vinfo = info;

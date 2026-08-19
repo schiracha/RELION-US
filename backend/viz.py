@@ -369,8 +369,8 @@ def render_slice_png(
     if transpose:
         sl = np.ascontiguousarray(sl.T)
 
-    # lo and hi are independent query params, so fill each in separately --
-    # supplying only one used to silently discard it and re-derive both.
+    # lo and hi are independent query params, each filled in separately so
+    # supplying only one doesn't discard it and re-derive both.
     # nanpercentile because NaN voxels are real in cryo-ET (failed CTF
     # weighting, masked reconstructions); a plain percentile returns NaN,
     # `hi <= lo` is then False (NaN comparisons always are), and the whole
@@ -440,9 +440,9 @@ def load_picks(
     matched, message = _match_check(tomo_name, tomo_names)
 
     # Filter to the requested tomogram. If the picks file names tomograms and
-    # NONE of them is this one, return no picks -- previously this fell back
-    # to the whole DataFrame, which silently drew every tomogram's particles
-    # on top of one tomogram (and looked exactly like a correct overlay).
+    # NONE of them is this one, return no picks rather than falling back to
+    # the whole DataFrame -- that would silently draw every tomogram's
+    # particles on top of one tomogram, indistinguishable from a real match.
     sel = df
     if tomo_name and TOMO_NAME_COL in df.columns:
         mask = df[TOMO_NAME_COL].astype(str).apply(lambda v: _names_match(v, tomo_name))

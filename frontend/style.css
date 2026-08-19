@@ -106,12 +106,8 @@ html, body {
 #pipelineSyncBtn.active { border-color: var(--ok); color: var(--ok); }
 #projectDirLabel { color: var(--text-dim); font-size: 12px; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 /* Password protection is opt-in (backend/auth.py) -- hidden by default,
-   shown only once app.js confirms it's actually turned on (see the
-   #logoutBtn wiring there). Was missing its own .hidden rule until this
-   pass, so the button was rendering unstyled *and* always visible
-   regardless of that class -- caught while removing the Scale slider,
-   which used to be the thing pinning trailing topbar controls to the right
-   via margin-left: auto; #logoutBtn takes over that job now. */
+   shown only once app.js confirms it's actually turned on. Also owns
+   margin-left:auto, pinning trailing topbar controls to the right. */
 #logoutBtn.hidden { display: none; }
 #logoutBtn { margin-left: auto; }
 
@@ -324,18 +320,12 @@ html, body {
    Top (read back in app.js's renderNetwork) and the overlay SVG (absolutely
    positioned, sized to match via inset:0) are measured against.
 
-   The breathing room around the network lives on #ccNetworkView (the
-   scrolling viewport), NOT on #ccNetworkCanvas. inset:0 on an absolutely
-   positioned child is measured from its containing block's *padding* edge,
-   which ignores that block's own padding entirely -- so if #ccNetworkCanvas
-   carried the padding instead, the SVG (sized to the canvas via inset:0)
-   would end up padding-px above and left of where #ccNetworkRows (a normal
-   flow child, which *does* get pushed in by the canvas's padding) actually
-   sits. Every edge would then land that far short of the node it's supposed
-   to touch -- exactly the "lines never quite reach the top of the following
-   job" bug. Keeping #ccNetworkCanvas padding-free keeps its content edge and
-   #ccNetworkRows's top-left at the same point, which is what the overlay
-   SVG's coordinate space needs to match. */
+   Breathing room lives on #ccNetworkView (the scrolling viewport), not on
+   #ccNetworkCanvas: inset:0 on an absolutely positioned child ignores its own
+   containing block's padding, so padding on #ccNetworkCanvas would put the
+   SVG out of alignment with #ccNetworkRows (an ordinary flow child, which
+   padding does push in) by that same amount. Keeping #ccNetworkCanvas
+   padding-free keeps both at the same top-left point. */
 #ccNetworkView { overflow: auto; padding: 24px; }
 #ccNetworkCanvas { position: relative; min-width: 100%; width: max-content; }
 #ccNetworkRows { position: relative; display: flex; flex-direction: column; gap: 46px; }
@@ -564,8 +554,7 @@ html, body {
    order, as collapsible sections, plus the Advanced section (options the GUI
    never shows) appended last, past Running/Other. Sizing/scrolling comes
    from the "inputs" tab-content that wraps this (see .tab-content rules
-   below) rather than from this element itself, now that it lives in a tab
-   instead of being its own always-visible region above the tab bar. */
+   below), not from this element itself. */
 .job-standard-form {
   padding: 8px 10px;
 }

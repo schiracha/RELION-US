@@ -62,9 +62,13 @@ def main():
         check(f"An API call while logged out gets 401, not data ({status})", status == 401)
 
         # ---- wrong password: rejected, stays on the login page ----
+        # The backend adds a deliberate 0.5s delay on a wrong guess (see
+        # main.py's auth_login) -- wait for the error text itself rather than
+        # a fixed sleep close to that margin, which would be a timing race
+        # under load rather than a real check of the behavior.
         page.locator("#password").fill("not the password")
         page.locator("#loginForm button[type=submit]").click()
-        page.wait_for_timeout(600)
+        page.wait_for_selector("#loginError:not(:empty)", timeout=5000)
         check(f"Wrong password shows an error ({page.locator('#loginError').inner_text()!r})",
               "incorrect" in page.locator("#loginError").inner_text().lower())
         check("Still on the login page after a wrong password",

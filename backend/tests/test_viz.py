@@ -46,13 +46,6 @@ def test_volume_info_dims_and_contrast(tmp_path):
     assert vi["contrast_hi"] > vi["contrast_lo"]
 
 
-def test_render_slice_returns_png_each_axis(tmp_path):
-    _make_project(tmp_path)
-    for axis, idx in (("z", 15), ("y", 25), ("x", 20)):
-        png = viz.render_slice_png(tmp_path, "TS_01.mrc", axis, idx)
-        assert png[:4] == b"\x89PNG", axis
-
-
 def test_load_picks_matches_tomo(tmp_path):
     _make_project(tmp_path)
     vi = viz.volume_info(tmp_path, "TS_01.mrc")

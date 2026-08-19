@@ -501,11 +501,10 @@ class JobRunManager:
         in-memory state rather than kept as separate mutable counter state,
         so it can't drift out of sync across a backend restart.
 
-        **RELION's own numbering counts too.** Opening a project that was built
-        in RELION's GUI, this app used to start again at job001 -- and job001
-        in such a project is somebody's existing results. `rlnPipeLineJobCounter`
-        and the per-process numbers in `default_pipeline.star` are read so the
-        numbering continues the project instead of colliding with it.
+        **RELION's own numbering counts too.** `rlnPipeLineJobCounter` and the
+        per-process numbers in `default_pipeline.star` are read so opening a
+        project built in RELION's own GUI continues its numbering instead of
+        colliding with job001 and other numbers it already owns.
 
         As a final backstop, if the directory the number would produce already
         exists on disk (a job RELION ran but later removed from its pipeline,
@@ -782,7 +781,6 @@ class JobRunManager:
         # try/finally so the run ALWAYS reaches a terminal status and is
         # persisted -- otherwise an unexpected error here leaves the Command
         # Center showing a job that runs forever, with an unreaped child.
-        # (_run_custom already had this; the two paths now match.)
         exit_code = None
         try:
             await asyncio.gather(
@@ -953,10 +951,9 @@ class JobRunManager:
         the process's own shutdown."""
         run = self.get(run_id)
         # PENDING counts: there is a real window between start_*_job() creating
-        # the run and its task setting status to RUNNING, and a fast click
-        # landing in that window used to return False while the job carried on
-        # running. The abort_requested flag below covers the process handle not
-        # existing yet.
+        # the run and its task setting status to RUNNING, so a click landing in
+        # that window must still abort cleanly. The abort_requested flag below
+        # covers the process handle not existing yet.
         if run is None or run.status not in (STATUS_PENDING, STATUS_RUNNING):
             return False
         run.status = STATUS_ABORTED

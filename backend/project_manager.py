@@ -305,9 +305,7 @@ def detect_pipeline_hint(project_dir: Path) -> str:
     # RELION appends a sub-label to the base type for many jobs
     # (`label += ".movies"`, `".em"`, `".topaz"` -- 35 places in
     # pipeline_jobs.cpp), so a real project records "relion.class2d.em" while
-    # this app's catalog holds "relion.class2d". An exact-set test therefore
-    # matched nothing at all on any real project, and this hint silently never
-    # fired. Match on the base label instead.
+    # this app's catalog holds "relion.class2d". Match on the base label.
     def _matches(label: str, base_labels: set[str]) -> bool:
         return any(label == b or label.startswith(b + ".") for b in base_labels)
 
