@@ -601,6 +601,24 @@ match RELION's own `>>` (so an Overwrite's output accumulates on top of the
 previous attempt's, not replaces it). Best-effort: a logging failure never
 takes down the job itself.
 
+**A synced job used to appear twice in the Command Center.** `list_runs()`
+merges three sources — RELION's own `default_pipeline.star` (read-only
+placeholders, `_relion_pipeline_entries()`), this app's persisted history,
+and any still-tracked in-memory runs — into one dict keyed by `run_id`. Once
+a job started here is *also* registered with RELION's pipeline, the same
+job exists under two different `run_id`s: this app's own (a uuid) and the
+synthetic `"relion:jobNNN"` placeholder `_relion_pipeline_entries()`
+generates from every row in `default_pipeline.star`, unconditionally. Keyed
+by `run_id`, those never collide, so the job doubled — a live repro (10 jobs,
+sync on) produced 20 Command Center rows, half of them blank
+`source: "relion"` placeholders sitting right next to this app's own richer
+entry for the identical job. Fixed by tracking which job numbers this app
+already has its own record for, and skipping the RELION-side placeholder for
+any of them — `_relion_pipeline_entries()`'s placeholders now only surface
+jobs genuinely run outside this app entirely (a legacy project adopted from
+disk, or a job launched from RELION's own GUI), which is what they were
+always meant to represent.
+
 `backend/tests/fake_relion_pipeliner.py` stands in for the real binary in
 tests — it implements just the two subcommands above against a simplified
 pipeline format, explicitly documented in its own docstring as a test double

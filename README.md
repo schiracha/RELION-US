@@ -286,6 +286,19 @@ new pipeline entry. Every run — fresh or Overwrite — also now leaves
 convention, even though RELION-US streams output live rather than
 shell-redirecting it.
 
+**Command Center rows doubling up once sync is on:** fixed. A job started
+here and also registered with RELION's own pipeline used to show up as two
+separate rows — this app's own entry plus a blank read-only placeholder
+pulled straight from `default_pipeline.star` — since they carry different
+internal IDs and the merge never noticed they're the same job. This is what
+made clicking around the Command Center (Table/Timeline/Network — every job
+number, not just recent ones) feel like it opened the wrong job: with twice
+as many rows as jobs, a click that looked like it landed on one job's row
+could easily land on its duplicate neighbor instead. Now a job this app has
+its own record for only ever shows once; the read-only RELION placeholder is
+reserved for jobs genuinely run outside this app (a legacy project, or one
+launched from RELION's own GUI directly).
+
 ## The Advanced section (options the GUI doesn't show)
 
 RELION's GUI exposes a subset of what each program actually accepts. The rest —

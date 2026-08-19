@@ -289,18 +289,42 @@ class JobRunManager:
         which may have moved past what was last persisted, e.g. still
         running). In-memory wins on conflict since it's more current."""
         target = str(project_dir if project_dir is not None else self.project_dir)
-        merged: dict[str, dict] = {}
-        # Jobs RELION itself ran, from its own default_pipeline.star. First, so
-        # anything this app also has a record of overrides them.
-        for entry in self._relion_pipeline_entries(Path(target)):
-            merged[entry["run_id"]] = entry
+        own_entries: dict[str, dict] = {}
+        own_job_numbers: set[int] = set()
         for entry in project_manager.load_history(Path(target)):
             run_id = entry.get("run_id")
             if run_id:
-                merged[run_id] = entry
+                own_entries[run_id] = entry
+                if entry.get("job_number"):
+                    own_job_numbers.add(entry["job_number"])
         for run in self.runs.values():
             if run.project_dir == target:
-                merged[run.run_id] = run.to_summary()
+                own_entries[run.run_id] = run.to_summary()
+                if run.job_number:
+                    own_job_numbers.add(run.job_number)
+        # Jobs RELION itself ran, from its own default_pipeline.star -- but
+        # ONLY for job numbers this app has no record of. Once two-way sync
+        # registers a job here with RELION's pipeline (see
+        # _register_in_relion_pipeline), that job's number shows up in BOTH
+        # sources for the SAME underlying job, not two different jobs: a
+        # run_id-keyed merge (the previous approach) never notices the
+        # collision, since this app's own uuid run_id and the synthetic
+        # "relion:jobNNN" placeholder are different strings -- so every
+        # synced job silently doubled in the Command Center (confirmed: a
+        # 10-job synced project produced 20 rows, one uninformative
+        # "source: relion" placeholder per real job, right next to this
+        # app's own richer entry for the identical job). Skipping the
+        # placeholder whenever this app already has a record for that job
+        # number keeps exactly one row per job while still surfacing jobs
+        # genuinely run outside this app entirely (a legacy project, or a
+        # job launched from RELION's own GUI) that only exist in
+        # default_pipeline.star.
+        merged: dict[str, dict] = {}
+        for entry in self._relion_pipeline_entries(Path(target)):
+            if entry.get("job_number") in own_job_numbers:
+                continue
+            merged[entry["run_id"]] = entry
+        merged.update(own_entries)
         # Job number first, timestamp as a tie-break. Jobs imported from
         # RELION's pipeline carry no timestamp, and a project's job counter
         # only ever goes up -- for RELION's jobs and this app's alike -- so the

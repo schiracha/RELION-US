@@ -257,6 +257,52 @@ def test_registration_failure_falls_back_instead_of_losing_the_job(project, monk
     assert m.prospective_subdir("Class2D", project) == "Class2D/job007"
 
 
+def test_synced_job_appears_once_not_twice_in_the_command_center(project):
+    """list_runs() used to merge RELION's own default_pipeline.star entries
+    keyed by run_id, alongside this app's own history keyed by ITS OWN
+    (different) run_id -- so once a job was registered with RELION's
+    pipeline, the SAME job showed up as two separate Command Center rows: a
+    blank "source: relion" placeholder next to this app's own richer entry.
+    Confirmed via a live repro (a 10-job synced project produced 20 rows)
+    before this was fixed by skipping the placeholder whenever this app
+    already has a record for that job number."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+
+    async def go():
+        run = await m.start_subprocess_job("Class2D", "Class2D", "echo hi", subdir="Class2D/job001")
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return run
+
+    run = asyncio.run(go())
+    rows = m.list_runs(project)
+    matching = [r for r in rows if r.get("job_number") == run.job_number]
+    assert len(matching) == 1, f"job{run.job_number:03d} appeared {len(matching)} times: {matching}"
+    # The app's own (richer: live status, real command) entry wins, not the
+    # blank "source: relion" placeholder.
+    assert matching[0]["run_id"] == run.run_id
+    assert matching[0].get("source") != "relion"
+
+
+def test_a_job_relion_ran_outside_this_app_still_appears(project):
+    """The dedup above must only suppress the RELION-side placeholder when
+    this app has its OWN record for that job number -- a job genuinely run
+    outside this app entirely (RELION's own GUI, or a project adopted from
+    disk) has no such record and must still show up."""
+    # Simulate a job RELION's own GUI ran, entirely outside this app: add it
+    # straight to the pipeline via the same call RELION's GUI itself drives.
+    registered = pipeline_bridge.register_job(project, "relion.class2d", {"nr_classes": 4})
+    m = job_runner.JobRunManager(project)
+    rows = m.list_runs(project)
+    matching = [r for r in rows if r.get("job_number") == registered["job_number"]]
+    assert len(matching) == 1
+    assert matching[0]["source"] == "relion"
+    assert matching[0]["run_id"] == f"relion:job{registered['job_number']:03d}"
+
+
 def test_custom_bridges_are_never_registered(project):
     """The four import bridges are RELION-US's own; RELION has no job type for
     them, and inventing one would put a job in RELION's pipeline that its GUI
