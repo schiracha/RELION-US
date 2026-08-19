@@ -100,6 +100,19 @@ def main():
         after = win.locator(".opt-section-grid [data-field-key]:visible").count()
         check(f"Expanding a section reveals its fields ({before} -> {after})", after > before)
 
+        # ---- Browse buttons: any single-file field, not just STAR/glob params ----
+        # fn_img (I/O, open by default) is a genuine file field (RELION's own
+        # pattern mixes STAR and image-stack extensions) and should get one;
+        # psi_sampling (Sampling tab) is one of job_definitions_raw.json's
+        # mis-extracted numeric "patterns" on a plain float field (its
+        # pattern is literally "0.5", no glob or parens) and must not.
+        check("A genuine file field (fn_img) has a Browse button",
+              win.locator('[data-field-key="fn_img"] .field-browse-row').count() == 1)
+        win.locator(".opt-section-head", has_text="Sampling").click()
+        page.wait_for_timeout(300)
+        check("A mis-extracted numeric field (psi_sampling) gets no Browse button",
+              win.locator('[data-field-key="psi_sampling"] .field-browse-row').count() == 0)
+
         # the Running fields are real and drive the command
         win.locator(".opt-section-head", has_text="Running").click()
         page.wait_for_timeout(300)
@@ -189,20 +202,23 @@ def main():
         check("Import still has Additional arguments",
               win2.locator('[data-field-key="other_args"]').count() == 1)
 
-        # ---- STAR-file fields get a Browse button, glob/wildcard fields don't ----
-        # Import's own options mix both: fn_in_raw is a wildcard glob
-        # ("Micrographs/*.tif", pattern is an image extension list) and
-        # fn_mtf is a genuine single STAR file ("MTF of the detector:",
-        # pattern "STAR Files (*.star)") -- expand every section so both are
-        # in the DOM regardless of which RELION tab they live in.
+        # ---- Any single-file field gets a Browse button, STAR and otherwise ----
+        # Import's own options mix a plain-text raw-movie glob field with two
+        # genuine single-file fields of different types: fn_in_raw ("Raw
+        # input files:", RELION's own pattern is a movie/image extension
+        # list) and fn_mtf (a STAR file). Both are field_type filename in
+        # RELION's own definitions, so both get a button -- expand every
+        # section so both are in the DOM regardless of which RELION tab they
+        # live in.
         # (excludes [data-role="advanced-section"] -- also an .opt-section,
         # but opening it triggers its own lazy --help fetch, unrelated here)
         for section in win2.locator(".opt-section:not([data-role='advanced-section'])").all():
             if section.get_attribute("open") is None:
                 section.locator(".opt-section-head").click()
         page.wait_for_timeout(300)
-        check("The wildcard/glob field (fn_in_raw) has no Browse button",
-              win2.locator('[data-field-key="fn_in_raw"] .field-browse-row').count() == 0)
+        raw_browse = win2.locator('[data-field-key="fn_in_raw"] .field-browse-row')
+        check("The raw-movie file field (fn_in_raw) has a Browse button too",
+              raw_browse.count() == 1 and raw_browse.locator("button").count() == 1)
         mtf_browse = win2.locator('[data-field-key="fn_mtf"] .field-browse-row')
         check("The single-STAR-file field (fn_mtf) has a Browse button",
               mtf_browse.count() == 1 and mtf_browse.locator("button").count() == 1)
@@ -216,6 +232,19 @@ def main():
         check("Escape cancels the picker without touching the field",
               page.locator(".file-picker").count() == 0
               and win2.locator('[data-field-key="fn_mtf"] input[type="text"]').input_value() == "")
+
+        # fn_in_raw starts pre-filled with RELION's own example default
+        # ("Micrographs/*.tif") rather than empty like fn_mtf -- clear it
+        # first so Browse opens the project root instead of a folder that
+        # doesn't exist yet in this fresh test project (a real project
+        # wouldn't have one either before the user has imported anything).
+        win2.locator('[data-field-key="fn_in_raw"] input[type="text"]').fill("")
+        raw_browse.locator("button").click()
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
+        check("The raw-movie picker filters by its own (non-STAR) extensions",
+              ".mrc" in page.locator(".file-picker .modal-hint").inner_text().lower())
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
 
         win3 = open_job(page, "AreTomo2", "AreTomo2")
         page.wait_for_timeout(1000)

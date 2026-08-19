@@ -214,24 +214,39 @@ job that fails at launch.
 **Additional arguments** are appended verbatim at the very end, unquoted,
 exactly as `command += " " + joboptions["other_args"].getString();` does.
 
-#### Browse buttons on STAR-file fields
+#### Browse buttons on file fields
 
-A `filename`/`inputnode` field (`renderField` in `app.js`) gets a Browse
-button next to its text input when RELION's own extracted `pattern` for that
-field (e.g. `"Particle STAR file (*.star)"`, `"Input micrographs
-(*.{star,mrc})"`) contains "star" — the same `pickFileDialog()` server-side
-picker the tomogram viewer uses (see "Browse buttons" under the viewer,
-below), so the backend machine's filesystem is what gets browsed, not the
-browser's. A field whose pattern is a wildcard/glob rather than a single
-named file — Import's `fn_in_raw` ("Raw input files:", pattern is an image
-extension list meant for something like `Micrographs/*.tif`) — gets no
-button; browsing can't usefully fill in a glob.
+Every `filename`/`inputnode` field (`renderField` in `app.js`) gets a Browse
+button next to its text input — this is RELION's own way of marking "this
+option is one file, offer a file picker" (as opposed to `text`, which
+`movie_files`/`mdoc_files`/`mtf_file` in TomoImport use for the same kind of
+value typed as free text with no picker). It's the same `pickFileDialog()`
+server-side picker the tomogram viewer uses (see "Browse buttons" under the
+viewer, below), so the backend machine's filesystem is what gets browsed, not
+the browser's — and it applies regardless of file type: STAR files, MRC
+maps, image stacks, FASTA sequences, checkpoints, even executables (RELION's
+own `pattern` for things like `fn_ctffind_exe` is a bare `*`, so the picker
+shows everything).
 
-`extensionsFromPattern()` parses the actual extensions out of the pattern
-(handling both `*.star` and `*.{star,mrc}` forms) rather than hardcoding
-`.star`, so a field that also accepts a companion file type isn't limited to
-STAR files in the picker. It falls back to `[".star"]` if a pattern
-matched `/star/i` but didn't parse into anything.
+The one thing gating the button is `isBrowsableFilePattern()`, which exists
+to skip a handful of options in `job_definitions_raw.json` that are mislabeled
+`inputnode` but are actually plain numeric fields — e.g. Manualpick's
+`blue_value`, whose `pattern` is literally `"0.1"` (its default value,
+mis-extracted into the pattern slot). A real file pattern always either names
+a glob/extension (`"*.mrc"`, `"STAR Files (*.star)"`), names one fixed file in
+parentheses with no wildcard at all (`"STAR files (postprocess.star)"`, a
+file a prior job produces under that exact name), or is blank (browse with no
+filter, e.g. External's `fn_exe`) — so requiring the pattern to be blank or
+contain `*` or `(` cleanly excludes the numeric artifacts without excluding
+any genuine file field.
+
+`extensionsFromPattern()` parses the actual extensions out of the pattern —
+handling both the common `"Label (*.ext)"` / `"Label (*.{a,b})"` forms and the
+handful of patterns that are a bare glob with no label or parens at all
+(`"*.{mrc,gain}"`, `"*.*"`, `"ResMap*"`) — rather than hardcoding an
+extension list. An empty result (no parseable extension, e.g. plain `"*"`)
+means no filter: `pickFileDialog()` already treats an empty extensions list
+as "show everything," which is the correct behaviour there.
 
 ### Draft command heuristic
 
@@ -746,7 +761,11 @@ of this view is oldest-at-top, branching down to what used it. The shared
 one button serves both) just reverses which end of the already-computed
 `rows` array is appended first; row/column assignment itself never changes.
 Because edge attachment (above) is by on-screen position rather than by
-parent/child, the lines don't need to know direction flipped at all.
+parent/child, the lines don't need to know direction flipped at all. The
+button's label always states the *current* setting rather than the action a
+click performs — `"Sort: Newest first ↓"` / `"Sort: Oldest first ↑"`, the
+same state-vs-action split as `themeBtn` (label = current state, `title` =
+what clicking does).
 
 ## Tomogram / particle-pick visualizer
 

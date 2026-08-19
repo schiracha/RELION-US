@@ -263,8 +263,12 @@ fetch("/api/auth/status")
 // only called on patterns that already matched /star/i).
 function extensionsFromPattern(pattern) {
   const exts = new Set();
+  // Most patterns are "Label (glob)", e.g. "STAR Files (*.star)" or
+  // "Image Files (*.{spi,vol,mrc})" -- but some of RELION's own patterns are
+  // a bare glob with no label/parens at all (e.g. "*.{mrc,gain}", "*.*",
+  // "ResMap*"), so fall back to treating the whole pattern as the glob.
   const groups = (pattern.match(/\(([^)]*)\)/g) || []).map((g) => g.slice(1, -1));
-  groups.forEach((g) => {
+  (groups.length ? groups : [pattern]).forEach((g) => {
     const braceMatch = g.match(/\{([^}]*)\}/);
     if (braceMatch) {
       braceMatch[1].split(",").forEach((t) => {
@@ -279,7 +283,24 @@ function extensionsFromPattern(pattern) {
       }
     }
   });
-  return exts.size ? Array.from(exts) : [".star"];
+  // Empty means "no extension filter" -- pickFileDialog already treats an
+  // empty extensions list as "match everything", which is the right browse
+  // behaviour for a pattern like "*" or "ResMap*" that names no extension.
+  return Array.from(exts);
+}
+
+// A pattern is a real file pattern (as opposed to job_definitions_raw.json's
+// occasional mis-extracted numeric "pattern" on slider-type options that got
+// tagged filename/inputnode, e.g. Manualpick's blue_value with pattern
+// "0.1") if it's blank (browse with no filter, e.g. External's fn_exe),
+// names a wildcard glob (e.g. "*.mrc"), or names a specific file in
+// parentheses even with no wildcard (e.g. "STAR files (postprocess.star)"
+// -- a fixed filename produced by an earlier job, not a glob, but still one
+// real file to browse for). The numeric artifacts have neither parens nor a
+// wildcard, so this excludes them without needing to special-case them.
+function isBrowsableFilePattern(pattern) {
+  const p = pattern || "";
+  return p === "" || p.includes("*") || p.includes("(");
 }
 
 function renderField(key, option, value) {
@@ -323,13 +344,16 @@ function renderField(key, option, value) {
       input.type = "text";
       input.value = value || "";
       input.placeholder = option.pattern || "";
-      // RELION's own field pattern (e.g. "Particle STAR file (*.star)",
-      // extracted straight from its JobOption definitions) says what kind of
-      // file this is -- a Browse button only makes sense for the ones that
-      // are a single named STAR file, not a wildcard/glob field like
-      // Import's "Raw input files:" (fn_in_raw, pattern is an image glob) or
-      // a bare directory.
-      if (/star/i.test(option.pattern || "")) {
+      // A filename/inputnode field is how RELION's own GUI marks "this is a
+      // single file, offer a Browse button" -- job_definitions_raw.json's
+      // pattern (e.g. "Particle STAR file (*.star)", "MRC map files
+      // (*half1*.mrc)", extracted straight from RELION's JobOption
+      // definitions) is only used here to filter the picker to the right
+      // extension(s). The one exception is a handful of mis-extracted
+      // slider options (e.g. Manualpick's blue_value) whose "pattern" is
+      // actually just a numeric default -- isBrowsableFilePattern excludes
+      // those since a real file pattern always names a glob or is blank.
+      if (isBrowsableFilePattern(option.pattern)) {
         const row = document.createElement("span");
         row.className = "field-browse-row";
         input.classList.add("field-browse-input");
@@ -337,11 +361,13 @@ function renderField(key, option, value) {
         const browseBtn = document.createElement("button");
         browseBtn.type = "button";
         browseBtn.className = "btn btn-icon";
-        browseBtn.title = `Browse for a STAR file on the machine running the backend (${option.pattern})`;
+        browseBtn.title = option.pattern
+          ? `Browse for a file on the machine running the backend (${option.pattern})`
+          : "Browse for a file on the machine running the backend";
         browseBtn.textContent = "…";
         browseBtn.addEventListener("click", async () => {
           const picked = await pickFileDialog({
-            title: option.label || "Select a STAR file",
+            title: option.label || "Select a file",
             extensions: extensionsFromPattern(option.pattern || ""),
             startPath: currentDirOf(input.value),
           });
@@ -1587,13 +1613,16 @@ function renderCommandCenterViews() {
   // its own direction state -- see ccDirection vs. ccNetworkDirection above)
   // rather than adding a second button, since only one of the two views is
   // ever visible at a time.
+  // Label always states the CURRENTLY active setting ("Sort: ..." makes that
+  // a status, not an instruction); the title says what clicking does, the
+  // same state-vs-action split themeBtn uses.
   const dirBtn = document.getElementById("ccDirectionBtn");
   dirBtn.style.display = (ccView === "timeline" || ccView === "network") ? "inline-block" : "none";
-  if (ccView === "network") {
-    dirBtn.textContent = ccNetworkDirection === "asc" ? "Oldest first ↑" : "Newest first ↓";
-  } else {
-    dirBtn.textContent = ccDirection === "desc" ? "Newest first ↓" : "Oldest first ↑";
-  }
+  const newestFirst = ccView === "network" ? ccNetworkDirection === "desc" : ccDirection === "desc";
+  dirBtn.textContent = newestFirst ? "Sort: Newest first ↓" : "Sort: Oldest first ↑";
+  dirBtn.title = newestFirst
+    ? "Currently showing newest jobs first — click to show oldest first"
+    : "Currently showing oldest jobs first — click to show newest first";
   if (ccView === "table") renderTable();
   else if (ccView === "timeline") renderTimeline();
   else { ensureNetworkResizeObserver(); renderNetwork(); }
@@ -2632,6 +2661,16 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
           body: JSON.stringify({ path: path || "" }),
         });
       } catch (err) {
+        // A field's own value can point to a directory that doesn't exist
+        // yet -- e.g. Import's fn_in_raw defaults to RELION's own example
+        // "Micrographs/*.tif", and a fresh project has no Micrographs/
+        // folder -- so fall back to the project root once rather than
+        // stranding the user on a bare error with nowhere to click.
+        if (path && cachedProjectPath && path !== cachedProjectPath) {
+          listEl.removeAttribute("aria-busy");
+          show(cachedProjectPath);
+          return;
+        }
         listEl.innerHTML = `<div class="browser-entry picker-note">Could not open: ${escapeHtml(err.message)}</div>`;
         listEl.removeAttribute("aria-busy");
         return;
