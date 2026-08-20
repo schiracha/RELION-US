@@ -5,7 +5,7 @@ manager for RELION, built as a *companion* to RELION, not a modified
 RELION GUI. 
 
 **This app is still being built and I am not personally what I would call a
-programmer/coder/ I know bash, some python, and some fortran (yikes!). So
+programmer/coder. I know bash, some python, and some fortran (yikes!). So
 This app is being vibe coded. Therefore it gets built when I have time and
 tokens available. Please feel free to help, test, and apply fixes!**
 
