@@ -2,8 +2,14 @@
 
 **RELION - User Supported Frontend** — a browser-based, portable job
 manager for RELION, built as a *companion* to RELION, not a modified
-RELION GUI. It
-reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
+RELION GUI. 
+
+**This app is still being built and I am not personally what I would call a
+programmer/coder/ I know bash, some python, and some fortran (yikes!). So
+This app is being vibe coded. Therefore it gets built when I have time and
+tokens available. Please feel free to help, test, and apply fixes!**
+
+It reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
 to build accurate forms for every RELION job type (32 of them, single-
 particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
 bridges as four more entries in the same Jobs list, and runs everything
