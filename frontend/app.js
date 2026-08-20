@@ -726,24 +726,27 @@ async function openJobPopup(internalName, displayName, existingRun) {
   if (commandBox) {
     commandBox.value = isReopen ? (currentRun.command || "") : (def.draft_command || "");
     const recomputeBtn = body.querySelector('[data-role="recompute-btn"]');
-    recomputeBtn.addEventListener("click", async () => {
-      try {
-        const resp = await api(`/api/jobs/${internalName}/draft`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ field_values: collectValues(), output_subdir: popupOutputSubdir }),
-        });
-        commandBox.value = resp.draft_command;
-        if (resp.output_subdir) popupOutputSubdir = resp.output_subdir;
-        if (resp.unmapped_fields && resp.unmapped_fields.length) {
-          commandBox.title = "Not auto-mapped to a flag (add manually if needed): " +
-            resp.unmapped_fields.join(", ");
-        }
-      } catch (err) {
-        errorDialog("Could not recompute draft: " + err.message);
-      }
+ recomputeBtn.addEventListener("click", async () => {
+  try {
+    const resp = await api(`/api/jobs/${internalName}/draft`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        field_values: collectValues(), 
+        output_subdir: isReopen ? null : popupOutputSubdir  // Don't send subdir for reopens
+      }),
     });
+    commandBox.value = resp.draft_command;
+    // Only update popupOutputSubdir if this is a NEW job, not a reopened one
+    if (!isReopen && resp.output_subdir) popupOutputSubdir = resp.output_subdir;
+    if (resp.unmapped_fields && resp.unmapped_fields.length) {
+      commandBox.title = "Not auto-mapped to a flag (add manually if needed): " +
+        resp.unmapped_fields.join(", ");
+    }
+  } catch (err) {
+    errorDialog("Could not recompute draft: " + err.message);
   }
+});
 
   const liveOutput = body.querySelector('[data-role="live-output"]');
   const statusLine = body.querySelector('[data-role="status-line"]');
