@@ -500,8 +500,46 @@ DRAFT_FLAG_MAP: dict[str, dict[str, str]] = {
     #   .getBoolean()) ...}` -- the `else` is the !is_tomo branch, likewise
     #   self-guarded once is_tomo is known false):
     #     command += " --use_noDW ";
-    "Motioncorr": {"do_dose_weighting": "--dose_weighting"},
+    # do_own_motioncor (pipeline_jobs.cpp:1559-1580, found the same way as
+    # the --i fix above -- actually running a Motioncorr job with RELION
+    # 5.0.1 failed with "You have to choose either UCSF MotionCor2 or
+    # RELION's own implementation", the exact compulsory choice motion
+    # correction refuses to run without). Self-guarded (`if (joboptions[
+    # "do_own_motioncor"].getBoolean()) ... command += " --use_own ";`) but
+    # --use_own doesn't spell out as "--" + key, so -- like do_dose_weighting
+    # right below -- it needs a name override on top of the self-guard.
+    # ONLY the checked (default, RELION's-own-implementation) branch is
+    # covered: the unchecked branch emits a DIFFERENT flag (--use_motioncor2,
+    # ~1580) plus requires fn_motioncor2_exe, a genuine two-way branch this
+    # table's one-flag-per-key shape can't express (same category as
+    # TomoImport's do_coords branch) -- switching to UCSF MotionCor2 still
+    # needs hand-editing the command box, same as before this fix.
+    "Motioncorr": {
+        "do_dose_weighting": "--dose_weighting",
+        "do_own_motioncor": "--use_own",
+    },
     "Ctffind": {"use_noDW": "--use_noDW"},
+    # getCommandsImportJob (src/pipeline_jobs.cpp:1439, found by actually
+    # running an Import job on real RELION 5.0.1 on 2026-08-21 -- the draft
+    # silently dropped the input file field entirely, which is how this was
+    # caught). Both do_raw's fn_in_raw and do_other's fn_in_other are read
+    # into a shared local `fn_in`, which is appended to `--i` in ONE place
+    # AFTER both branches (line 1439) -- neither joboptions["fn_in_raw"] nor
+    # ["fn_in_other"] appears anywhere near a `command +=` line, so the
+    # extractor's per-option scan never sees a flag for either key.
+    #
+    # NOT safe to map unconditionally, unlike the tomo shared-input group
+    # above: RELION gives fn_in_raw and fn_in_other their own non-empty
+    # defaults ("Micrographs/*.tif" and "ref.mrc") regardless of which
+    # branch is active, so the generic empty-value skip does NOT drop the
+    # inactive one -- confirmed for real, a default-settings draft emitted
+    # "--i 'Micrographs/*.tif' ... --i ref.mrc" (two --i flags) before this
+    # entry carried its own condition. Each is gated on its own branch
+    # toggle, exactly like RELION's `if (do_raw) ... else if (do_other) ...`.
+    "Import": {
+        "fn_in_raw": {"flag": "--i", "condition": "do_raw"},
+        "fn_in_other": {"flag": "--i", "condition": "do_other"},
+    },
 }
 
 # Keys in DRAFT_FLAG_MAP[job] whose mapped flag fires when the checkbox is
@@ -595,10 +633,100 @@ DRAFT_SUPPRESS: dict[str, set[str]] = {
 }
 
 
+# --------------------------------------------------------------------------
+# Radio-field value translation, per job+key
+# --------------------------------------------------------------------------
+#
+# extract_job_definitions.py's `options` list stores each "radio" field's
+# choices as their human-facing labels (e.g. "No rotation (0)") -- correct
+# for rendering the dropdown, but NOT what RELION's own JobOption class
+# passes on to the command line for every such field. RELION's own C++ reads
+# `joboptions["key"].getString()` -- the same label text -- but most of its
+# getCommands*Job() call a translator on it before appending, rather than
+# using the label verbatim:
+#
+#   gain_rot/gain_flip (motioncorr_runner.cpp:105-106): `textToInteger(
+#   parser.getOption("--gain_rot", ...))` on the PROGRAM side expects a bare
+#   "0"/"1"/"2"/"3" -- passing the label crashes with "Error in textToInteger"
+#   (confirmed for real: running a Motioncorr job with the untranslated label
+#   crashed relion_run_motioncorr immediately, on RELION 5.0.1).
+#
+# Each entry maps a job+key's exact label strings (verified against the
+# options list in data/job_definitions_raw.json) to the value RELION's own
+# command builder actually emits. Only keys confirmed to need translation are
+# listed; every other radio field (e.g. Import's node_type, whose LABEL text
+# is itself compared against in pipeline_jobs.cpp, or ModelAngelo's alphabet,
+# whose labels already match its CLI's own choices) passes its label through
+# unchanged via the generic rule.
+#
+# NOT yet covered here (left correctly unmapped instead, for hand-editing --
+# these need a real value TRANSFORM, not just a lookup, so a wrong guess
+# risks a subtly incorrect run rather than a loud crash):
+#   - Autopick.ref3d_sampling, Class3D/Autorefine/MultiBody.sampling,
+#     Autorefine.auto_local_sampling ("7.5 degrees" -> --healpix_order N,
+#     via JobOption::getHealPixOrder's degrees->healpix-order table, MINUS an
+#     oversampling factor computed elsewhere in the same function --
+#     pipeline_jobs.cpp ~3993-4000, ~4482-4499, ~4754-4763, ~2314-2321).
+#   - Ctfrefine.do_defocus/do_astig/do_bfactor/do_phase ("No"/"Per-
+#     micrograph"/"Per-particle" -> single-letter codes concatenated into one
+#     --fit_defocus-style flag via JobOption::getCtfFitString,
+#     pipeline_jobs.cpp ~243-249).
+DRAFT_VALUE_TRANSFORM: dict[str, dict[str, dict[str, str]]] = {
+    "Motioncorr": {
+        "gain_rot": {
+            "No rotation (0)": "0", "90 degrees (1)": "1",
+            "180 degrees (2)": "2", "270 degrees (3)": "3",
+        },
+        "gain_flip": {
+            "No flipping (0)": "0", "Flip upside down (1)": "1",
+            "Flip left to right (2)": "2",
+        },
+    },
+}
+
+
+def has_draft_value_transform(internal_name: str, option_key: str) -> bool:
+    """True if this option's label needs translating before it can go on the
+    command line -- see DRAFT_VALUE_TRANSFORM. False means pass the field's
+    own value through unchanged, the same as every other field."""
+    return option_key in DRAFT_VALUE_TRANSFORM.get(internal_name, {})
+
+
+def draft_value_for(internal_name: str, option_key: str, raw_value: str) -> Optional[str]:
+    """The real CLI value for a translated radio field's current label.
+    Returns None if the label isn't one of this field's known choices --
+    e.g. a label this table hasn't been updated for after a RELION version
+    change -- so the caller treats the field as unmapped rather than emit a
+    value that would crash the program. Only call this after
+    has_draft_value_transform confirms this (job, key) is tracked at all."""
+    return DRAFT_VALUE_TRANSFORM.get(internal_name, {}).get(option_key, {}).get(raw_value)
+
+
 def draft_flag_for(internal_name: str, option_key: str) -> Optional[str]:
     """Verified CLI flag for this option key, or None to fall back to the
-    generic `--<key>` rule. See DRAFT_FLAG_MAP."""
-    return DRAFT_FLAG_MAP.get(internal_name, {}).get(option_key)
+    generic `--<key>` rule. See DRAFT_FLAG_MAP. A DRAFT_FLAG_MAP entry is
+    normally a bare flag string (always emitted); the rare entry that also
+    needs its own condition (see draft_flag_condition_for) is a
+    {"flag": ..., "condition": ...} dict instead -- this unwraps either
+    shape down to just the flag."""
+    entry = DRAFT_FLAG_MAP.get(internal_name, {}).get(option_key)
+    if isinstance(entry, dict):
+        return entry.get("flag")
+    return entry
+
+
+def draft_flag_condition_for(internal_name: str, option_key: str) -> Optional[str]:
+    """The bare-identifier-or-joboptions[...] condition (see
+    job_registry._evaluate_condition) that must hold for a DRAFT_FLAG_MAP-
+    mapped flag to actually be emitted, or None if it's unconditional (the
+    common case). Needed when a single flag name is shared by two mutually
+    exclusive option keys that both carry their own non-empty RELION
+    default, so the generic empty-value skip can't tell which one is
+    active -- see DRAFT_FLAG_MAP["Import"]."""
+    entry = DRAFT_FLAG_MAP.get(internal_name, {}).get(option_key)
+    if isinstance(entry, dict):
+        return entry.get("condition")
+    return None
 
 
 def draft_flag_is_negated(internal_name: str, option_key: str) -> bool:
@@ -642,6 +770,17 @@ DRAFT_OUTPUT_FLAG: dict[str, str] = {
     "TomoExcludeTiltImages": "--output-directory",
     "TomoPickTomograms": "--output-directory",
     "TomoDenoiseTomograms": "--output-directory",
+    # getCommandsImportJob (src/pipeline_jobs.cpp:1440-1441) takes a
+    # DIFFERENT shape than every other job here: a directory (`--odir`) AND
+    # a separate compulsory output FILENAME (`--ofile`, e.g. "movies.star"),
+    # not one bare `--o <dir>/`. `--o` isn't even a recognized argument to
+    # the real relion_import binary -- confirmed for real, running the
+    # default-settings draft against RELION 5.0.1 failed immediately with
+    # "WARNING: Option --o is not a valid RELION argument" plus "ERROR:
+    # Argument --odir not found" / "--ofile not found" (both compulsory,
+    # per relion_import --help). See _build_draft_command's Import-specific
+    # --ofile handling for the (branch-limited) other half of this fix.
+    "Import": "--odir",
 }
 
 

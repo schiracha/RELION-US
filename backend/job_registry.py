@@ -48,8 +48,11 @@ from job_catalog import (
     CATEGORIES,
     CUSTOM_JOBS,
     JOB_CATALOG,
+    draft_flag_condition_for,
     draft_flag_for,
     draft_flag_is_negated,
+    draft_value_for,
+    has_draft_value_transform,
     draft_is_suppressed,
     draft_output_flag,
     draft_output_suffix,
@@ -169,8 +172,21 @@ def _self_guarded(condition: str, key: str) -> bool:
 
 
 _BOOL_CLAUSE_RE = re.compile(
-    r'^!?\s*joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]\.getBoolean\(\)$'
+    r'^joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]\.getBoolean\(\)$'
 )
+
+# Some jobs guard a command append with a bare local variable instead of the
+# inline `joboptions["x"].getBoolean()` form -- RELION's own source computes
+# `bool do_raw = joboptions["do_raw"].getBoolean();` once near the top of
+# getCommandsImportJob and tests `if (do_raw)` later, so the extractor reads
+# the condition text verbatim as "do_raw", which _BOOL_CLAUSE_RE never
+# matches (confirmed for real: running an Import job silently dropped
+# --angpix/--kV/--Cs/--Q0/--beamtilt_x/--beamtilt_y, all gated on exactly
+# this pattern, and TomoAlign's --s_vel/--s_div on "do_motion"). Recognized
+# only when the bare name is a real boolean option of THIS job (passed in as
+# known_keys) -- an unrecognized identifier still falls through to None
+# rather than risk resolving the wrong thing.
+_BARE_IDENT_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)$')
 
 
 def _strip_matched_outer_parens(clause: str) -> str:
@@ -226,7 +242,9 @@ def _split_top_level_and(condition: str) -> list[str] | None:
     return [c.strip() for c in clauses if c.strip()]
 
 
-def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | None:
+def _evaluate_condition(
+    condition: str, field_values: dict[str, Any], known_keys: set[str] | None = None
+) -> bool | None:
     """Best-effort evaluation of a RELION `if (...)` condition against the
     CURRENT field values -- not a guess, but replaying the exact same
     `joboptions["X"].getBoolean()` check RELION's own getCommands*Job()
@@ -234,14 +252,21 @@ def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | 
     "only pass --helical_nr_asu when the Helical processing checkbox is
     actually on").
 
-    Returns True/False when every top-level `&&`-joined clause is one of
-    two recognized, safely-evaluable shapes: a boolean field's own value
-    (optionally negated), or the `!is_continue` invariant (always true --
-    this app never models a "continue this job" run). Returns None the
-    moment anything else shows up -- an `||`, an `else` branch marker, a
-    numeric/string comparison, a call this function doesn't recognize --
-    so the caller falls back to marking the field "unmapped" exactly as it
-    did before this evaluator existed, rather than risk a wrong guess.
+    known_keys: this job's real option keys (from `options_by_key`), used
+    only to decide whether a bare identifier clause (see _BARE_IDENT_RE) is
+    safe to resolve -- an identifier that isn't one of this job's own
+    options is left unresolved rather than guessed at.
+
+    Returns True/False when every top-level `&&`-joined clause is one of the
+    recognized, safely-evaluable shapes: a boolean field's own value
+    (optionally negated, as either `joboptions["x"].getBoolean()` or the
+    bare local-variable form some jobs use instead -- see _BARE_IDENT_RE),
+    or the `is_continue`/`is_tomo` invariants (fixed constants in this app --
+    see below). Returns None the moment anything else shows up -- an `||`,
+    an `else` branch marker, a numeric/string comparison, a call this
+    function doesn't recognize -- so the caller falls back to marking the
+    field "unmapped" exactly as it did before this evaluator existed, rather
+    than risk a wrong guess.
     """
     if not condition:
         return True
@@ -251,9 +276,15 @@ def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | 
     result = True
     for raw_clause in clauses:
         clause = _strip_matched_outer_parens(raw_clause.strip())
-        if clause == "!is_continue":
-            continue
-        if clause in ("is_tomo", "!is_tomo"):
+        if clause in ("is_continue", "!is_continue"):
+            # RELION-US never models a "continue this job" run (see module
+            # docstring) -- is_continue is always false here, whichever form
+            # the extracted condition text uses (some jobs test the inline
+            # joboptions[...] expression, Import-style jobs test a bare
+            # local bool computed from it earlier -- both read the same
+            # underlying value, so both get the same fixed answer here).
+            value = clause.startswith("!")  # "!is_continue" -> True, "is_continue" -> False
+        elif clause in ("is_tomo", "!is_tomo"):
             # `is_tomo` is RelionJob's own GUI-launch-time flag (RELION's GUI
             # is started with plain `relion` or `relion --tomo`, gui_main
             # window.cpp's `_do_tomo`, threaded into RelionJob::initialise()
@@ -267,14 +298,22 @@ def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | 
             # only) -- and RelionJob's own constructor default is `is_tomo =
             # false` (src/pipeline_jobs.h). So this is a fixed, known
             # constant in every draft this app builds, same category as
-            # `!is_continue` above, just the opposite polarity/value.
+            # `is_continue` above, just the opposite polarity/value.
             value = clause.startswith("!")  # "!is_tomo" -> True, "is_tomo" -> False
         else:
-            m = _BOOL_CLAUSE_RE.match(clause)
-            if not m:
-                return None
-            value = bool(field_values.get(m.group(1)))
-            if clause.startswith("!"):
+            negated = clause.startswith("!")
+            body = clause[1:].strip() if negated else clause
+            m = _BOOL_CLAUSE_RE.match(body)
+            if m:
+                ident = m.group(1)
+            else:
+                bare = _BARE_IDENT_RE.match(body)
+                if bare and known_keys is not None and bare.group(1) in known_keys:
+                    ident = bare.group(1)
+                else:
+                    return None
+            value = bool(field_values.get(ident))
+            if negated:
                 value = not value
         result = result and value
         if not result:
@@ -364,6 +403,25 @@ def _build_draft_command(
             subdir_arg += suffix
         parts.append(draft_output_flag(internal_name))
         parts.append(shlex.quote(subdir_arg))
+        if internal_name == "Import":
+            # relion_import's --ofile is compulsory (src/apps/import.cpp:49)
+            # and has no default -- without it the binary refuses to run at
+            # all (confirmed for real). Its value is a literal RELION picks
+            # per branch, not a JobOption string this app can just read:
+            # do_raw's is_multiframe checkbox selects "movies.star" vs
+            # "micrographs.star" (pipeline_jobs.cpp ~1312-1324) -- a plain
+            # two-way pick on one already-known boolean, safe to compute
+            # here. do_other's fn_out is derived from fn_in_other itself
+            # (basename, or a coords_suffix construction for the coordinate-
+            # import case) -- genuine per-node-type branch logic this app
+            # deliberately doesn't try to reconstruct (same policy as
+            # TomoImport's do_coords branch); that half is left for the user
+            # to add via the editable command box, same as is_multiframe
+            # itself already is (see it in `unmapped`).
+            if field_values.get("do_raw"):
+                ofile = "movies.star" if field_values.get("is_multiframe") else "micrographs.star"
+                parts.append("--ofile")
+                parts.append(ofile)
     unmapped = []
 
     for key, value in field_values.items():
@@ -381,6 +439,22 @@ def _build_draft_command(
         # fall back to the generic `--<key>` rule when no override exists.
         mapped = draft_flag_for(internal_name, key)
         if mapped is not None:
+            # A mapped flag is normally unconditional -- but the rare entry
+            # that shares its flag with another mutually-exclusive option
+            # (see DRAFT_FLAG_MAP["Import"]) carries its own condition,
+            # checked the same way as an extracted option_flags condition
+            # below, since neither field's own empty-value skip can tell
+            # which branch is actually active.
+            mapped_condition = draft_flag_condition_for(internal_name, key)
+            if mapped_condition:
+                verdict = _evaluate_condition(
+                    mapped_condition, field_values, options_by_key.keys()
+                )
+                if verdict is False:
+                    continue
+                elif verdict is None:
+                    unmapped.append(key)
+                    continue
             flag = mapped
         else:
             # Always consult the exact flag+condition the extractor read
@@ -410,7 +484,9 @@ def _build_draft_command(
                     # getCommands*Job() would read, so replay simple
                     # boolean-gate conditions (see _evaluate_condition)
                     # against them instead of guessing.
-                    verdict = _evaluate_condition(condition, field_values)
+                    verdict = _evaluate_condition(
+                        condition, field_values, options_by_key.keys()
+                    )
                     if verdict is True:
                         flag = pair["flag"]
                     elif verdict is False:
@@ -463,6 +539,16 @@ def _build_draft_command(
                 # -- so it's passed through rather than skipped, unlike
                 # every other text field.
                 value = ""
+            if has_draft_value_transform(internal_name, key):
+                # This field's value is a human-facing radio-button label
+                # (e.g. "No rotation (0)"), not what RELION's own program
+                # actually parses -- see DRAFT_VALUE_TRANSFORM for why
+                # passing the label through crashes relion_run_motioncorr.
+                translated = draft_value_for(internal_name, key, str(value))
+                if translated is None:
+                    unmapped.append(key)
+                    continue
+                value = translated
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
 

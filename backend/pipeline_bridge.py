@@ -71,6 +71,89 @@ class PipelineBridgeError(Exception):
     """relion_pipeliner is missing, or refused to do what was asked."""
 
 
+# --------------------------------------------------------------------------
+# Bootstrapping a brand-new project's default_pipeline.star
+# --------------------------------------------------------------------------
+#
+# relion_pipeliner (the CLI binary) cannot create this file from nothing:
+# every single code path in src/apps/pipeliner.cpp does `pipeline.read(
+# DO_LOCK); pipeline.write(DO_LOCK);` unconditionally, and PipeLine::read()
+# takes the .relion_lock directory FIRST, then REPORT_ERRORs ("File
+# default_pipeline.star cannot be read") the moment it tries to open a file
+# that isn't there yet -- which exits the process while still holding the
+# lock (REPORT_ERROR prints and calls exit(), bypassing whatever would
+# normally remove .relion_lock). Confirmed for real: enabling pipeline sync
+# on a project that had never been opened in RELION's own GUI orphaned
+# .relion_lock on its first job, permanently blocking every later sync
+# attempt (relion_pipeliner's own retry-and-give-up warns "Perhaps the GUI
+# or one of RELION's programs crashed unexpectedly?", misdiagnosing its own
+# CLI limitation as user error) -- until a human manually removed it.
+#
+# RELION's own native GUI sidesteps this by never calling read() on a
+# missing file to begin with (src/gui_mainwindow.cpp:349-361):
+#
+#   pipeline.name = fn_pipe;
+#   if (exists(pipeline.name + "_pipeline.star"))
+#   {
+#       pipeline.read(DO_LOCK, lock_message);
+#       pipeline.write(DO_LOCK);
+#   }
+#   else
+#   {
+#       pipeline.write();   // <-- bootstraps a fresh, empty pipeline
+#   }
+#
+# PipeLine::write() on a freshly-constructed PipeLine (job_counter=0, no
+# processes/nodes/edges) always produces the exact same fixed, empty
+# skeleton -- no node-graph computation involved, unlike everything else
+# this module deliberately leaves to the real binary. Reproducing that one
+# static skeleton here is doing what the native GUI does on first launch,
+# not reimplementing pipeline logic: every byte written after this one-time
+# bootstrap still goes through real relion_pipeliner, exactly as before.
+#
+# Just the pipeline_general block, NOT all five tables: MetaDataTable::write
+# (src/metadata_table.cpp:1369-1372) skips a table entirely -- no data_
+# header, no loop_, nothing -- whenever it has zero rows ("Only write
+# tables that have something in them"). A first attempt at this skeleton
+# that spelled out all five tables (including four empty `loop_` blocks)
+# was WRONG and crashed relion_pipeliner's reader: label-parsing
+# (metadata_table.cpp:1045-1076) skips blank lines while still hunting for
+# more `_label #N` declarations, so an empty loop's very next non-blank
+# line -- the following block's `data_` header -- gets consumed as a bogus
+# first data row ("fewer columns than the number of labels"), which is
+# exactly what orphaned the lock in the first place. Confirmed for real:
+# this minimal general-only version round-trips cleanly through
+# `relion_pipeliner --check_job_completion` on a from-scratch project
+# (exit 0, no lock left behind, and relion_pipeliner's own rewrite of the
+# file afterward is byte-identical in shape to this skeleton).
+_EMPTY_PIPELINE_SKELETON = """
+# version 50001
+
+data_pipeline_general
+
+_rlnPipeLineJobCounter                      0
+
+"""
+
+
+def _ensure_pipeline_bootstrapped(project_dir: Path) -> None:
+    """Write an empty default_pipeline.star if this project doesn't have one
+    yet -- see _EMPTY_PIPELINE_SKELETON. A no-op (checked first, so no
+    write racing a concurrent RELION process) once the file exists; every
+    later change to it still goes exclusively through relion_pipeliner."""
+    star_path = Path(project_dir) / "default_pipeline.star"
+    if star_path.exists():
+        return
+    try:
+        # Exclusive create: if another process wins the race, its file (also
+        # this exact skeleton, or a real one from a job it just registered)
+        # stands and this one backs off rather than clobbering it.
+        with open(star_path, "x", encoding="utf-8") as f:
+            f.write(_EMPTY_PIPELINE_SKELETON)
+    except FileExistsError:
+        pass
+
+
 def pipeliner_path() -> Optional[str]:
     return shutil.which(PIPELINER_BINARY)
 
@@ -169,6 +252,7 @@ def _run_pipeliner(project_dir: Path, args: list[str]) -> subprocess.CompletedPr
             "normal RELION install, and RELION-US needs it to record jobs in "
             "RELION's own pipeline."
         )
+    _ensure_pipeline_bootstrapped(project_dir)
     try:
         return subprocess.run(
             [exe, *args],

@@ -93,6 +93,76 @@ def test_written_job_star_reads_back_through_our_own_reader(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Bootstrapping a brand-new project's default_pipeline.star
+#
+# Real relion_pipeliner cannot create this file from nothing -- every code
+# path in src/apps/pipeliner.cpp does `pipeline.read(); pipeline.write();`
+# unconditionally, and PipeLine::read() takes .relion_lock BEFORE finding
+# out the file doesn't exist, then REPORT_ERRORs (which exits without
+# releasing the lock). Confirmed for real against RELION 5.0.1: enabling
+# sync on a project that had never been opened in RELION's native GUI
+# orphaned .relion_lock on its very first job, permanently blocking every
+# later sync attempt. fake_relion_pipeliner.py deliberately doesn't
+# replicate the lock/read/REPORT_ERROR mechanics (see its own docstring),
+# so this class of bug can only be exercised against a real install --
+# these tests cover only the half this app controls: that the bootstrap
+# file gets written, with the right (real-RELION-verified) content, before
+# a lower-level fix in fake_relion_pipeliner.py or an integration test
+# marked to skip without RELION would be needed for the rest.
+# --------------------------------------------------------------------------
+
+
+def test_ensure_pipeline_bootstrapped_writes_the_general_block_only(tmp_path):
+    """MetaDataTable::write (src/metadata_table.cpp:1369-1372) skips a table
+    entirely when it has zero rows ("Only write tables that have something
+    in them") -- so a fresh pipeline's real on-disk shape is JUST
+    pipeline_general, not five tables with four empty `loop_` blocks. A
+    first version of this bootstrap wrote all five and crashed
+    relion_pipeliner's reader for real (label-parsing skips blank lines
+    while still hunting for more labels, so an empty loop's very next line
+    -- the following block's `data_` header -- gets consumed as a bogus
+    data row); this asserts the fix stays the minimal, real-RELION-verified
+    shape rather than regressing to that."""
+    pipeline_bridge._ensure_pipeline_bootstrapped(tmp_path)
+    text = (tmp_path / "default_pipeline.star").read_text()
+    assert "data_pipeline_general" in text
+    assert "_rlnPipeLineJobCounter" in text
+    for absent in ("data_pipeline_processes", "data_pipeline_nodes",
+                   "data_pipeline_input_edges", "data_pipeline_output_edges",
+                   "loop_"):
+        assert absent not in text
+
+
+def test_ensure_pipeline_bootstrapped_is_a_noop_once_the_file_exists(tmp_path):
+    """Must never clobber a real project's pipeline -- checked first, so a
+    project mid-write by an actual RELION process is left alone."""
+    star = tmp_path / "default_pipeline.star"
+    star.write_text("REAL RELION CONTENT, NOT THIS APP'S TO TOUCH")
+    pipeline_bridge._ensure_pipeline_bootstrapped(tmp_path)
+    assert star.read_text() == "REAL RELION CONTENT, NOT THIS APP'S TO TOUCH"
+
+
+def test_register_job_bootstraps_a_missing_pipeline_before_calling_out(tmp_path, monkeypatch):
+    """The bootstrap has to happen before the relion_pipeliner subprocess
+    runs, not after -- that's the whole point (it's what the subprocess
+    would otherwise crash on)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "relion_pipeliner"
+    shim.write_text(f"#!/usr/bin/env bash\nexec {sys.executable} {FAKE} \"$@\"\n")
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    project_manager.init_new_project(proj)
+    assert not (proj / "default_pipeline.star").exists()
+
+    pipeline_bridge.register_job(proj, "relion.class2d", {})
+    assert (proj / "default_pipeline.star").exists()
+
+
+# --------------------------------------------------------------------------
 # Registering
 # --------------------------------------------------------------------------
 

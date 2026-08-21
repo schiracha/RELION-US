@@ -471,6 +471,139 @@ def test_output_suffix_jobs_get_run_rootname_prefix(internal_name, output_flag, 
     assert f"{output_flag} {internal_name}/job001/{suffix}" in cmd, cmd
 
 
+def test_import_raw_movies_input_file_reaches_the_command():
+    """getCommandsImportJob (src/pipeline_jobs.cpp:1439) reads do_raw's
+    fn_in_raw and do_other's fn_in_other into a shared local `fn_in`, then
+    appends `--i` to it in ONE place AFTER both branches -- neither
+    joboptions["fn_in_raw"] nor ["fn_in_other"] appears next to a
+    `command +=` line, so the generic extractor never sees a flag for
+    either key and the draft silently dropped the input file entirely
+    (found by actually running an Import job against RELION 5.0.1). See
+    job_catalog.DRAFT_FLAG_MAP["Import"]. Each is gated on its own do_raw/
+    do_other condition -- not unconditional like the tomo shared-input
+    group -- because RELION gives BOTH fields their own non-empty default
+    ("Micrographs/*.tif" and "ref.mrc") regardless of which branch is
+    active, so a naive unconditional mapping emitted two "--i" flags (also
+    confirmed for real, before this test existed)."""
+    raw = job_registry.raw_job("Import")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_raw": True, "fn_in_raw": "movies/*.mrcs",
+              "do_other": False, "fn_in_other": "ref.mrc"}, "Import", "")
+    assert "--i 'movies/*.mrcs'" in cmd  # shlex-quoted: contains a glob char
+    assert "ref.mrc" not in cmd
+    assert cmd.count(" --i ") == 1
+    assert "fn_in_raw" not in unmapped
+
+
+def test_import_other_node_type_input_file_reaches_the_command():
+    """The mirror image of the test above: do_other active, do_raw off --
+    fn_in_other's own non-empty default must not leak fn_in_raw's."""
+    raw = job_registry.raw_job("Import")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_raw": False, "fn_in_raw": "Micrographs/*.tif",
+              "do_other": True, "fn_in_other": "ref.mrc"}, "Import", "")
+    assert "--i ref.mrc" in cmd
+    assert "Micrographs" not in cmd
+    assert cmd.count(" --i ") == 1
+    assert "fn_in_other" not in unmapped
+
+
+def test_import_raw_angpix_kv_cs_are_emitted_when_do_raw_is_on():
+    """angpix/kV/Cs/Q0/beamtilt_x/beamtilt_y are all gated on the bare
+    local-variable condition "do_raw" (see
+    test_evaluate_condition_bare_identifier) -- confirmed missing from a
+    real Import job's draft command until job_registry._evaluate_condition
+    learned to resolve that shape."""
+    raw = job_registry.raw_job("Import")
+    fields = {"do_raw": True, "angpix": "1.4", "kV": "300", "Cs": "2.7", "Q0": "0.1"}
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, "Import", "")
+    for flag in ("--angpix 1.4", "--kV 300", "--Cs 2.7", "--Q0 0.1"):
+        assert flag in cmd, cmd
+    assert not ({"angpix", "kV", "Cs", "Q0"} & set(unmapped))
+
+
+def test_import_raw_angpix_omitted_when_do_raw_is_off():
+    raw = job_registry.raw_job("Import")
+    fields = {"do_raw": False, "angpix": "1.4"}
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, "Import", "")
+    assert "--angpix" not in cmd
+    assert "angpix" not in unmapped  # correctly-omitted, not unresolved
+
+
+def test_import_uses_odir_and_ofile_not_a_bare_o_flag():
+    """getCommandsImportJob (src/pipeline_jobs.cpp:1440-1441) takes `--odir
+    <dir>/` and a separate compulsory `--ofile <name>` -- NOT the generic
+    `--o <dir>/` every other job gets. Confirmed for real: relion_import
+    --help lists --o as unrecognized, and running the (then-)default draft
+    against RELION 5.0.1 failed immediately on both missing arguments."""
+    raw = job_registry.raw_job("Import")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_raw": True, "is_multiframe": True}, "Import", "Import/job001")
+    assert "--odir Import/job001/" in cmd
+    assert "--ofile movies.star" in cmd
+    assert "--o Import/job001/" not in cmd  # no bare --o anywhere
+
+
+def test_import_ofile_picks_micrographs_star_for_single_frame():
+    raw = job_registry.raw_job("Import")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_raw": True, "is_multiframe": False}, "Import", "Import/job001")
+    assert "--ofile micrographs.star" in cmd
+
+
+def test_import_ofile_omitted_outside_the_do_raw_branch():
+    """do_other's --ofile value is derived from fn_in_other itself (basename,
+    or a coords_suffix construction for coordinate imports) -- genuine
+    per-node-type branch logic this app deliberately doesn't reconstruct,
+    same policy as TomoImport's do_coords branch. Left for the user to add
+    by hand, same as is_multiframe already is inside the do_raw branch."""
+    raw = job_registry.raw_job("Import")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_raw": False, "do_other": True, "fn_in_other": "ref.mrc"},
+        "Import", "Import/job001")
+    assert "--ofile" not in cmd
+
+
+def test_motioncorr_gain_rot_and_flip_translate_label_to_relions_numeric_code():
+    """gain_rot/gain_flip are "radio" fields whose stored value is the
+    human-facing label ("No rotation (0)"), but motioncorr_runner.cpp:105-106
+    does `textToInteger(parser.getOption("--gain_rot", ...))` -- passing the
+    label through crashes relion_run_motioncorr with "Error in textToInteger"
+    (confirmed for real against RELION 5.0.1: a Motioncorr job with the
+    untranslated label crashed immediately on a real run). See
+    job_catalog.DRAFT_VALUE_TRANSFORM."""
+    raw = job_registry.raw_job("Motioncorr")
+    fields = {"gain_rot": "90 degrees (1)", "gain_flip": "Flip left to right (2)"}
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, "Motioncorr", "")
+    assert "--gain_rot 1" in cmd
+    assert "--gain_flip 2" in cmd
+    assert "degrees" not in cmd and "Flip" not in cmd  # no raw label leaked through
+    assert not ({"gain_rot", "gain_flip"} & set(unmapped))
+
+
+def test_motioncorr_gain_rot_unknown_label_is_left_unmapped_not_guessed():
+    """An unrecognized label (e.g. this table going stale after a RELION
+    version bump) must not silently emit a garbage value -- it should show
+    up as unmapped, same as any other field this app can't confidently
+    resolve."""
+    raw = job_registry.raw_job("Motioncorr")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"gain_rot": "Some future label (9)"}, "Motioncorr", "")
+    assert "--gain_rot" not in cmd
+    assert "gain_rot" in unmapped
+
+
+def test_tomoalign_motion_sigma_fields_are_emitted_when_do_motion_is_on():
+    """sigma_vel/sigma_div (--s_vel/--s_div) are gated on the same bare
+    local-variable condition shape, "do_motion", in TomoAlign."""
+    raw = job_registry.raw_job("TomoAlign")
+    fields = {"do_motion": True, "sigma_vel": "0.2", "sigma_div": "5000"}
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, "TomoAlign", "")
+    assert "--s_vel 0.2" in cmd
+    assert "--s_div 5000" in cmd
+    assert not ({"sigma_vel", "sigma_div"} & set(unmapped))
+
+
 def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
     """Most jobs take a plain directory for --o -- e.g. Import, which isn't
     in DRAFT_OUTPUT_SUFFIX -- and must NOT gain an unexpected suffix."""
@@ -524,6 +657,34 @@ def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
 ])
 def test_evaluate_condition(condition, field_values, expected):
     assert job_registry._evaluate_condition(condition, field_values) is expected
+
+
+@pytest.mark.parametrize("condition,field_values,known_keys,expected", [
+    # Some jobs guard a command append with a bare local variable instead of
+    # the inline joboptions[...] form -- RELION computes
+    # `bool do_raw = joboptions["do_raw"].getBoolean();` once near the top of
+    # getCommandsImportJob and tests `if (do_raw)` later, so the extractor
+    # reads the condition text verbatim as "do_raw". Confirmed for real:
+    # running an actual Import job against RELION 5.0.1 silently dropped
+    # --angpix/--kV/--Cs/--Q0/--beamtilt_x/--beamtilt_y, all gated on exactly
+    # this shape (and TomoAlign's --s_vel/--s_div on "do_motion").
+    ("do_raw", {"do_raw": True}, {"do_raw"}, True),
+    ("do_raw", {"do_raw": False}, {"do_raw"}, False),
+    ("!do_raw", {"do_raw": True}, {"do_raw"}, False),
+    ("!do_raw", {"do_raw": False}, {"do_raw"}, True),
+    # A bare identifier that ISN'T one of this job's own options is left
+    # unresolved rather than guessed at -- known_keys is the safety rail.
+    ("do_raw", {"do_raw": True}, set(), None),
+    ("do_raw", {"do_raw": True}, None, None),
+    # is_continue's bare (un-negated) form: RELION-US never drafts a
+    # "continue this job" run, so this is always false -- same fixed
+    # constant as the already-tested "!is_continue" -> True, just the
+    # opposite polarity, and doesn't need to be in known_keys since it's a
+    # RelionJob state flag, not a real JobOption.
+    ("is_continue", {}, set(), False),
+])
+def test_evaluate_condition_bare_identifier(condition, field_values, known_keys, expected):
+    assert job_registry._evaluate_condition(condition, field_values, known_keys) is expected
 
 
 def test_helical_fields_are_omitted_when_the_checkbox_is_unchecked():
