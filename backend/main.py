@@ -301,6 +301,11 @@ class DraftRequest(BaseModel):
     # definition's output_subdir). Kept stable across recomputes so the
     # command's --o doesn't jump job numbers while the user edits fields.
     output_subdir: str | None = None
+    # Command Center "Overwrite" job action: recompute the draft for the
+    # SAME output directory as an existing (e.g. failed) run, not a fresh
+    # job number -- see StartRunRequest.overwrite_run_id. Takes priority
+    # over output_subdir when both are somehow set.
+    overwrite_run_id: str | None = None
 
 
 @app.get("/api/jobs/{internal_name}/cli-options")
@@ -354,7 +359,13 @@ def recompute_draft(internal_name: str, req: DraftRequest):
         raw = job_registry._load_raw()[internal_name]
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
-    output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
+    if req.overwrite_run_id:
+        try:
+            output_subdir = run_manager.overwrite_target_subdir(req.overwrite_run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+    else:
+        output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
     draft, unmapped = job_registry._build_draft_command(
         raw, req.field_values, internal_name, output_subdir
     )

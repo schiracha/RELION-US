@@ -731,14 +731,20 @@ async function openJobPopup(internalName, displayName, existingRun) {
     const resp = await api(`/api/jobs/${internalName}/draft`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        field_values: collectValues(), 
-        output_subdir: isReopen ? null : popupOutputSubdir  // Don't send subdir for reopens
-      }),
+      body: JSON.stringify(
+        isReopen
+          // Reopened job (e.g. re-editing a FAILED run before hitting
+          // Overwrite): target THIS job's own existing output directory,
+          // not a fresh number -- otherwise Recompute silently drifts the
+          // command's --o onto job006 while the user meant to fix job005,
+          // and Overwrite ends up creating a new job next to it instead of
+          // overwriting it.
+          ? { field_values: collectValues(), overwrite_run_id: currentRun.run_id }
+          : { field_values: collectValues(), output_subdir: popupOutputSubdir }
+      ),
     });
     commandBox.value = resp.draft_command;
-    // Only update popupOutputSubdir if this is a NEW job, not a reopened one
-    if (!isReopen && resp.output_subdir) popupOutputSubdir = resp.output_subdir;
+    if (resp.output_subdir) popupOutputSubdir = resp.output_subdir;
     if (resp.unmapped_fields && resp.unmapped_fields.length) {
       commandBox.title = "Not auto-mapped to a flag (add manually if needed): " +
         resp.unmapped_fields.join(", ");
@@ -934,7 +940,16 @@ async function openJobPopup(internalName, displayName, existingRun) {
     try {
       const payload = { internal_name: internalName, overwrite_run_id: currentRun.run_id };
       if (def.is_custom) payload.field_values = collectValues();
-      else { payload.command = cmdToRun; payload.field_values = collectValues(); }
+      else {
+        payload.command = cmdToRun;
+        payload.field_values = collectValues();
+        // Lets the backend's own defensive rewrite (start_subprocess_job)
+        // catch and fix a stale output dir in the command box -- e.g. left
+        // over from before this popup's Recompute was fixed to track the
+        // job being overwritten, or from a hand-edit -- rather than
+        // silently running with whatever --o the text happens to say.
+        payload.subdir = popupOutputSubdir;
+      }
       const run = await api("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

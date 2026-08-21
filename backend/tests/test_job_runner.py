@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
+
 import project_manager
 from job_runner import STATUS_COMPLETED, STATUS_FAILED, JobRunManager
 
@@ -337,3 +339,39 @@ def test_overwrite_rewrites_a_mismatched_output_path(tmp_path):
     second = asyncio.run(go())
     assert "Import/job001/" in second.command
     assert "wrongdir" not in second.command
+
+
+def test_overwrite_target_subdir_returns_the_existing_jobs_own_directory(tmp_path):
+    """Recomputing a draft for a job the user reopened to Overwrite (e.g. a
+    FAILED run) must target THAT job's own directory, not
+    prospective_subdir's fresh "next unused number" -- otherwise Recompute
+    silently drifts the command's --o onto a new job while the user meant
+    to fix the one they have open, and clicking Overwrite creates a new job
+    next to it instead of overwriting it."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        sub = manager.prospective_subdir("Import")
+        run = await manager.start_subprocess_job(
+            "Import", "Import", "echo hi", subdir=sub,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return run
+
+    first = asyncio.run(go())
+    assert first.cwd == str(tmp_path / "Import" / "job001")
+
+    # A second, unrelated job must have moved prospective_subdir on...
+    assert manager.prospective_subdir("Import") == "Import/job002"
+    # ...but overwrite_target_subdir still points back at the first job.
+    assert manager.overwrite_target_subdir(first.run_id) == "Import/job001"
+
+
+def test_overwrite_target_subdir_unknown_run_raises():
+    manager = JobRunManager(Path("/nonexistent"))
+    with pytest.raises(ValueError):
+        manager.overwrite_target_subdir("no-such-run-id")

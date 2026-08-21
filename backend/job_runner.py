@@ -600,6 +600,26 @@ class JobRunManager:
             raise ValueError(f"Run {overwrite_run_id} has no recorded output directory to overwrite")
         return info
 
+    def overwrite_target_subdir(self, overwrite_run_id: str, project_dir: Optional[Path] = None) -> str:
+        """The project-root-relative output directory (e.g. "Import/job005")
+        of the run `overwrite_run_id` would overwrite -- what a draft
+        recompute should target while the user is editing an existing
+        (e.g. failed) job's fields, instead of prospective_subdir's fresh
+        "next unused number," which used to make Recompute silently drift
+        the command's `--o` onto a NEW job directory and turn "Overwrite"
+        into "create job006 next to the job005 I meant to fix." Raises
+        ValueError (same cases as _resolve_overwrite_target) if the run
+        can't be found or its cwd isn't inside this project."""
+        pd = project_dir if project_dir is not None else self.project_dir
+        target = self._resolve_overwrite_target(overwrite_run_id, pd)
+        cwd = Path(target["cwd"])
+        try:
+            return str(cwd.relative_to(pd))
+        except ValueError:
+            raise ValueError(
+                f"Run {overwrite_run_id}'s directory ({cwd}) isn't inside this project ({pd})"
+            )
+
     def _persist(self, run: JobRun) -> None:
         """Best-effort: append/update this run's summary in its project's
         on-disk history. A history-file write failure should never take
