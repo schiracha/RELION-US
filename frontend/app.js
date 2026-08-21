@@ -747,6 +747,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
     errorDialog("Could not recompute draft: " + err.message);
   }
 });
+  }
 
   const liveOutput = body.querySelector('[data-role="live-output"]');
   const statusLine = body.querySelector('[data-role="status-line"]');

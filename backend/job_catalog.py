@@ -422,16 +422,25 @@ DRAFT_FLAG_MAP: dict[str, dict[str, str]] = {
         "in_optimisation": "--ios", "in_particles": "--i",
         "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
         "fn_img": "--i",
+        "do_parallel_discio": "--no_parallel_disc_io",
+        "do_combine_thru_disc": "--dont_combine_weights_via_disc",
+        "do_preread_images": "--preread_images",
     },
     "Class3D": {
         "in_optimisation": "--ios", "in_particles": "--i",
         "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
         "fn_img": "--i", "fn_ref": "--ref",
+        "do_parallel_discio": "--no_parallel_disc_io",
+        "do_combine_thru_disc": "--dont_combine_weights_via_disc",
+        "do_preread_images": "--preread_images",
     },
     "Autorefine": {
         "in_optimisation": "--ios", "in_particles": "--i",
         "in_tomograms": "--tomograms", "in_trajectories": "--trajectories",
         "fn_img": "--i", "fn_ref": "--ref",
+        "do_parallel_discio": "--no_parallel_disc_io",
+        "do_combine_thru_disc": "--dont_combine_weights_via_disc",
+        "do_preread_images": "--preread_images",
     },
     "TomoSubtomo": {
         "in_optimisation": "--i", "in_particles": "--p",
@@ -449,6 +458,66 @@ DRAFT_FLAG_MAP: dict[str, dict[str, str]] = {
         "in_optimisation": "--i", "in_particles": "--p",
         "in_tomograms": "--t", "in_trajectories": "--mot",
     },
+    # "Always do compute stuff" (pipeline_jobs.cpp's own comment, verbatim,
+    # above this exact three-line block in every one of these 5 jobs'
+    # getCommands*Job(), unconditional relative to any other branch):
+    #   if (!joboptions["do_combine_thru_disc"].getBoolean())
+    #       command += " --dont_combine_weights_via_disc";
+    #   if (!joboptions["do_parallel_discio"].getBoolean())
+    #       command += " --no_parallel_disc_io";
+    #   if (joboptions["do_preread_images"].getBoolean())
+    #       command += " --preread_images ";
+    # All three are self-guarded (each condition names only its own key) but
+    # the generic `--<key>` rule can't find them: none of the three flags
+    # spell out as "--" + their key. Confirmed missing from every one of
+    # these jobs' option_flags (the append sits on the line AFTER the `if`,
+    # not alongside a `joboptions["key"]` reference the extractor's regex
+    # can read), so all three sat silently unmapped -- "Use parallel disc
+    # I/O?" and "Combine iterations through disc?" (unusually, NEGATED: the
+    # flag appears when the box is OFF, see DRAFT_NEGATED_FLAGS below) never
+    # had any effect on the draft regardless of what the user checked, on
+    # every classification/refinement job in the app.
+    "Class2D": {
+        "do_parallel_discio": "--no_parallel_disc_io",
+        "do_combine_thru_disc": "--dont_combine_weights_via_disc",
+        "do_preread_images": "--preread_images",
+    },
+    "MultiBody": {
+        "do_parallel_discio": "--no_parallel_disc_io",
+        "do_combine_thru_disc": "--dont_combine_weights_via_disc",
+        "do_preread_images": "--preread_images",
+    },
+    # Motioncorr/Ctffind's `is_tomo`-guarded fields (job_registry._evaluate_
+    # condition now resolves the `is_tomo`/`!is_tomo` tokens themselves --
+    # see that module for why False is the correct constant here). These two
+    # booleans are additionally mapped because their OWN flag also doesn't
+    # spell out as "--" + key, so they need a name override on top of that:
+    #   Motioncorr (pipeline_jobs.cpp ~1641, condition `!is_tomo &&
+    #   joboptions["do_dose_weighting"].getBoolean()`, itself self-guarded
+    #   once is_tomo is known false):
+    #     command += " --dose_weighting ";
+    #   Ctffind (~1809-1813, condition `else { if (joboptions["use_noDW"]
+    #   .getBoolean()) ...}` -- the `else` is the !is_tomo branch, likewise
+    #   self-guarded once is_tomo is known false):
+    #     command += " --use_noDW ";
+    "Motioncorr": {"do_dose_weighting": "--dose_weighting"},
+    "Ctffind": {"use_noDW": "--use_noDW"},
+}
+
+# Keys in DRAFT_FLAG_MAP[job] whose mapped flag fires when the checkbox is
+# UNCHECKED, not checked -- RELION's own source guards these with a bare
+# `if (!joboptions["key"].getBoolean())`, the opposite of the field's own
+# display sense ("Use parallel disc I/O?" defaults to Yes; unchecking it is
+# what adds `--no_parallel_disc_io`). Every other DRAFT_FLAG_MAP boolean
+# fires on checked, matching RELION's overwhelmingly more common convention,
+# so this is deliberately an opt-in exception list rather than a per-entry
+# field on DRAFT_FLAG_MAP itself.
+DRAFT_NEGATED_FLAGS: dict[str, set[str]] = {
+    "Class2D": {"do_parallel_discio", "do_combine_thru_disc"},
+    "Inimodel": {"do_parallel_discio", "do_combine_thru_disc"},
+    "Class3D": {"do_parallel_discio", "do_combine_thru_disc"},
+    "Autorefine": {"do_parallel_discio", "do_combine_thru_disc"},
+    "MultiBody": {"do_parallel_discio", "do_combine_thru_disc"},
 }
 
 # internal_name -> program string, for jobs whose extracted program_guess is
@@ -514,6 +583,15 @@ DRAFT_SUPPRESS: dict[str, set[str]] = {
     "Class2D": {"use_gpu", "do_helix"},
     "MultiBody": {"use_gpu"},
     "Maskcreate": {"do_helix"},
+    # "Do even/odd frame splitting?" (pipeline_jobs.cpp ~1554: condition
+    # `is_tomo && joboptions["do_even_odd_split"].getBoolean()`). Given
+    # is_tomo is a fixed, known-false constant in every draft this app
+    # builds (see job_registry._evaluate_condition's is_tomo handling), this
+    # box can never affect the default draft's command -- correctly omitted
+    # rather than "unmapped" (there is nothing to fix; add `--even_odd_split`
+    # to the editable command box by hand for a tomography tilt-series run
+    # that wants it).
+    "Motioncorr": {"do_even_odd_split"},
 }
 
 
@@ -521,6 +599,12 @@ def draft_flag_for(internal_name: str, option_key: str) -> Optional[str]:
     """Verified CLI flag for this option key, or None to fall back to the
     generic `--<key>` rule. See DRAFT_FLAG_MAP."""
     return DRAFT_FLAG_MAP.get(internal_name, {}).get(option_key)
+
+
+def draft_flag_is_negated(internal_name: str, option_key: str) -> bool:
+    """True if this DRAFT_FLAG_MAP-mapped boolean's flag fires when the
+    checkbox is UNCHECKED rather than checked. See DRAFT_NEGATED_FLAGS."""
+    return option_key in DRAFT_NEGATED_FLAGS.get(internal_name, set())
 
 
 def draft_program_override(internal_name: str) -> Optional[str]:

@@ -49,6 +49,7 @@ from job_catalog import (
     CUSTOM_JOBS,
     JOB_CATALOG,
     draft_flag_for,
+    draft_flag_is_negated,
     draft_is_suppressed,
     draft_output_flag,
     draft_output_suffix,
@@ -252,13 +253,39 @@ def _evaluate_condition(condition: str, field_values: dict[str, Any]) -> bool | 
         clause = _strip_matched_outer_parens(raw_clause.strip())
         if clause == "!is_continue":
             continue
-        m = _BOOL_CLAUSE_RE.match(clause)
-        if not m:
-            return None
-        value = bool(field_values.get(m.group(1)))
-        if clause.startswith("!"):
-            value = not value
+        if clause in ("is_tomo", "!is_tomo"):
+            # `is_tomo` is RelionJob's own GUI-launch-time flag (RELION's GUI
+            # is started with plain `relion` or `relion --tomo`, gui_main
+            # window.cpp's `_do_tomo`, threaded into RelionJob::initialise()
+            # for the handful of job types -- Motioncorr/Ctffind/Inimodel/
+            # Class3D/Autorefine/Postprocess -- that build a slightly
+            # different option set and command per launch mode); it is NOT a
+            # JobOption and never appears in field_values. RELION-US has no
+            # equivalent concept -- it never launches RELION's own GUI at
+            # all, in either mode (see ARCHITECTURE.md's "SPA / Tomo / All"
+            # section: the sidebar's SPA/Tomo/All toggle is a display filter
+            # only) -- and RelionJob's own constructor default is `is_tomo =
+            # false` (src/pipeline_jobs.h). So this is a fixed, known
+            # constant in every draft this app builds, same category as
+            # `!is_continue` above, just the opposite polarity/value.
+            value = clause.startswith("!")  # "!is_tomo" -> True, "is_tomo" -> False
+        else:
+            m = _BOOL_CLAUSE_RE.match(clause)
+            if not m:
+                return None
+            value = bool(field_values.get(m.group(1)))
+            if clause.startswith("!"):
+                value = not value
         result = result and value
+        if not result:
+            # AND short-circuit: once one clause resolves false the whole
+            # condition is false regardless of any later clause, including
+            # one this evaluator wouldn't otherwise know how to parse (e.g.
+            # Class3D/Autorefine/Inimodel's `sigma_tilt`, gated on
+            # "!is_continue && is_tomo && sigma > 0." -- the numeric
+            # comparison is unparseable on its own, but is_tomo already
+            # being false settles the whole clause).
+            return False
     return result
 
 
@@ -409,7 +436,15 @@ def _build_draft_command(
 
         ft = option["field_type"]
         if ft == "boolean":
-            if value:
+            emit = bool(value)
+            if mapped is not None and draft_flag_is_negated(internal_name, key):
+                # A handful of curated flags fire when the checkbox is
+                # UNCHECKED, not checked (RELION's own source guards them
+                # with `if (!joboptions["key"].getBoolean())`, e.g.
+                # "Use parallel disc I/O?" -> --no_parallel_disc_io only
+                # when that box is OFF). See DRAFT_NEGATED_FLAGS.
+                emit = not emit
+            if emit:
                 parts.append(flag)
             # RELION convention: absent flag == false; nothing to append otherwise
         else:
