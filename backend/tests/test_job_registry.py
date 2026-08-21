@@ -118,8 +118,8 @@ def test_executable_path_placeholder_resolves_from_field_values():
 # --- Draft-command overrides for RELION-5 Python tomo tools -----------------
 # These jobs' real CLI flags are hyphenated multi-word names that don't match
 # their snake_case option keys, so the generic draft rule can't map them. The
-# curated, source-verified overlays in job_catalog (DRAFT_PROGRAM_OVERRIDE /
-# DRAFT_FLAG_MAP / DRAFT_SUPPRESS) fix that. See getCommandsTomoImportJob in
+# curated, source-verified overlay in job_catalog (DRAFT_OVERRIDES's
+# program/flags/suppress fields) fixes that. See getCommandsTomoImportJob in
 # src/pipeline_jobs.cpp (RELION cloned 2026-08-14).
 
 def test_tomo_import_default_draft_uses_serialem_tiltseries_program():
@@ -417,7 +417,7 @@ def test_is_continue_combined_with_another_term_stays_unmapped():
     # ~6328) rather than assembling the flag inline, so the generic
     # `--<key>` rule never sees a matching flags_used entry and the whole
     # group used to be silently dropped no matter what the user filled in.
-    # See job_catalog.DRAFT_FLAG_MAP.
+    # See job_catalog.DRAFT_OVERRIDES.
     ("Class3D", {"fn_img": "particles.star", "fn_ref": "ref.mrc"},
      ["--i particles.star", "--ref ref.mrc"], {"fn_img", "fn_ref"}),
     ("Autorefine", {"fn_img": "particles.star", "fn_ref": "ref.mrc"},
@@ -479,7 +479,7 @@ def test_import_raw_movies_input_file_reaches_the_command():
     `command +=` line, so the generic extractor never sees a flag for
     either key and the draft silently dropped the input file entirely
     (found by actually running an Import job against RELION 5.0.1). See
-    job_catalog.DRAFT_FLAG_MAP["Import"]. Each is gated on its own do_raw/
+    job_catalog.DRAFT_OVERRIDES["Import"].flags. Each is gated on its own do_raw/
     do_other condition -- not unconditional like the tomo shared-input
     group -- because RELION gives BOTH fields their own non-empty default
     ("Micrographs/*.tif" and "ref.mrc") regardless of which branch is
@@ -571,7 +571,7 @@ def test_motioncorr_gain_rot_and_flip_translate_label_to_relions_numeric_code():
     label through crashes relion_run_motioncorr with "Error in textToInteger"
     (confirmed for real against RELION 5.0.1: a Motioncorr job with the
     untranslated label crashed immediately on a real run). See
-    job_catalog.DRAFT_VALUE_TRANSFORM."""
+    job_catalog.DRAFT_OVERRIDES["Motioncorr"].value_transforms."""
     raw = job_registry.raw_job("Motioncorr")
     fields = {"gain_rot": "90 degrees (1)", "gain_flip": "Flip left to right (2)"}
     cmd, unmapped = job_registry._build_draft_command(raw, fields, "Motioncorr", "")
@@ -605,8 +605,9 @@ def test_tomoalign_motion_sigma_fields_are_emitted_when_do_motion_is_on():
 
 
 def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
-    """Most jobs take a plain directory for --o -- e.g. Import, which isn't
-    in DRAFT_OUTPUT_SUFFIX -- and must NOT gain an unexpected suffix."""
+    """Most jobs take a plain directory for --o -- e.g. Import, whose
+    DRAFT_OVERRIDES entry doesn't set output_suffix -- and must NOT gain an
+    unexpected suffix."""
     raw = job_registry.raw_job("Import")
     cmd, _ = job_registry._build_draft_command(raw, {}, "Import", "Import/job001")
     assert "Import/job001/" in cmd

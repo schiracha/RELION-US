@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Verify DRAFT_FLAG_MAP (backend/job_catalog.py) against a real RELION install.
+"""Verify DRAFT_OVERRIDES's flags (backend/job_catalog.py) against a real RELION install.
 
-DRAFT_FLAG_MAP is a curated table of option_key -> real CLI flag, transcribed
-by hand from a specific read of RELION's source (see the comment above
-DRAFT_FLAG_MAP in job_catalog.py for the commit it was read against). This
-script re-derives each flag independently, from the RELION actually installed
+Each JobDraftOverride.flags entry is a curated option_key -> real CLI flag,
+transcribed by hand from a specific read of RELION's source (see the comment
+above DRAFT_OVERRIDES in job_catalog.py for the commit it was read against).
+This script re-derives each flag independently, from the RELION actually installed
 on THIS machine, and reports any flag that doesn't appear where expected --
 the fastest way to catch version drift between the RELION build the map was
 written against and the one a user is actually running.
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from job_catalog import DRAFT_FLAG_MAP  # noqa: E402
+from job_catalog import DRAFT_OVERRIDES  # noqa: E402
 
 BIN_DIR = Path(os.environ.get("RELION_BIN_DIR", "/usr/local/relion/bin"))
 SRC_DIR = Path(os.environ.get("RELION_SRC_DIR", "/home/schiracha/relion/src"))
@@ -100,9 +100,10 @@ def check_source(rel_path: str, flag: str) -> bool:
 def main() -> int:
     ok, missing, skipped = [], [], []
 
-    for job, flag_map in DRAFT_FLAG_MAP.items():
+    for job, override in DRAFT_OVERRIDES.items():
         help_text_cache: dict[str, str | None] = {}
-        for key, flag in flag_map.items():
+        for key, flag_override in override.flags.items():
+            flag = flag_override.flag
             found = False
             checked_against = []
 
@@ -142,7 +143,7 @@ def main() -> int:
         for job, key, flag, checked in missing:
             print(f"  {job}.{key} -> {flag}  (checked: {', '.join(checked)})")
         print("\nThese need re-verifying against the installed RELION version --")
-        print("job_catalog.py's DRAFT_FLAG_MAP may be stale for this build.")
+        print("job_catalog.py's DRAFT_OVERRIDES may be stale for this build.")
         return 1
 
     print("All mapped flags confirmed against the installed RELION build.")

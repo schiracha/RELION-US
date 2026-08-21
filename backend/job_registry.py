@@ -48,6 +48,7 @@ from job_catalog import (
     CATEGORIES,
     CUSTOM_JOBS,
     JOB_CATALOG,
+    draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
     draft_flag_is_negated,
@@ -160,7 +161,7 @@ def _self_guarded(condition: str, key: str) -> bool:
     # fn_motioncor2_exe is only added in the do_own_motioncor==false branch,
     # a condition extracted as the identical-looking bare "else"), so those
     # still need per-field verification against the real source instead
-    # (see job_catalog.DRAFT_FLAG_MAP for the fields that got it).
+    # (see job_catalog.DRAFT_OVERRIDES for the fields that got it).
     if condition.strip() == "!is_continue":
         return True
     referenced = set(re.findall(r'joboptions\[\s*"([A-Za-z0-9_]+)"\s*\]', condition))
@@ -338,12 +339,12 @@ def _build_draft_command(
     Returns (draft_command_string, unmapped_field_keys).
     See module docstring for the rule this follows.
 
-    Two curated, source-verified overlays (job_catalog.DRAFT_PROGRAM_OVERRIDE
-    and DRAFT_FLAG_MAP) correct the handful of jobs the generic rule gets
-    wrong — RELION-5's Python tomo tools, whose hyphenated CLI flags
-    (`--tilt-image-movie-pattern`) don't match their snake_case option keys
-    (`movie_files`), and TomoImport, whose extracted program was the wrong
-    (do_coords) branch. A mapped flag is authoritative: it's always emitted,
+    A curated, source-verified overlay (job_catalog.DRAFT_OVERRIDES) corrects
+    the handful of jobs the generic rule gets wrong — RELION-5's Python tomo
+    tools, whose hyphenated CLI flags (`--tilt-image-movie-pattern`) don't
+    match their snake_case option keys (`movie_files`), and TomoImport,
+    whose extracted program was the wrong (do_coords) branch. A mapped flag
+    is authoritative: it's always emitted,
     bypassing the flags_used membership test (unreliable for these jobs).
 
     output_subdir: if given (e.g. "Import/job005"), the RELION-style output
@@ -397,31 +398,17 @@ def _build_draft_command(
         # literal suffix to form a file rootname prefix (e.g. "run" ->
         # ".../job001/run", so output files become "run_it000_..."  instead
         # of a bare directory that would otherwise produce a wrong,
-        # un-prefixed filename like "_it000_..."). See DRAFT_OUTPUT_SUFFIX.
+        # un-prefixed filename like "_it000_..."). See
+        # job_catalog.JobDraftOverride.output_suffix.
         suffix = draft_output_suffix(internal_name)
         if suffix:
             subdir_arg += suffix
         parts.append(draft_output_flag(internal_name))
         parts.append(shlex.quote(subdir_arg))
-        if internal_name == "Import":
-            # relion_import's --ofile is compulsory (src/apps/import.cpp:49)
-            # and has no default -- without it the binary refuses to run at
-            # all (confirmed for real). Its value is a literal RELION picks
-            # per branch, not a JobOption string this app can just read:
-            # do_raw's is_multiframe checkbox selects "movies.star" vs
-            # "micrographs.star" (pipeline_jobs.cpp ~1312-1324) -- a plain
-            # two-way pick on one already-known boolean, safe to compute
-            # here. do_other's fn_out is derived from fn_in_other itself
-            # (basename, or a coords_suffix construction for the coordinate-
-            # import case) -- genuine per-node-type branch logic this app
-            # deliberately doesn't try to reconstruct (same policy as
-            # TomoImport's do_coords branch); that half is left for the user
-            # to add via the editable command box, same as is_multiframe
-            # itself already is (see it in `unmapped`).
-            if field_values.get("do_raw"):
-                ofile = "movies.star" if field_values.get("is_multiframe") else "micrographs.star"
-                parts.append("--ofile")
-                parts.append(ofile)
+        # A compulsory-but-computed extra argument some jobs need right
+        # after the output flag/subdir (e.g. Import's --ofile) -- see
+        # job_catalog.JobDraftOverride.extra_output_args.
+        parts.extend(draft_extra_output_args(internal_name, field_values))
     unmapped = []
 
     for key, value in field_values.items():
@@ -441,7 +428,7 @@ def _build_draft_command(
         if mapped is not None:
             # A mapped flag is normally unconditional -- but the rare entry
             # that shares its flag with another mutually-exclusive option
-            # (see DRAFT_FLAG_MAP["Import"]) carries its own condition,
+            # (see DRAFT_OVERRIDES["Import"].flags) carries its own condition,
             # checked the same way as an extracted option_flags condition
             # below, since neither field's own empty-value skip can tell
             # which branch is actually active.
@@ -518,7 +505,7 @@ def _build_draft_command(
                 # UNCHECKED, not checked (RELION's own source guards them
                 # with `if (!joboptions["key"].getBoolean())`, e.g.
                 # "Use parallel disc I/O?" -> --no_parallel_disc_io only
-                # when that box is OFF). See DRAFT_NEGATED_FLAGS.
+                # when that box is OFF). See job_catalog.FlagOverride.negated.
                 emit = not emit
             if emit:
                 parts.append(flag)
@@ -542,7 +529,7 @@ def _build_draft_command(
             if has_draft_value_transform(internal_name, key):
                 # This field's value is a human-facing radio-button label
                 # (e.g. "No rotation (0)"), not what RELION's own program
-                # actually parses -- see DRAFT_VALUE_TRANSFORM for why
+                # actually parses -- see job_catalog.DRAFT_OVERRIDES for why
                 # passing the label through crashes relion_run_motioncorr.
                 translated = draft_value_for(internal_name, key, str(value))
                 if translated is None:
