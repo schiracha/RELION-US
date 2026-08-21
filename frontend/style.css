@@ -709,16 +709,6 @@ html, body {
 .btn.primary:hover { background: #6ba0ff; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 
-.live-output {
-  flex: 1;
-  overflow-y: auto;
-  background: var(--console-bg-deep);
-  padding: 8px 10px;
-  font-family: ui-monospace, "SF Mono", Consolas, monospace;
-  font-size: 12px;
-}
-.output-line { white-space: pre-wrap; word-break: break-word; }
-.output-line.stderr { color: var(--err); }
 .status-line { color: var(--text-dim); font-style: italic; margin-top: 4px; }
 .status-line.ok { color: var(--ok); }
 .status-line.failed { color: var(--err); }

@@ -512,7 +512,6 @@ async function openJobPopup(internalName, displayName, existingRun) {
         <span class="status-line" data-role="status-line"></span>
       </div>
     </div>` : ""}
-    <div class="live-output" data-role="live-output"></div>
   `;
 
   // ---- Inputs tab: every option RELION's own GUI shows -------------------
@@ -755,26 +754,24 @@ async function openJobPopup(internalName, displayName, existingRun) {
 });
   }
 
-  const liveOutput = body.querySelector('[data-role="live-output"]');
   const statusLine = body.querySelector('[data-role="status-line"]');
   const errorsPre = body.querySelector('[data-role="errors-pre"]');
   const errorBadge = body.querySelector('[data-role="error-badge"]');
   let errorLines = [];
   let ws = null;
 
+  // stderr goes to the dedicated Errors tab (errorsPre/errorBadge) only --
+  // no separate always-visible output block duplicating it underneath
+  // every tab. stdout isn't discarded, just not streamed live inline: it's
+  // still written to run.out and browsable/downloadable from the Outputs
+  // tab like every other output file.
   function appendOutputLine(text, isStderr) {
-    const line = document.createElement("div");
-    line.className = "output-line" + (isStderr ? " stderr" : "");
-    line.textContent = text;
-    liveOutput.appendChild(line);
-    liveOutput.scrollTop = liveOutput.scrollHeight;
-    if (isStderr) {
-      errorLines.push(text);
-      errorsPre.textContent = errorLines.join("\n");
-      errorsPre.classList.add("has-errors");
-      errorBadge.style.display = "";
-      errorBadge.textContent = String(errorLines.length);
-    }
+    if (!isStderr) return;
+    errorLines.push(text);
+    errorsPre.textContent = errorLines.join("\n");
+    errorsPre.classList.add("has-errors");
+    errorBadge.style.display = "";
+    errorBadge.textContent = String(errorLines.length);
   }
 
   // --- Job actions toolbar --------------------------------------------
