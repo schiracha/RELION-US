@@ -82,11 +82,27 @@ Once the environment is set up and active, launch it with:
 ```
 
 Then open `http://localhost:8420/` in a browser. On a remote server or HPC
-cluster login node, launch it there and port-forward over SSH from your
-laptop (`ssh -L 8420:localhost:8420 <host>`) — the default bind is already
-right for this. To reach it directly from another machine instead, without
-a tunnel, opt in explicitly with `--host 0.0.0.0` (see "Password protection"
-below first — this is the point at which it starts to matter).
+cluster login node, launch it there, then port-forward over SSH from your
+laptop — the default bind is already right for this:
+
+```bash
+# 1. On the remote machine (the HPC login node or server), in an SSH session:
+./Run-RelionUS
+
+# 2. On your laptop, in a SEPARATE terminal, leave this running -- <host> is
+#    whatever you'd normally type after `ssh` to reach that same machine,
+#    i.e. user@hostname or user@ip.address (e.g. jdoe@login1.cluster.edu),
+#    or just hostname/ip.address if your local SSH config already sets the
+#    username for that host:
+ssh -L 8420:localhost:8420 <host>
+
+# 3. Now on your laptop, open in a browser:
+http://localhost:8420/
+```
+
+To reach it directly from another machine instead, without a tunnel, opt in
+explicitly with `--host 0.0.0.0` (see "Password protection" below first —
+this is the point at which it starts to matter).
 `./Run-RelionUS --help` shows the `--host`/`--port` options.
 
 **You don't have to run it from inside a project directory.** If you `cd`
