@@ -115,15 +115,14 @@ internet access.
 
 ## Password protection
 
-Off by default. RELION-US binds `127.0.0.1` by default, so it isn't reachable
-from another machine unless you deliberately opt in with `--host 0.0.0.0` —
-but even at the default bind, anyone who can already reach this machine's
-localhost (another user on a shared HPC login node, for instance) can open
-jobs, run them, and delete run history, with no login at all. A password is
-a basic deterrent against that — **not real security**: this app sets up no
-encryption, so the password crosses the network in plain text like
-everything else it sends. If you need actual confidentiality, put it behind
-a reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
+RELION-US binds `127.0.0.1` by default, so it isn't reachable from another
+machine unless you deliberately opt in with `--host 0.0.0.0` — but even at
+the default bind, anyone who can already reach this machine's localhost
+(another user on a shared HPC login node, for instance) can open jobs, run
+them, and delete run history, with no login at all. A user interface
+password can be set at each startup as a basic deterrent against that —
+**not real security**. If you need actual confidentiality, put it behind a
+reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
 tunnel instead (`ssh -L 8420:localhost:8420 <host>`, the same approach
 suggested above for a remote/HPC-hosted instance).
 
