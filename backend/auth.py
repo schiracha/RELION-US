@@ -4,11 +4,12 @@ auth.py — optional password protection for the RELION-US interface itself
 whole broadcasting web app), plus the CLI ``Run-RelionUS`` calls to manage
 it.
 
-Why this exists: RELION-US binds 0.0.0.0 by default so it's reachable from
-another machine (see main.py's module docstring) -- on a shared cluster or
-lab network, that means anyone who can reach the port can open jobs, run
-them, and delete run history, with no login at all. This module is a
-deliberately simple deterrent against that, not a security system:
+Why this exists: RELION-US binds 127.0.0.1 by default (see main.py's module
+docstring) specifically so it is NOT reachable from another machine without
+deliberately opting in, via `--host 0.0.0.0` or an SSH tunnel -- but anyone
+who does open it up that way, or who shares a login node where other users
+can already reach localhost, gets no login at all otherwise. This module is
+a deliberately simple deterrent against that, not a security system:
 
 - No TLS is set up by this app, so the password (like everything else this
   app sends) crosses the network in plain text. That is an accepted
@@ -73,12 +74,6 @@ def config_path() -> Path:
 
 def _default_config() -> dict[str, Any]:
     return {"enabled": False, "password_hash": None, "salt": None, "session_secret": None}
-
-
-def config_exists() -> bool:
-    """Whether this machine has ever been asked about password protection --
-    Run-RelionUS's first-run prompt uses this to ask only once."""
-    return config_path().exists()
 
 
 def load_config() -> dict[str, Any]:
@@ -277,10 +272,13 @@ def cli_status() -> int:
     return 0
 
 
-def cli_config_exists() -> int:
-    """Silent -- exit code only. Run-RelionUS's first-run prompt uses this to
-    decide whether to ask about password protection at all."""
-    return 0 if config_exists() else 1
+def cli_is_enabled() -> int:
+    """Silent -- exit code only. Run-RelionUS's startup prompt uses this to
+    decide whether to ask about password protection this run: skip asking
+    if it's already enabled (a login prompt already gates every session in
+    that case), ask again every time otherwise -- unlike the old one-time
+    prompt, declining doesn't opt you out of being asked on the next run."""
+    return 0 if is_enabled() else 1
 
 
 def main(argv: list[str]) -> int:
@@ -289,11 +287,11 @@ def main(argv: list[str]) -> int:
         "set-password": cli_set_password,
         "enable": cli_enable,
         "disable": cli_disable,
-        "config-exists": cli_config_exists,
+        "is-enabled": cli_is_enabled,
     }
     if len(argv) != 1 or argv[0] not in commands:
         print(f"Usage: {Path(sys.argv[0]).name} "
-              "{status|set-password|enable|disable|config-exists}")
+              "{status|set-password|enable|disable|is-enabled}")
         return 2
     return commands[argv[0]]()
 

@@ -78,14 +78,16 @@ install -r backend/requirements.txt`.
 Once the environment is set up and active, launch it with:
 
 ```bash
-./Run-RelionUS         # binds 0.0.0.0:8420 by default
+./Run-RelionUS         # binds 127.0.0.1:8420 by default (localhost only)
 ```
 
-Then open `http://<that machine's address>:8420/` in a browser — including
-from a different machine, since it binds `0.0.0.0`. On a remote server or
-HPC cluster login node, launch it there and either port-forward over SSH
-(`ssh -L 8420:localhost:8420 <host>`) or connect directly if your network
-allows it. `./Run-RelionUS --help` shows the `--host`/`--port` options.
+Then open `http://localhost:8420/` in a browser. On a remote server or HPC
+cluster login node, launch it there and port-forward over SSH from your
+laptop (`ssh -L 8420:localhost:8420 <host>`) — the default bind is already
+right for this. To reach it directly from another machine instead, without
+a tunnel, opt in explicitly with `--host 0.0.0.0` (see "Password protection"
+below first — this is the point at which it starts to matter).
+`./Run-RelionUS --help` shows the `--host`/`--port` options.
 
 **You don't have to run it from inside a project directory.** If you `cd`
 into an existing RELION project before running `./Run-RelionUS`, it's picked
@@ -113,25 +115,26 @@ internet access.
 
 ## Password protection
 
-Off by default. Because RELION-US binds `0.0.0.0` so it's reachable from
-another machine (that's the point — see "Installing and running it" above),
-anyone who can reach the port can open jobs, run them, and delete run
-history, with no login at all. A password is a basic deterrent against that
-on a shared lab or cluster network — **not real security**: this app sets up
-no encryption, so the password crosses the network in plain text like
+Off by default. RELION-US binds `127.0.0.1` by default, so it isn't reachable
+from another machine unless you deliberately opt in with `--host 0.0.0.0` —
+but even at the default bind, anyone who can already reach this machine's
+localhost (another user on a shared HPC login node, for instance) can open
+jobs, run them, and delete run history, with no login at all. A password is
+a basic deterrent against that — **not real security**: this app sets up no
+encryption, so the password crosses the network in plain text like
 everything else it sends. If you need actual confidentiality, put it behind
 a reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
-tunnel instead (`ssh -L 8420:localhost:8420 <host>`, the same approach the
-README already suggests for a remote/HPC-hosted instance).
+tunnel instead (`ssh -L 8420:localhost:8420 <host>`, the same approach
+suggested above for a remote/HPC-hosted instance).
 
-**Setting it up:** the first time `Run-RelionUS` runs at all on a machine,
-and only then, and only if you're at an interactive terminal, it asks
-whether to set a password. Say no (or just press Enter) and it won't ask
-again — from then on, everything is a terminal flag, on the machine running
-the backend, deliberately with no in-browser way to turn it on or change it
-(anyone who can already reach a shell on that machine can read/edit project
-files directly anyway, so gating password changes behind browser auth would
-add friction, not protection):
+**Setting it up:** every time `Run-RelionUS` starts at an interactive
+terminal without protection already turned on, it asks whether to set a
+password. Say no (or just press Enter) and it asks again next time, rather
+than staying quiet forever — from then on until you do set one up, everything
+is a terminal flag, on the machine running the backend, deliberately with no
+in-browser way to turn it on or change it (anyone who can already reach a
+shell on that machine can read/edit project files directly anyway, so gating
+password changes behind browser auth would add friction, not protection):
 
 ```bash
 ./Run-RelionUS --set-password        # set/change the password (hidden input, twice to confirm)

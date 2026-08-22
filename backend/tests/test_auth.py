@@ -35,7 +35,6 @@ def test_config_path_follows_xdg_config_home(tmp_path, monkeypatch):
 
 
 def test_no_config_file_yet_reads_as_disabled_with_no_password(auth_home):
-    assert auth.config_exists() is False
     cfg = auth.load_config()
     assert cfg["enabled"] is False
     assert cfg["password_hash"] is None
@@ -241,10 +240,17 @@ def test_cli_enable_then_disable(auth_home):
     assert auth.is_enabled() is False
 
 
-def test_cli_config_exists_reflects_whether_a_config_file_was_ever_written(auth_home):
-    assert auth.cli_config_exists() == 1
-    auth.disable()  # what Run-RelionUS's first-run prompt does on "no"
-    assert auth.cli_config_exists() == 0
+def test_cli_is_enabled_reflects_whether_protection_is_currently_on(auth_home):
+    # No config at all yet -- Run-RelionUS's startup prompt should still ask.
+    assert auth.cli_is_enabled() == 1
+    auth.set_password("x123")
+    # A password alone doesn't count as "enabled" -- still asks.
+    assert auth.cli_is_enabled() == 1
+    auth.enable()
+    assert auth.cli_is_enabled() == 0
+    auth.disable()
+    # Declining/disabling doesn't opt you out of being asked again.
+    assert auth.cli_is_enabled() == 1
 
 
 def test_cli_main_dispatches_and_rejects_unknown_commands(auth_home, capsys):

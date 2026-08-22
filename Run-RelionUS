@@ -7,9 +7,9 @@
 # script doesn't install anything itself).
 #
 # Usage:
-#   ./Run-RelionUS                       # binds 0.0.0.0:8420
+#   ./Run-RelionUS                       # binds 127.0.0.1:8420 (localhost only)
 #   ./Run-RelionUS --port 8888
-#   ./Run-RelionUS --host 127.0.0.1 --port 8420
+#   ./Run-RelionUS --host 0.0.0.0         # opt in to reachable-from-the-network
 #
 # Run this from inside an existing RELION project directory to have
 # RELION-US open it automatically ("Do I have to run this from the working
@@ -17,9 +17,11 @@
 # default project folder, and you switch to the real one from the
 # "Change Project" button in the top bar once it's running.
 #
-# On a remote server or HPC login node: launch this there, then either
-# port-forward over SSH from your laptop (ssh -L 8420:localhost:8420 <host>)
-# or connect directly if your network allows it.
+# On a remote server or HPC login node: launch this there (the default
+# --host 127.0.0.1 is exactly right for this case), then port-forward over
+# SSH from your laptop (ssh -L 8420:localhost:8420 <host>). Only pass
+# --host 0.0.0.0 if you specifically want it reachable directly over the
+# network instead — see the password-protection notes below first if you do.
 #
 # To run this as a plain command (`Run-RelionUS`) from any directory instead
 # of typing the full path every time, put a symlink to it on your PATH — a
@@ -30,16 +32,19 @@
 #   sudo ln -s "$(pwd)/Run-RelionUS" /usr/local/bin/Run-RelionUS
 #
 # --- Password protection ----------------------------------------------------
-# Off by default. RELION-US binds 0.0.0.0 so it's reachable from other
-# machines on your network — if that's a shared lab/cluster network, a
-# password is a basic deterrent against casual access, not real security:
-# this app sets up no encryption, so the password (like everything else it
-# sends) crosses the network in plain text. See backend/auth.py's module
-# docstring for the full reasoning, including how to add real TLS if you
-# need it. The very first time this script runs (and only then, and only in
-# an interactive terminal), it asks whether to set one up; skip or decline
-# and it won't ask again automatically, but a straight yes/no would defeat
-# the point of asking, so use the flags below any time after that:
+# Off by default. Even with the localhost-only default bind, anyone else who
+# can already reach this machine's localhost (another user on a shared HPC
+# login node, for instance) can open jobs, run them, and delete run history
+# with no login at all -- and if you opt into --host 0.0.0.0, that's anyone
+# on your network. A password is a basic deterrent against that, not real
+# security: this app sets up no encryption, so the password (like everything
+# else it sends) crosses the network in plain text. See backend/auth.py's
+# module docstring for the full reasoning, including how to add real TLS if
+# you need it. Every time this script starts in an interactive terminal
+# without protection already turned on, it asks whether to set one up now;
+# skip or decline and it just asks again next time rather than staying quiet
+# forever, so use the flags below any time you'd rather set it up (or turn it
+# off) without being asked:
 #   ./Run-RelionUS --set-password        # set/change the password (prompts,
 #                                         #   hidden input, twice to confirm)
 #   ./Run-RelionUS --enable-auth         # require it from now on
@@ -56,7 +61,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTH_PY=("$SCRIPT_DIR/backend/auth.py")
 run_auth_cli() { PYTHONPATH="$SCRIPT_DIR/backend" python3 "${AUTH_PY[@]}" "$@"; }
 
-HOST="0.0.0.0"
+HOST="127.0.0.1"
 PORT="8420"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,16 +85,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# First run on this machine, asked interactively, once. `config-exists`
-# tells us whether backend/auth.py has ever recorded an answer (yes, no, or
-# a password already set some other way) — a "no" here means genuinely
-# never asked, not "asked and declined", since declining still writes the
-# config (see auth.py's cli_set_password/cli_disable). A non-interactive
-# run (cron, systemd, sbatch, piped input) skips the prompt rather than
-# hanging on a read() nothing will ever answer, and deliberately does NOT
-# write the config either, so a person running this by hand later still
-# gets asked.
-if ! run_auth_cli config-exists; then
+# Asked every time protection isn't currently in effect for this run --
+# unlike the old one-time-ever prompt, declining doesn't silently opt you
+# out of being asked again next time. Skipped entirely if --auth/--no-auth
+# explicitly set RELION_US_FORCE_AUTH for this one run: that flag is itself
+# an explicit, just-stated answer, so re-litigating it via prompt right
+# after would just be noise. A non-interactive run (cron, systemd, sbatch,
+# piped input) skips the interactive prompt rather than hanging on a read()
+# nothing will ever answer, and prints a reminder to stderr instead, every
+# time, same as the prompt would.
+if [[ -z "${RELION_US_FORCE_AUTH:-}" ]] && ! run_auth_cli is-enabled; then
   if [[ -t 0 && -t 1 ]]; then
     echo "RELION-US can require a password before anyone can open this interface."
     echo "(No encryption is set up here, so treat this as a basic deterrent against"
@@ -100,14 +105,11 @@ if ! run_auth_cli config-exists; then
       if run_auth_cli set-password; then
         run_auth_cli enable
       fi
-    else
-      run_auth_cli disable  # records "asked, declined" so this won't ask again
     fi
     echo
   else
     echo "Password protection isn't set up yet. Run './Run-RelionUS --set-password'" >&2
-    echo "any time to turn it on (this notice won't repeat once you have, or once" >&2
-    echo "you're asked interactively)." >&2
+    echo "any time to turn it on." >&2
   fi
 fi
 

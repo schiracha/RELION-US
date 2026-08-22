@@ -1,10 +1,13 @@
 """
 main.py — FastAPI backend for the RELION-US web app.
 
-Run with:  uvicorn main:app --host 0.0.0.0 --port 8420 --reload
-Then open  http://<this-machine>:8420/  in a browser — including from
-another machine on the network, since this binds 0.0.0.0 rather than
-localhost-only (matches the "controllable via another machine" request).
+Run with:  uvicorn main:app --host 127.0.0.1 --port 8420 --reload
+Then open  http://localhost:8420/  in a browser. Run-RelionUS binds
+127.0.0.1 by default -- reach it from another machine via an SSH tunnel
+(`ssh -L 8420:localhost:8420 <host>`) or by opting in explicitly with
+`--host 0.0.0.0` (see Run-RelionUS's own usage comment and
+backend/auth.py's module docstring for the security tradeoffs of doing
+that).
 
 Endpoints:
   GET  /api/catalog                       -> Jobs list (grouped by category)
