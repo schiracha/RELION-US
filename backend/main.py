@@ -1025,5 +1025,22 @@ def favicon():
     return Response(status_code=204)
 
 
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles sends only ETag/Last-Modified by default, no
+    Cache-Control -- browsers then apply their own heuristic freshness
+    lifetime and can silently keep serving a stale app.js/style.css for a
+    long time after a code change, with no failed request to notice. Forcing
+    revalidation on every request costs a conditional GET (cheap, usually a
+    304) but guarantees the browser never runs code/styles older than what's
+    on disk, which matters for a tool developed and used on the same
+    machine like this one.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Serve the frontend last, so /api/* and /ws/* above take precedence.
-app.mount("/", StaticFiles(directory=str(APP_DIR.parent / "frontend"), html=True), name="frontend")
+app.mount("/", _NoCacheStaticFiles(directory=str(APP_DIR.parent / "frontend"), html=True), name="frontend")

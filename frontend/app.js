@@ -488,31 +488,33 @@ async function openJobPopup(internalName, displayName, existingRun) {
       <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
-    <div class="tab-content active" data-tab-content="inputs">
-      <div class="job-standard-form" data-role="standard-form"></div>
-      ${def.is_custom ? `
-      <div class="command-row" data-role="command-row">
-        <div class="command-actions">
-          <button class="btn primary" data-role="run-btn">Run</button>
-          <span class="status-line" data-role="status-line"></span>
-        </div>
-      </div>` : `
-      <div class="command-row" data-role="command-row">
-        <label>Command (edit freely — this exact string runs, nothing added or removed under the hood)
-          <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
-        </label>
-        <textarea class="command-box" data-role="command-box"></textarea>
-        <div class="command-actions">
-          <button class="btn primary" data-role="run-btn">Run</button>
-          <span class="status-line" data-role="status-line"></span>
-        </div>
-      </div>`}
+    <div class="tab-content-area" data-role="tab-content-area">
+      <div class="tab-content active" data-tab-content="inputs">
+        <div class="job-standard-form" data-role="standard-form"></div>
+      </div>
+      <div class="tab-content" data-tab-content="progress"></div>
+      <div class="tab-content" data-tab-content="ctfqc"></div>
+      <div class="tab-content" data-tab-content="outputs"></div>
+      <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
+      ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
     </div>
-    <div class="tab-content" data-tab-content="progress"></div>
-    <div class="tab-content" data-tab-content="ctfqc"></div>
-    <div class="tab-content" data-tab-content="outputs"></div>
-    <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
-    ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
+    ${def.is_custom ? `
+    <div class="command-row active" data-role="command-row">
+      <div class="command-actions">
+        <button class="btn primary" data-role="run-btn">Run</button>
+        <span class="status-line" data-role="status-line"></span>
+      </div>
+    </div>` : `
+    <div class="command-row active" data-role="command-row">
+      <label>Command (edit freely — this exact string runs, nothing added or removed under the hood)
+        <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
+      </label>
+      <textarea class="command-box" data-role="command-box"></textarea>
+      <div class="command-actions">
+        <button class="btn primary" data-role="run-btn">Run</button>
+        <span class="status-line" data-role="status-line"></span>
+      </div>
+    </div>`}
   `;
 
   // ---- Inputs tab: every option RELION's own GUI shows -------------------
@@ -690,7 +692,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
     renderAdvancedRows(advancedContent, data.options);
   }
 
-  // Tab switching
+  // Tab switching. The command box lives outside the tab-content area (a
+  // fixed strip pinned to the bottom of the popup, see the command-row CSS)
+  // rather than inside the Inputs tab-content, so it needs its own
+  // active-toggle here instead of just riding along with .tab-content.
+  const commandRowEl = body.querySelector('[data-role="command-row"]');
   body.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (btn.hidden) return;
@@ -698,6 +704,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       body.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
       btn.classList.add("active");
       body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
+      if (commandRowEl) commandRowEl.classList.toggle("active", btn.dataset.tab === "inputs");
       if (btn.dataset.tab === "outputs") loadOutputsTab();
       if (btn.dataset.tab === "progress") refreshProgress();
     });

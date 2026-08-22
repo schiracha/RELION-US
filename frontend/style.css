@@ -635,13 +635,17 @@ html, body {
   font-size: 10px;
 }
 
-/* Only one tab is ever visible at once (.active), and the command box now
-   lives INSIDE the Inputs tab-content rather than as a permanent sibling
-   below every tab -- so each tab's max-height budgets the same shared
-   space against the popup's own header/toolbar/tab-bar chrome only, not
-   against each other or against a fixed command-row/output strip that used
-   to eat into every tab's room even when it wasn't Inputs. */
-.tab-content { flex: 0 0 auto; max-height: 82%; overflow-y: auto; padding: 8px 10px; display: none; }
+/* tab-content-area is the flexible middle band of the popup: it grows to
+   fill whatever room is left between the fixed header/toolbar/tab-bar chrome
+   above and the fixed command-row strip below (command-row sits outside
+   this area entirely -- see its own rules further down -- so it no longer
+   eats into a tab's height only when that tab happens to be Inputs). Only
+   one .tab-content is ever visible (.active); the inactive ones are
+   display:none and don't participate in layout, so the active one alone
+   determines this area's scroll content while still being sized by the
+   flex parent rather than by its own content height. */
+.tab-content-area { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tab-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 10px; display: none; }
 .tab-content[data-tab-content="inputs"] { padding: 0; }
 .tab-content.active { display: block; }
 /* Advanced section (inside the Inputs tab): options the program accepts
@@ -679,7 +683,13 @@ html, body {
 .source-pre, .errors-pre { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-dim); margin: 0; }
 .errors-pre.has-errors { color: var(--err); }
 
-.command-row { padding: 8px 10px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--panel); }
+/* Pinned to the bottom of the popup (a sibling of tab-content-area, not
+   nested inside the Inputs tab-content) so it stays put and resizable
+   regardless of how tall the Inputs form gets, and only shown while the
+   Inputs tab is active (toggled alongside .tab-content.active -- see the
+   tab-switching handler in openJobPopup). */
+.command-row { flex: 0 0 auto; display: none; padding: 8px 10px; border-top: 1px solid var(--border); background: var(--panel); }
+.command-row.active { display: block; }
 .command-row label { font-size: 11px; color: var(--text-dim); display: flex; justify-content: space-between; }
 .command-box {
   width: 100%;
