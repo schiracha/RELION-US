@@ -154,6 +154,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import auth
+import ctf_qc
 import job_registry
 import progress
 import pipeline_bridge
@@ -854,6 +855,45 @@ def run_progress(run_id: str):
     return data
 
 
+@app.get("/api/runs/{run_id}/progress/iteration/{iteration}")
+def run_progress_iteration(run_id: str, iteration: int):
+    """One specific iteration's full class breakdown (see
+    progress.read_iteration) -- what lets the Progress tab show any past
+    iteration's images, not just whichever was newest when the popup opened
+    or the last poll landed."""
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    try:
+        return progress.read_iteration(Path(cwd), iteration)
+    except progress.ProgressError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/runs/{run_id}/orientation-distribution")
+def run_orientation_distribution(run_id: str):
+    """Viewing-direction 2D histogram for the most recent completed
+    iteration (see progress.read_orientation_distribution) -- ON DEMAND
+    only, triggered by a button in the frontend, never auto-polled: unlike
+    every other Progress tab read, this one parses a per-PARTICLE file that
+    can run into the tens of millions of rows."""
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    run = run_manager.get(run_id)
+    internal_name = run.internal_name if run is not None else None
+    if internal_name is None:
+        entry = next(
+            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
+        )
+        internal_name = (entry or {}).get("internal_name")
+    if not internal_name or not progress.supports_orientation_distribution(internal_name):
+        return {"available": False, "supported": False}
+    data = progress.read_orientation_distribution(Path(cwd))
+    data["supported"] = True
+    return data
+
+
 @app.get("/api/runs/{run_id}/progress/thumbnail")
 def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
     cwd = run_manager._resolve_run_cwd(run_id)
@@ -865,6 +905,46 @@ def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
         raise HTTPException(status_code=400, detail=str(exc))
     # Immutable: RELION never rewrites a completed iteration's class images, so
     # the browser can keep these without re-fetching while the popup is open.
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@app.get("/api/runs/{run_id}/ctf-qc")
+def run_ctf_qc(run_id: str):
+    """Every micrograph/tilt-image's CTF fit numbers for a CTF Estimation
+    job's QC charts (see ctf_qc.read_ctf_qc) -- end-of-job only, since
+    RELION itself only writes this once, when the whole job finishes."""
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    run = run_manager.get(run_id)
+    internal_name = run.internal_name if run is not None else None
+    if internal_name is None:
+        entry = next(
+            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
+        )
+        internal_name = (entry or {}).get("internal_name")
+    if not internal_name or not ctf_qc.supports_ctf_qc(internal_name):
+        return {"available": False, "supported": False, "count": 0, "micrographs": []}
+    data = ctf_qc.read_ctf_qc(Path(cwd))
+    data["supported"] = True
+    return data
+
+
+@app.get("/api/runs/{run_id}/ctf-qc/thumbnail")
+def run_ctf_qc_thumbnail(run_id: str, reference: str = Query(...)):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    try:
+        png = ctf_qc.render_ctf_thumbnail(Path(cwd), reference)
+    except ctf_qc.ProgressError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Immutable: RELION never rewrites a finished job's CTF images, so the
+    # browser can keep these without re-fetching while the popup is open.
     return Response(
         content=png,
         media_type="image/png",

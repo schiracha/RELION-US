@@ -483,35 +483,36 @@ async function openJobPopup(internalName, displayName, existingRun) {
     <div class="tab-bar" data-role="tab-bar">
       <button class="tab-btn active" data-tab="inputs">Inputs</button>
       <button class="tab-btn" data-tab="progress" hidden>Progress</button>
+      <button class="tab-btn" data-tab="ctfqc" hidden>CTF QC</button>
       <button class="tab-btn" data-tab="outputs" hidden>Outputs</button>
       <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
     <div class="tab-content active" data-tab-content="inputs">
       <div class="job-standard-form" data-role="standard-form"></div>
+      ${def.is_custom ? `
+      <div class="command-row" data-role="command-row">
+        <div class="command-actions">
+          <button class="btn primary" data-role="run-btn">Run</button>
+          <span class="status-line" data-role="status-line"></span>
+        </div>
+      </div>` : `
+      <div class="command-row" data-role="command-row">
+        <label>Command (edit freely — this exact string runs, nothing added or removed under the hood)
+          <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
+        </label>
+        <textarea class="command-box" data-role="command-box"></textarea>
+        <div class="command-actions">
+          <button class="btn primary" data-role="run-btn">Run</button>
+          <span class="status-line" data-role="status-line"></span>
+        </div>
+      </div>`}
     </div>
     <div class="tab-content" data-tab-content="progress"></div>
+    <div class="tab-content" data-tab-content="ctfqc"></div>
     <div class="tab-content" data-tab-content="outputs"></div>
     <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
     ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
-    ${def.is_custom ? "" : `
-    <div class="command-row" data-role="command-row">
-      <label>Command (edit freely — this exact string runs, nothing added or removed under the hood)
-        <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
-      </label>
-      <textarea class="command-box" data-role="command-box"></textarea>
-      <div class="command-actions">
-        <button class="btn primary" data-role="run-btn">Run</button>
-        <span class="status-line" data-role="status-line"></span>
-      </div>
-    </div>`}
-    ${def.is_custom ? `
-    <div class="command-row" data-role="command-row">
-      <div class="command-actions">
-        <button class="btn primary" data-role="run-btn">Run</button>
-        <span class="status-line" data-role="status-line"></span>
-      </div>
-    </div>` : ""}
   `;
 
   // ---- Inputs tab: every option RELION's own GUI shows -------------------
@@ -787,14 +788,17 @@ async function openJobPopup(internalName, displayName, existingRun) {
   const outputsTabBtn = body.querySelector('[data-tab="outputs"]');
   const progressContent = body.querySelector('[data-tab-content="progress"]');
   const progressTabBtn = body.querySelector('[data-tab="progress"]');
+  const ctfQcContent = body.querySelector('[data-tab-content="ctfqc"]');
+  const ctfQcTabBtn = body.querySelector('[data-tab="ctfqc"]');
+  let ctfQcState = { data: null, worstN: 12 };
   let progressTimer = null;
   let progressState = {
     enabled: true,          // "Live progress" — on by default for supported jobs
-    everyN: 1,              // refresh thumbnails every N iterations (1 = every)
-    keepAll: false,         // keep earlier iterations' thumbnails (off by default)
-    lastThumbIteration: null,
-    history: [],            // [{iteration, classes}] when keepAll is on
-    data: null,
+    everyN: 1,               // spacing of the iterations offered in the picker (1 = every)
+    data: null,               // latest GET /progress response (iteration summaries + latest)
+    selectedIteration: "latest",   // "latest" (auto-follows new polls) or a specific number
+    iterationCache: {},      // iteration number -> its full {iteration, resolution_A, classes}
+    orientationData: null,   // cached response from the on-demand viewing-direction button
   };
 
 
@@ -829,6 +833,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       : "Click to rename (RELION's 'Alias' job action)";
     outputsTabBtn.hidden = !hasRun;
     refreshProgressTabVisibility();
+    refreshCtfQcTabVisibility();
     refreshNoteRow();
   }
   refreshToolbarState();
@@ -1006,12 +1011,13 @@ async function openJobPopup(internalName, displayName, existingRun) {
         <label class="progress-check" title="Turn off to stop polling this job entirely — no charts, no thumbnails, no extra work.">
           <input type="checkbox" data-role="prog-enabled" ${progressState.enabled ? "checked" : ""} /> Live progress
         </label>
-        <label class="progress-num" title="Only refresh class images every N iterations. 1 = every iteration.">
-          Images every
+        <label class="progress-num" title="Spacing of the iterations offered below, e.g. 5 lists iteration 1, 5, 10, 15… (the latest iteration is always included too).">
+          Every
           <input type="number" data-role="prog-every" min="1" max="99" value="${progressState.everyN}" /> it
         </label>
-        <label class="progress-check" title="Keep earlier iterations' images so you can compare. Off by default to bound memory.">
-          <input type="checkbox" data-role="prog-keepall" ${progressState.keepAll ? "checked" : ""} /> Keep all
+        <label class="progress-select" title="Which iteration's class images to show below. Pick an earlier one to compare against the latest — while a run keeps going, your pick stays put unless you switch it back to Latest.">
+          Iteration
+          <select data-role="prog-iter-select"></select>
         </label>
         <span class="progress-status" data-role="prog-status"></span>
       </div>
@@ -1025,15 +1031,61 @@ async function openJobPopup(internalName, displayName, existingRun) {
     progressContent.querySelector('[data-role="prog-every"]').addEventListener("change", (e) => {
       progressState.everyN = Math.max(1, parseInt(e.target.value, 10) || 1);
       e.target.value = progressState.everyN;
+      renderProgressBody();
     });
-    progressContent.querySelector('[data-role="prog-keepall"]').addEventListener("change", (e) => {
-      progressState.keepAll = e.target.checked;
-      if (!progressState.keepAll) progressState.history = [];
+    progressContent.querySelector('[data-role="prog-iter-select"]').addEventListener("change", (e) => {
+      progressState.selectedIteration = e.target.value === "latest" ? "latest" : parseInt(e.target.value, 10);
       renderProgressBody();
     });
   }
 
-  function renderProgressBody() {
+  // Populates the iteration <select> from the current d.iterations (already
+  // fetched with the summary poll — no extra request just to list them),
+  // spaced by "Every N it" but always keeping the true latest as an option
+  // regardless of N, so a fresh iteration is never filtered out of reach.
+  function renderIterationOptions(d) {
+    const select = progressContent.querySelector('[data-role="prog-iter-select"]');
+    if (!select) return;
+    const latestIt = d.latest.iteration;
+    const shown = d.iterations
+      .map((p) => p.iteration)
+      .filter((it) => it === latestIt || it % progressState.everyN === 0)
+      .sort((a, b) => b - a);
+    select.innerHTML = [`<option value="latest">Latest (iteration ${latestIt})</option>`]
+      .concat(shown.filter((it) => it !== latestIt).map((it) => `<option value="${it}">iteration ${it}</option>`))
+      .join("");
+    const wanted = progressState.selectedIteration === "latest" ? "latest" : String(progressState.selectedIteration);
+    // The previously picked iteration may have fallen out of the (re-spaced)
+    // list -- fall back to Latest rather than leave the picker showing
+    // nothing selected.
+    select.value = wanted;
+    if (select.value !== wanted) {
+      progressState.selectedIteration = "latest";
+      select.value = "latest";
+    }
+  }
+
+  function thumbGridHtml(iteration, classes) {
+    return `<div class="thumb-grid">` + classes.map((k) => `
+      <figure class="thumb">
+        <img loading="lazy" alt="Class ${k.index}, iteration ${iteration}"
+             src="/api/runs/${encodeURIComponent(currentRun.run_id)}/progress/thumbnail?reference=${encodeURIComponent(k.reference)}" />
+        <figcaption>#${k.index} · ${(k.distribution * 100).toFixed(0)}%${
+          k.resolution_A != null ? ` · ${k.resolution_A.toFixed(1)} Å` : ""}</figcaption>
+      </figure>`).join("") + `</div>`;
+  }
+
+  // Fetches (and caches) one specific iteration's full class breakdown --
+  // the latest iteration never needs this, its classes already came along
+  // with the summary poll (d.latest).
+  async function fetchIterationClasses(iteration) {
+    if (progressState.iterationCache[iteration]) return progressState.iterationCache[iteration];
+    const data = await api(`/api/runs/${currentRun.run_id}/progress/iteration/${iteration}`);
+    progressState.iterationCache[iteration] = data;
+    return data;
+  }
+
+  async function renderProgressBody() {
     const host = progressContent.querySelector('[data-role="prog-body"]');
     const statusEl = progressContent.querySelector('[data-role="prog-status"]');
     if (!host) return;
@@ -1047,64 +1099,95 @@ async function openJobPopup(internalName, displayName, existingRun) {
       host.innerHTML = '<div class="progress-empty">Waiting for the first iteration…</div>';
       return;
     }
+    renderIterationOptions(d);
+
+    const targetIteration = progressState.selectedIteration === "latest"
+      ? d.latest.iteration : progressState.selectedIteration;
+    let shown;
+    if (targetIteration === d.latest.iteration) {
+      shown = d.latest;
+    } else {
+      host.innerHTML = '<div class="progress-empty">Loading iteration…</div>';
+      try {
+        shown = await fetchIterationClasses(targetIteration);
+      } catch (err) {
+        host.innerHTML = `<div class="progress-empty">Could not load iteration ${targetIteration}: ${escapeHtml(err.message)}</div>`;
+        return;
+      }
+    }
+
     if (statusEl) {
-      statusEl.textContent = `iteration ${d.latest.iteration}` +
+      statusEl.textContent = `iteration ${shown.iteration}` +
         (d.dimensionality ? ` · ${d.dimensionality}D` : "") +
         (d.nr_classes ? ` · ${d.nr_classes} class${d.nr_classes === 1 ? "" : "es"}` : "");
     }
-
+    const is3D = d.dimensionality === 3;
+    const showOrientation = ORIENTATION_JOB_TYPES.has(internalName);
     host.innerHTML = `
       <div class="progress-section"><h4>Resolution by iteration</h4><div data-role="chart-res"></div></div>
-      <div class="progress-section"><h4>Particles per class (iteration ${d.latest.iteration})</h4><div data-role="chart-dist"></div></div>
-      <div class="progress-section"><h4 data-role="thumbs-title"></h4><div data-role="thumbs"></div></div>
+      <div class="progress-section"><h4>Angular sampling accuracy by iteration</h4><div data-role="chart-acc-rot"></div></div>
+      <div class="progress-section"><h4>Translational sampling accuracy by iteration</h4><div data-role="chart-acc-trans"></div></div>
+      <div class="progress-section"><h4>Particles per class (iteration ${shown.iteration})</h4><div data-role="chart-dist"></div></div>
+      <div class="progress-section"><h4>${is3D ? "Class volumes (central slice)" : "Class averages"}</h4><div data-role="thumbs"></div></div>
+      ${showOrientation ? `
+      <div class="progress-section">
+        <h4>Viewing-direction distribution</h4>
+        <div class="progress-controls" style="border-bottom:none;margin-bottom:4px;padding:0 0 6px;">
+          <button class="btn" data-role="orient-btn">Generate from most recent completed iteration</button>
+          <span class="progress-status" data-role="orient-status"></span>
+        </div>
+        <div data-role="orient-body"></div>
+      </div>` : ""}
     `;
     drawResolutionChart(host.querySelector('[data-role="chart-res"]'), d.iterations);
-    drawClassDistributionChart(host.querySelector('[data-role="chart-dist"]'), d.latest.classes);
-    renderThumbnails(host);
-  }
+    drawAccuracyChart(host.querySelector('[data-role="chart-acc-rot"]'), d.iterations, {
+      key: "accuracy_rotation_deg", label: "Rotational accuracy", unit: "°", color: "s1",
+    });
+    drawAccuracyChart(host.querySelector('[data-role="chart-acc-trans"]'), d.iterations, {
+      key: "accuracy_translation_A", label: "Translational accuracy", unit: " Å", color: "s2",
+    });
+    drawClassDistributionChart(host.querySelector('[data-role="chart-dist"]'), shown.classes);
+    host.querySelector('[data-role="thumbs"]').innerHTML = thumbGridHtml(shown.iteration, shown.classes);
 
-  function thumbGridHtml(iteration, classes) {
-    return `<div class="thumb-grid">` + classes.map((k) => `
-      <figure class="thumb">
-        <img loading="lazy" alt="Class ${k.index}, iteration ${iteration}"
-             src="/api/runs/${encodeURIComponent(currentRun.run_id)}/progress/thumbnail?reference=${encodeURIComponent(k.reference)}" />
-        <figcaption>#${k.index} · ${(k.distribution * 100).toFixed(0)}%${
-          k.resolution_A != null ? ` · ${k.resolution_A.toFixed(1)} Å` : ""}</figcaption>
-      </figure>`).join("") + `</div>`;
-  }
-
-  function renderThumbnails(host) {
-    const d = progressState.data;
-    const wrap = host.querySelector('[data-role="thumbs"]');
-    const title = host.querySelector('[data-role="thumbs-title"]');
-    if (!wrap || !d) return;
-    const it = d.latest.iteration;
-    // Honour "images every N iterations": show the newest iteration that is a
-    // multiple of N (iteration 1 always counts, so something appears early).
-    const showIt = (it % progressState.everyN === 0 || it === 1)
-      ? it
-      : (progressState.lastThumbIteration ?? null);
-    if (showIt === it) {
-      progressState.lastThumbIteration = it;
-      if (progressState.keepAll && !progressState.history.some((h) => h.iteration === it)) {
-        progressState.history.push({ iteration: it, classes: d.latest.classes });
+    if (showOrientation) {
+      const orientBody = host.querySelector('[data-role="orient-body"]');
+      const orientStatus = host.querySelector('[data-role="orient-status"]');
+      const orientBtn = host.querySelector('[data-role="orient-btn"]');
+      // Already fetched once this popup session (e.g. switching tabs and
+      // back) -- show it again without another expensive parse; the button
+      // still works to re-fetch (a still-running job may have moved on to
+      // a newer completed iteration since).
+      if (progressState.orientationData) {
+        renderOrientationPlot(orientBody, orientStatus, progressState.orientationData);
       }
+      orientBtn.addEventListener("click", async () => {
+        orientBtn.disabled = true;
+        orientStatus.textContent = "Reading particle orientations…";
+        orientBody.innerHTML = "";
+        try {
+          const data = await api(`/api/runs/${currentRun.run_id}/orientation-distribution`);
+          progressState.orientationData = data;
+          renderOrientationPlot(orientBody, orientStatus, data);
+        } catch (err) {
+          orientStatus.textContent = "";
+          orientBody.innerHTML = `<div class="progress-empty">Could not read orientations: ${escapeHtml(err.message)}</div>`;
+        } finally {
+          orientBtn.disabled = false;
+        }
+      });
     }
-    const is3D = d.dimensionality === 3;
-    title.textContent = is3D ? "Class volumes (central slice)" : "Class averages";
-    if (showIt == null) {
-      wrap.innerHTML = `<div class="progress-empty">No image update yet — showing every ${progressState.everyN} iterations.</div>`;
+  }
+
+  function renderOrientationPlot(body, statusEl, data) {
+    if (!data.available) {
+      statusEl.textContent = "";
+      body.innerHTML = data.iteration != null
+        ? `<div class="progress-empty">Iteration ${data.iteration}'s data.star has no orientation columns yet.</div>`
+        : '<div class="progress-empty">No completed iteration to read yet.</div>';
       return;
     }
-    if (progressState.keepAll && progressState.history.length) {
-      wrap.innerHTML = progressState.history
-        .slice()
-        .reverse()
-        .map((h) => `<div class="thumb-iter"><span class="thumb-iter-label">iteration ${h.iteration}</span>${thumbGridHtml(h.iteration, h.classes)}</div>`)
-        .join("");
-    } else {
-      wrap.innerHTML = thumbGridHtml(showIt, d.latest.classes);
-    }
+    statusEl.textContent = `iteration ${data.iteration} · ${data.n_particles.toLocaleString()} particles`;
+    drawOrientationHeatmap(body, data);
   }
 
   function stopProgressPolling() {
@@ -1113,7 +1196,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
 
   async function refreshProgress() {
     stopProgressPolling();
-    if (!progressSupported() || !progressState.enabled) { renderProgressBody(); return; }
+    if (!progressSupported() || !progressState.enabled) { await renderProgressBody(); return; }
     try {
       const d = await api(`/api/runs/${currentRun.run_id}/progress`);
       progressState.data = d;
@@ -1121,7 +1204,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
         progressTabBtn.hidden = true;
         return;
       }
-      renderProgressBody();
+      await renderProgressBody();
     } catch (err) {
       const host = progressContent.querySelector('[data-role="prog-body"]');
       if (host) host.innerHTML = `<div class="progress-empty">Could not read progress: ${escapeHtml(err.message)}</div>`;
@@ -1143,8 +1226,109 @@ async function openJobPopup(internalName, displayName, existingRun) {
   }
 
   // Charts are drawn with resolved theme colours, so repaint them on a switch.
-  const onThemeChange = () => { if (progressContent.dataset.built) renderProgressBody(); };
+  const onThemeChange = () => {
+    if (progressContent.dataset.built) renderProgressBody();
+    if (ctfQcContent.dataset.built) renderCtfQcBody();
+  };
   document.addEventListener("relion-us-theme-changed", onThemeChange);
+
+  // --- CTF QC tab (Ctffind only) ------------------------------------------
+  // End-of-job only, unlike the Progress tab's live polling: RELION itself
+  // only writes micrographs_ctf.star/power_spectra_fits.star once, when the
+  // whole job finishes (see backend/ctf_qc.py's module docstring) -- so this
+  // is a single fetch, not a poll loop.
+  function ctfQcSupported() {
+    return currentRun && CTF_QC_JOB_TYPES.has(internalName);
+  }
+
+  function renderCtfQcShell() {
+    ctfQcContent.innerHTML = `
+      <div class="progress-controls">
+        <label class="progress-num" title="How many of the worst-fitting micrographs to show thumbnails for. Keeps the grid usable on a project with thousands of micrographs.">
+          Show worst
+          <input type="number" data-role="ctfqc-worst-n" min="1" max="200" value="${ctfQcState.worstN}" /> of them
+        </label>
+        <span class="progress-status" data-role="ctfqc-status"></span>
+      </div>
+      <div data-role="ctfqc-body"><div class="progress-empty">Loading…</div></div>
+    `;
+    ctfQcContent.querySelector('[data-role="ctfqc-worst-n"]').addEventListener("change", (e) => {
+      ctfQcState.worstN = Math.max(1, parseInt(e.target.value, 10) || 12);
+      e.target.value = ctfQcState.worstN;
+      renderCtfQcBody();
+    });
+  }
+
+  function ctfThumbGridHtml(micrographs) {
+    return `<div class="thumb-grid">` + micrographs.map((m) => `
+      <figure class="thumb">
+        <img loading="lazy" alt="${escapeHtml(m.name)}"
+             src="/api/runs/${encodeURIComponent(currentRun.run_id)}/ctf-qc/thumbnail?reference=${encodeURIComponent(m.ctf_image)}" />
+        <figcaption title="${escapeHtml(m.name)}">${
+          m.max_resolution_A != null ? `${m.max_resolution_A.toFixed(1)} Å` : "?"}${
+          m.defocus_u != null ? ` · ${(m.defocus_u / 10000).toFixed(2)} µm` : ""}</figcaption>
+      </figure>`).join("") + `</div>`;
+  }
+
+  function renderCtfQcBody() {
+    const host = ctfQcContent.querySelector('[data-role="ctfqc-body"]');
+    const statusEl = ctfQcContent.querySelector('[data-role="ctfqc-status"]');
+    if (!host) return;
+    const d = ctfQcState.data;
+    if (!d || !d.available) {
+      host.innerHTML = '<div class="progress-empty">Not available until the job finishes — RELION only writes its CTF summary once, at the end of the run.</div>';
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    if (statusEl) statusEl.textContent = `${d.count} micrograph${d.count === 1 ? "" : "s"}`;
+
+    host.innerHTML = `
+      <div class="progress-section"><h4>Defocus by micrograph</h4><div data-role="chart-defocus"></div></div>
+      <div class="progress-section"><h4>Max resolution (CTF fit)</h4><div data-role="chart-maxres"></div></div>
+      <div class="progress-section"><h4>Astigmatism</h4><div data-role="chart-astig"></div></div>
+      <div class="progress-section"><h4>Figure of merit</h4><div data-role="chart-fom"></div></div>
+      <div class="progress-section"><h4 data-role="worst-title"></h4><div data-role="ctfqc-thumbs"></div></div>
+    `;
+    const mics = d.micrographs;
+    drawDefocusTrendChart(host.querySelector('[data-role="chart-defocus"]'), mics);
+    drawHistogramChart(host.querySelector('[data-role="chart-maxres"]'), mics.map((m) => m.max_resolution_A), { unit: "Å", color: "s1" });
+    drawHistogramChart(host.querySelector('[data-role="chart-astig"]'), mics.map((m) => m.astigmatism), { unit: "Å", color: "s2" });
+    drawHistogramChart(host.querySelector('[data-role="chart-fom"]'), mics.map((m) => m.fom), { unit: "", color: "s1" });
+
+    const n = Math.min(ctfQcState.worstN, mics.length);
+    host.querySelector('[data-role="worst-title"]').textContent =
+      `Worst ${n} of ${mics.length} by CTF fit resolution`;
+    const worst = mics
+      .filter((m) => m.max_resolution_A != null)
+      .slice()
+      .sort((a, b) => b.max_resolution_A - a.max_resolution_A)
+      .slice(0, n);
+    host.querySelector('[data-role="ctfqc-thumbs"]').innerHTML = worst.length
+      ? ctfThumbGridHtml(worst)
+      : '<div class="progress-empty">No CTF fit resolution reported.</div>';
+  }
+
+  async function refreshCtfQc() {
+    if (!ctfQcSupported()) { renderCtfQcBody(); return; }
+    try {
+      ctfQcState.data = await api(`/api/runs/${currentRun.run_id}/ctf-qc`);
+      if (ctfQcState.data.supported === false) { ctfQcTabBtn.hidden = true; return; }
+      renderCtfQcBody();
+    } catch (err) {
+      const host = ctfQcContent.querySelector('[data-role="ctfqc-body"]');
+      if (host) host.innerHTML = `<div class="progress-empty">Could not read CTF QC data: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function refreshCtfQcTabVisibility() {
+    const supported = ctfQcSupported();
+    ctfQcTabBtn.hidden = !supported;
+    if (supported && !ctfQcContent.dataset.built) {
+      ctfQcContent.dataset.built = "1";
+      renderCtfQcShell();
+      refreshCtfQc();
+    }
+  }
 
   async function loadOutputsTab() {
     if (!currentRun) return;
@@ -2761,6 +2945,19 @@ const PROGRESS_JOB_TYPES = new Set([
   "Class2D", "Class3D", "Autorefine", "Inimodel", "MultiBody", "TomoReconPart",
 ]);
 
+// Job types with an end-of-job CTF QC tab. Must match backend
+// ctf_qc.supports_ctf_qc (the backend is authoritative — see PROGRESS_JOB_TYPES
+// above for why).
+const CTF_QC_JOB_TYPES = new Set(["Ctffind"]);
+
+// Job types with a meaningful 3D viewing-direction plot -- PROGRESS_JOB_TYPES
+// minus Class2D, whose particles have no rlnAngleRot/rlnAngleTilt at all
+// (only an in-plane rlnAnglePsi). Must match backend
+// progress.ORIENTATION_DISTRIBUTION_JOBS.
+const ORIENTATION_JOB_TYPES = new Set(
+  [...PROGRESS_JOB_TYPES].filter((t) => t !== "Class2D")
+);
+
 // ==========================================================================
 // Small SVG charts for the job Progress tab.
 // Hand-rolled rather than pulling in a charting library: the whole frontend is
@@ -2901,6 +3098,88 @@ function drawResolutionChart(host, iterations) {
   }
 }
 
+// Line chart: one arbitrary numeric field against iteration -- a single-
+// series sibling of drawResolutionChart, for values with their OWN unit
+// (degrees, Å) that must not share an axis with resolution or with each
+// other ("never a second scale" -- see drawResolutionChart's own comment).
+// Used for the Progress tab's rotational/translational sampling-accuracy
+// charts, whose numbers were already being parsed out of every iteration's
+// model.star for the class list (see progress.py's accuracy_rotation_deg/
+// accuracy_translation_A) but never plotted before.
+function drawAccuracyChart(host, iterations, { key, label, unit = "", color = "s1" }) {
+  host.innerHTML = "";
+  const pts = iterations.filter((p) => p[key] != null);
+  if (!pts.length) {
+    host.innerHTML = '<div class="progress-empty">Not reported for this job.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 150, ML = 46, MR = 20, MT = 18, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const xMin = Math.min(...iterations.map((p) => p.iteration));
+  const xMax = Math.max(...iterations.map((p) => p.iteration));
+  let yMin = Math.min(...pts.map((p) => p[key])), yMax = Math.max(...pts.map((p) => p[key]));
+  if (yMax - yMin < 1e-9) { yMin -= 1; yMax += 1; }
+  const pad = (yMax - yMin) * 0.1;
+  yMin -= pad; yMax += pad;
+  const X = (i) => ML + (xMax === xMin ? plotW / 2 : ((i - xMin) / (xMax - xMin)) * plotW);
+  const Y = (v) => MT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = `${label} by iteration`;
+
+  for (let t = 0; t <= 2; t++) {
+    const v = yMin + ((yMax - yMin) * t) / 2, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = v.toFixed(2);
+    svg.appendChild(lab);
+  }
+  [xMin, xMax].forEach((i, idx) => {
+    const t = svgEl("text", { x: X(i), y: H - 8, "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9 });
+    t.textContent = `it ${i}`;
+    svg.appendChild(t);
+  });
+
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p.iteration).toFixed(1)},${Y(p[key]).toFixed(1)}`).join(" ");
+  svg.appendChild(svgEl("path", {
+    d, fill: "none", stroke: c[color], "stroke-width": 2,
+    "stroke-linejoin": "round", "stroke-linecap": "round",
+  }));
+  const last = pts[pts.length - 1];
+  svg.appendChild(svgEl("circle", {
+    cx: X(last.iteration), cy: Y(last[key]), r: 4, fill: c[color], stroke: c.surface, "stroke-width": 2,
+  }));
+  const lab = svgEl("text", { x: X(last.iteration) + 8, y: Y(last[key]) + 3, fill: c.text, "font-size": 10 });
+  lab.textContent = `${last[key].toFixed(2)}${unit}`;
+  svg.appendChild(lab);
+
+  const hoverLine = svgEl("line", { y1: MT, y2: MT + plotH, stroke: c.dim, "stroke-width": 1, opacity: 0 });
+  svg.appendChild(hoverLine);
+  const hit = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(hit);
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+  host.appendChild(svg);
+  host.appendChild(tip);
+  hit.addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let nearest = pts[0];
+    pts.forEach((p) => { if (Math.abs(X(p.iteration) - px) < Math.abs(X(nearest.iteration) - px)) nearest = p; });
+    hoverLine.setAttribute("x1", X(nearest.iteration));
+    hoverLine.setAttribute("x2", X(nearest.iteration));
+    hoverLine.setAttribute("opacity", "0.6");
+    tip.classList.remove("hidden");
+    tip.style.left = `${(X(nearest.iteration) / W) * 100}%`;
+    tip.innerHTML = `<b>Iteration ${nearest.iteration}</b><br>${escapeHtml(label)}: ${nearest[key].toFixed(2)}${unit}`;
+  });
+  hit.addEventListener("mouseleave", () => {
+    hoverLine.setAttribute("opacity", "0");
+    tip.classList.add("hidden");
+  });
+}
+
 // Bar chart: share of particles per class, latest iteration. One series, so no
 // legend — the heading names it.
 function drawClassDistributionChart(host, classes) {
@@ -2939,6 +3218,251 @@ function drawClassDistributionChart(host, classes) {
     });
     bar.addEventListener("mouseleave", () => tip.classList.add("hidden"));
   });
+  host.appendChild(svg);
+  host.appendChild(tip);
+}
+
+// Line chart: DefocusU/DefocusV against micrograph order, for the CTF QC tab.
+// Same shape as drawResolutionChart (two series, one shared y-axis, hover
+// crosshair) but plotted against micrograph INDEX rather than iteration --
+// CTF Estimation has no notion of iterations, just the order RELION joined
+// the micrographs in.
+function drawDefocusTrendChart(host, micrographs) {
+  host.innerHTML = "";
+  const series = [
+    { key: "defocus_u", label: "Defocus U", color: "s1" },
+    { key: "defocus_v", label: "Defocus V", color: "s2" },
+  ].filter((sr) => micrographs.some((m) => m[sr.key] != null));
+  if (!series.length) {
+    host.innerHTML = '<div class="progress-empty">No defocus numbers reported.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 180, ML = 54, MR = 20, MT = 22, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const n = micrographs.length;
+  const vals = [];
+  series.forEach((sr) => micrographs.forEach((m) => { if (m[sr.key] != null) vals.push(m[sr.key]); }));
+  let yMin = Math.min(...vals), yMax = Math.max(...vals);
+  if (yMax - yMin < 1e-9) { yMin -= 1; yMax += 1; }
+  const pad = (yMax - yMin) * 0.1;
+  yMin -= pad; yMax += pad;
+  const X = (i) => ML + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const Y = (v) => MT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+  // Defocus values run into the tens of thousands (Å) — µm reads far easier.
+  const um = (v) => (v / 10000).toFixed(2);
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Defocus by micrograph order";
+
+  for (let t = 0; t <= 3; t++) {
+    const v = yMin + ((yMax - yMin) * t) / 3, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = `${um(v)}`;
+    svg.appendChild(lab);
+  }
+  const yTitle = svgEl("text", { x: 0, y: 9, fill: c.dim, "font-size": 9 });
+  yTitle.textContent = "Defocus, µm";
+  svg.appendChild(yTitle);
+  [0, n - 1].forEach((i, idx) => {
+    if (i < 0) return;
+    const t = svgEl("text", { x: X(i), y: H - 8, "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9 });
+    t.textContent = `#${i + 1}`;
+    svg.appendChild(t);
+  });
+
+  series.forEach((sr) => {
+    const pts = micrographs.map((m, i) => [i, m[sr.key]]).filter(([, v]) => v != null);
+    if (!pts.length) return;
+    const d = pts.map(([i, v], k) => `${k ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+    svg.appendChild(svgEl("path", { d, fill: "none", stroke: c[sr.color], "stroke-width": 1.5, opacity: 0.85 }));
+  });
+
+  const hoverLine = svgEl("line", { y1: MT, y2: MT + plotH, stroke: c.dim, "stroke-width": 1, opacity: 0 });
+  svg.appendChild(hoverLine);
+  const hit = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(hit);
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+  host.appendChild(svg);
+  host.appendChild(tip);
+  hit.addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let nearest = 0, best = Infinity;
+    for (let i = 0; i < n; i++) {
+      const dist = Math.abs(X(i) - px);
+      if (dist < best) { best = dist; nearest = i; }
+    }
+    const m = micrographs[nearest];
+    hoverLine.setAttribute("x1", X(nearest));
+    hoverLine.setAttribute("x2", X(nearest));
+    hoverLine.setAttribute("opacity", "0.6");
+    tip.classList.remove("hidden");
+    tip.style.left = `${(X(nearest) / W) * 100}%`;
+    tip.innerHTML = `<b>${escapeHtml(m.name)}</b>` +
+      series.map((sr) => m[sr.key] == null ? "" :
+        `<br><span class="tip-swatch" style="background:${c[sr.color]}"></span>${escapeHtml(sr.label)}: ${um(m[sr.key])} µm`).join("");
+  });
+  hit.addEventListener("mouseleave", () => {
+    hoverLine.setAttribute("opacity", "0");
+    tip.classList.add("hidden");
+  });
+
+  const legend = document.createElement("div");
+  legend.className = "progress-legend";
+  legend.innerHTML = series.map((sr) =>
+    `<span><span class="tip-swatch" style="background:${c[sr.color]}"></span>${escapeHtml(sr.label)}</span>`).join("");
+  host.appendChild(legend);
+}
+
+// Histogram: bins a flat array of numbers into ~14 buckets and draws vertical
+// bars. Used for the CTF QC tab's defocus/astigmatism/max-resolution/FOM
+// distributions -- one series each, so no legend, just a hover tooltip
+// giving the bucket's range and count.
+function drawHistogramChart(host, values, { unit = "", color = "s1" } = {}) {
+  host.innerHTML = "";
+  const nums = values.filter((v) => v != null && Number.isFinite(v));
+  if (!nums.length) {
+    host.innerHTML = '<div class="progress-empty">No values reported.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 170, ML = 34, MR = 12, MT = 10, MB = 28;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  let vMin = Math.min(...nums), vMax = Math.max(...nums);
+  if (vMax - vMin < 1e-9) { vMin -= 0.5; vMax += 0.5; }
+  const NBINS = Math.min(14, Math.max(5, Math.round(Math.sqrt(nums.length))));
+  const binW = (vMax - vMin) / NBINS;
+  const counts = new Array(NBINS).fill(0);
+  nums.forEach((v) => {
+    let idx = Math.floor((v - vMin) / binW);
+    if (idx >= NBINS) idx = NBINS - 1;
+    if (idx < 0) idx = 0;
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts, 1);
+  const barGap = 2;
+  const barW = plotW / NBINS - barGap;
+  const X = (i) => ML + i * (plotW / NBINS) + barGap / 2;
+  const Y = (v) => MT + plotH - (v / maxCount) * plotH;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Distribution";
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+
+  for (let t = 0; t <= 2; t++) {
+    const v = (maxCount * t) / 2, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = Math.round(v);
+    svg.appendChild(lab);
+  }
+  [vMin, vMax].forEach((v, idx) => {
+    const t = svgEl("text", {
+      x: idx ? ML + plotW : ML, y: H - 6,
+      "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9,
+    });
+    t.textContent = `${v.toFixed(1)}${unit}`;
+    svg.appendChild(t);
+  });
+
+  counts.forEach((count, i) => {
+    const y = Y(count);
+    const bar = svgEl("rect", { x: X(i), y, width: Math.max(1, barW), height: MT + plotH - y, fill: c[color] });
+    svg.appendChild(bar);
+    bar.addEventListener("mouseenter", () => {
+      tip.classList.remove("hidden");
+      tip.style.left = `${((X(i) + barW / 2) / W) * 100}%`;
+      const lo = vMin + i * binW, hi = lo + binW;
+      tip.innerHTML = `<b>${count}</b> micrograph${count === 1 ? "" : "s"}<br>${lo.toFixed(2)}–${hi.toFixed(2)}${unit}`;
+    });
+    bar.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+  });
+  host.appendChild(svg);
+  host.appendChild(tip);
+}
+
+// Heatmap: particle count per (rot, tilt) bin -- the classic "is the sphere
+// actually covered, or stuck in a couple of preferred views" viewing-
+// direction QC plot. Grid cells rather than a projected sphere: this
+// codebase's whole charting approach is small hand-rolled SVG, and a flat
+// rot-x-tilt grid needs no projection math to read correctly, at the cost
+// of the poles looking stretched (the same tradeoff an equirectangular map
+// makes) -- an acceptable one for spotting a missing wedge of orientations,
+// which is what this plot is actually for.
+function drawOrientationHeatmap(host, data) {
+  host.innerHTML = "";
+  const { counts, n_rot_bins: nRot, n_tilt_bins: nTilt } = data;
+  const maxCount = Math.max(...counts.map((row) => Math.max(...row)), 1);
+  if (maxCount <= 1 && counts.every((row) => row.every((v) => v === 0))) {
+    host.innerHTML = '<div class="progress-empty">No orientation data in this iteration.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 240, ML = 54, MR = 12, MT = 10, MB = 30;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const cellW = plotW / nRot, cellH = plotH / nTilt;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Viewing-direction distribution";
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+
+  // Accent-tinted intensity: 0 count stays the panel colour (invisible
+  // against the chart background), highest count reaches full accent —
+  // a single hue reads as "more/less", unlike a rainbow scale that implies
+  // categories that don't exist here.
+  const heat = (v) => {
+    const t = v / maxCount;
+    return `color-mix(in srgb, ${c.surface} ${(1 - t) * 100}%, ${c.s1} ${t * 100}%)`;
+  };
+
+  for (let ti = 0; ti < nTilt; ti++) {
+    for (let ri = 0; ri < nRot; ri++) {
+      const count = counts[ti][ri];
+      const rect = svgEl("rect", {
+        x: ML + ri * cellW, y: MT + ti * cellH,
+        width: Math.ceil(cellW) + 0.5, height: Math.ceil(cellH) + 0.5,
+        fill: count ? heat(count) : c.surface,
+      });
+      svg.appendChild(rect);
+      if (count) {
+        rect.addEventListener("mouseenter", () => {
+          tip.classList.remove("hidden");
+          tip.style.left = `${((ML + (ri + 0.5) * cellW) / W) * 100}%`;
+          const rot = (ri / nRot) * 360 - 180, tilt = (ti / nTilt) * 180;
+          tip.innerHTML = `<b>${count.toLocaleString()}</b> particle${count === 1 ? "" : "s"}` +
+            `<br>rot ${rot.toFixed(0)}° · tilt ${tilt.toFixed(0)}°`;
+        });
+        rect.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+      }
+    }
+  }
+
+  [-180, 0, 180].forEach((v) => {
+    const x = ML + ((v + 180) / 360) * plotW;
+    const t = svgEl("text", { x, y: H - 10, "text-anchor": "middle", fill: c.dim, "font-size": 9 });
+    t.textContent = `${v}°`;
+    svg.appendChild(t);
+  });
+  svg.appendChild((() => {
+    const t = svgEl("text", { x: ML + plotW / 2, y: H - 1, "text-anchor": "middle", fill: c.dim, "font-size": 9 });
+    t.textContent = "rot";
+    return t;
+  })());
+  [0, 90, 180].forEach((v) => {
+    const y = MT + (v / 180) * plotH;
+    const t = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    t.textContent = `${v}°`;
+    svg.appendChild(t);
+  });
+  const yTitle = svgEl("text", { x: 0, y: 9, fill: c.dim, "font-size": 9 });
+  yTitle.textContent = "tilt";
+  svg.appendChild(yTitle);
+
   host.appendChild(svg);
   host.appendChild(tip);
 }

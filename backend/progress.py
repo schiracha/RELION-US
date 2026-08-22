@@ -74,6 +74,13 @@ THUMBNAIL_MAX_PX = 128
 _MODEL_RE = re.compile(r"^run_it(\d+)(?:_half(\d))?_model\.star$")
 # "000007@run_it025_classes.mrcs" (2D stack) or "run_it025_class003.mrc" (3D)
 _STACK_REF_RE = re.compile(r"^(\d+)@(.+)$")
+# RELION/Xmipp's "filename:format" convention -- a format hint appended for
+# an extension that wouldn't otherwise say what it is, e.g. rlnCtfImage's
+# "some_mic.ctf:mrc" (confirmed for real: the file on disk is "some_mic.ctf",
+# an ordinary MRC image; the ":mrc" is never part of the filename). Class
+# references never carry this (their extensions are already .mrc/.mrcs), so
+# stripping it here is a no-op for them.
+_FORMAT_HINT_RE = re.compile(r"^(.*):([A-Za-z0-9]+)$")
 
 
 def supports_progress(internal_name: str) -> bool:
@@ -121,12 +128,29 @@ def _parse_model_star_cached(path_str: str, mtime: float, size: int) -> dict:
     classes = raw.get("model_classes")
 
     out: dict = {"classes": []}
-    if general is not None and len(general):
-        row = general.iloc[0]
+    if general is not None:
+        # RELION's model_general block is a STAR "list" (single row of
+        # `_key value` pairs, no loop_ -- confirmed for real against an
+        # actual RELION-written model.star), which starfile returns as a
+        # plain dict, NOT a DataFrame. A loop-style block (which starfile
+        # DOES return as a DataFrame) is only what this module's own
+        # synthetic test fixtures happened to write -- accidentally never
+        # exercising the real shape, so this crashed on every genuine
+        # RELION run (AttributeError: 'dict' object has no attribute
+        # 'iloc') until caught by testing against a real Refine3D job.
+        # Normalize both possible shapes to one row-like mapping so
+        # everything below doesn't care which one it got.
+        if isinstance(general, dict):
+            row = general
+        elif len(general):
+            row = general.iloc[0].to_dict()
+        else:
+            row = {}
 
         def num(col):
             try:
-                return float(row[col]) if col in general.columns else None
+                val = row.get(col)
+                return float(val) if val is not None else None
             except (TypeError, ValueError):
                 return None
 
@@ -197,11 +221,23 @@ def read_progress(job_dir: Path, max_iterations: int = 200) -> dict:
         # One point per iteration for the charts. Per-class resolution is
         # summarized as the best (smallest Å) achieved that iteration.
         resolutions = [c["resolution_A"] for c in classes if c["resolution_A"]]
+        # Angular/translational accuracy (rlnAccuracyRotations/
+        # rlnAccuracyTranslationsAngst) were already being parsed per class
+        # by _parse_model_star_cached above -- zero extra file I/O to
+        # surface them here too, just an unused value finally getting read.
+        # RELION reports these as the CURRENT sampling precision, so every
+        # class in one iteration carries essentially the same number; mean
+        # is a plain, honest one-point-per-iteration summary, the same way
+        # "best" already summarizes per-class resolution above.
+        acc_rots = [c["accuracy_rot"] for c in classes if c["accuracy_rot"]]
+        acc_transes = [c["accuracy_trans"] for c in classes if c["accuracy_trans"]]
         iterations.append({
             "iteration": iteration,
             "resolution_A": parsed.get("current_resolution_A"),
             "best_class_resolution_A": min(resolutions) if resolutions else None,
             "nr_classes": parsed.get("nr_classes") or len(classes),
+            "accuracy_rotation_deg": (sum(acc_rots) / len(acc_rots)) if acc_rots else None,
+            "accuracy_translation_A": (sum(acc_transes) / len(acc_transes)) if acc_transes else None,
         })
         latest_parsed = (iteration, parsed)
 
@@ -223,19 +259,48 @@ def read_progress(job_dir: Path, max_iterations: int = 200) -> dict:
     }
 
 
+def read_iteration(job_dir: Path, iteration: int) -> dict:
+    """The full per-class breakdown (thumbnails, distribution, resolution)
+    for ONE specific iteration -- what `latest` above gives you for the most
+    recent iteration only. Lets the Progress tab show any iteration's
+    images, not just whichever one happened to be newest the moment the
+    popup was opened or the last poll landed: read_progress()'s own
+    `iterations` list already carries every iteration's summary numbers for
+    the resolution chart, but not each one's full class list (that would
+    mean parsing and returning every iteration's model.star up front, most
+    of which nobody will ever look at) -- so a specific iteration's classes
+    are fetched here, on demand, only when the user actually selects it."""
+    for found_iter, path in _iteration_files(job_dir):
+        if found_iter == iteration:
+            parsed = _parse_model_star(path)
+            return {
+                "iteration": iteration,
+                "resolution_A": parsed.get("current_resolution_A"),
+                "classes": parsed.get("classes", []),
+            }
+    raise ProgressError(f"iteration {iteration} not found in {job_dir}")
+
+
 # --------------------------------------------------------------------------
 # Thumbnails
 # --------------------------------------------------------------------------
 
 
 def _resolve_reference(job_dir: Path, reference: str) -> tuple[Path, Optional[int]]:
-    """Turn a rlnReferenceImage value into (path, stack_index_0based).
+    """Turn a rlnReferenceImage/rlnCtfImage value into (path, stack_index_0based).
 
-    2D: "000007@run_it025_classes.mrcs" -> (that .mrcs, 6)
-    3D: "run_it025_class003.mrc"        -> (that .mrc, None)
-    RELION writes these relative to the project root, but the basename always
-    lives in the job directory, so resolve against the job dir and fall back to
-    the raw path.
+    2D class: "000007@run_it025_classes.mrcs" -> (that .mrcs, 6)
+    3D class: "run_it025_class003.mrc"        -> (that .mrc, None)
+    CTF image: "CtfFind/job003/mics/some_mic.ctf:mrc" -> (that .ctf, None)
+    RELION writes these relative to the project root. A class average/volume
+    sits directly in the job dir with no path component at all, so trying
+    just its basename there covers that case; a CTF image instead lives in a
+    subdirectory mirroring the micrograph's own directory structure UNDER
+    the job dir (confirmed for real: rlnCtfImage's value is the job-relative
+    "job003/<mic's own subdirs>/<name>.ctf:mrc", not a bare filename) -- so a
+    third fallback tries the reference as project-root-relative, using
+    RELION's universal <JobTypeDir>/job<NNN>/ convention (job_dir's own
+    parent's parent) to find that root without being told it explicitly.
     """
     if not reference:
         raise ProgressError("class has no reference image")
@@ -245,12 +310,19 @@ def _resolve_reference(job_dir: Path, reference: str) -> tuple[Path, Optional[in
     if m:
         index = int(m.group(1)) - 1  # RELION stack indices are 1-based
         path_part = m.group(2)
+    fmt = _FORMAT_HINT_RE.match(path_part)
+    if fmt:
+        path_part = fmt.group(1)
 
     candidate = job_dir / Path(path_part).name
     if not candidate.is_file():
         candidate = Path(path_part)
         if not candidate.is_absolute():
             candidate = job_dir / path_part
+    if not candidate.is_file():
+        project_root_candidate = job_dir.parent.parent / path_part
+        if project_root_candidate.is_file():
+            candidate = project_root_candidate
     if not candidate.is_file():
         raise ProgressError(f"class image not found: {path_part}")
     return candidate, index
@@ -313,3 +385,104 @@ def render_class_thumbnail(job_dir: Path, reference: str, max_px: int = THUMBNAI
         else:
             raise ProgressError(f"{path.name}: unsupported dimensionality {data.ndim}")
     return _to_png(plane, max_px=max_px)
+
+
+# --------------------------------------------------------------------------
+# Viewing-direction (orientation) distribution -- ON DEMAND ONLY, never
+# auto-polled
+# --------------------------------------------------------------------------
+#
+# Every other read in this module (read_progress/read_iteration) is cheap
+# by construction: model.star is a few KB, one row per CLASS. The angles
+# this needs live in run_it###_data.star instead -- one row per PARTICLE
+# (confirmed for real against an actual Refine3D job: 28,775 rows, ~14MB,
+# for ONE iteration of a modest run; a large SPA dataset is easily into the
+# millions of rows) -- so reading it at all has to be a deliberate, one-shot
+# user action (a button, not something that fires every few seconds like
+# the rest of this module), exactly the "on demand" constraint this was
+# built to. The response stays small regardless of particle count: angles
+# are binned into a small fixed-size grid server-side rather than sending
+# every particle's own angle to the browser.
+#
+# Columns (src/metadata_label.h, same source as the rest of this module):
+#   rlnAngleRot   azimuthal angle, degrees, RELION's own range -180..180
+#   rlnAngleTilt  polar angle, degrees, RELION's own range 0..180
+# (rlnAnglePsi, the in-plane rotation, doesn't describe a VIEWING direction
+# and isn't part of this plot.)
+_DATA_RE = re.compile(r"^run_it(\d+)_data\.star$")
+
+
+def _data_files(job_dir: Path) -> list[tuple[int, Path]]:
+    """Every (iteration, data.star) in this job dir, ascending. Unlike
+    model.star, RELION never splits this into half1/half2 variants."""
+    found: dict[int, Path] = {}
+    try:
+        entries = list(job_dir.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        m = _DATA_RE.match(entry.name)
+        if m:
+            found[int(m.group(1))] = entry
+    return sorted(found.items())
+
+
+def read_orientation_distribution(
+    job_dir: Path, n_rot_bins: int = 36, n_tilt_bins: int = 18
+) -> dict:
+    """A 2D histogram of every particle's viewing direction (rlnAngleRot x
+    rlnAngleTilt) at the MOST RECENT completed iteration -- the classic
+    "are the particle orientations actually covering the sphere, or stuck
+    in a couple of preferred views" QC plot. Returns {available, iteration,
+    n_particles, n_rot_bins, n_tilt_bins, counts} where counts is a
+    n_tilt_bins x n_rot_bins grid of particle counts (row-major, tilt then
+    rot) -- fixed-size regardless of how many particles the run has.
+    `available` is False (not an error) when there's no data.star yet, or
+    the iteration found has no orientation columns (e.g. Class2D, which
+    this function should not even be called for -- see
+    supports_orientation_distribution)."""
+    files = _data_files(job_dir)
+    if not files:
+        return {"available": False, "iteration": None}
+    iteration, path = files[-1]
+
+    import starfile
+
+    blocks = starfile.read(path, always_dict=True)
+    particles = blocks.get("particles")
+    if (
+        particles is None
+        or not len(particles)
+        or "rlnAngleRot" not in particles.columns
+        or "rlnAngleTilt" not in particles.columns
+    ):
+        return {"available": False, "iteration": iteration}
+
+    rot = particles["rlnAngleRot"].to_numpy(dtype=float)
+    tilt = particles["rlnAngleTilt"].to_numpy(dtype=float)
+    valid = np.isfinite(rot) & np.isfinite(tilt)
+    rot, tilt = rot[valid], tilt[valid]
+
+    rot_idx = np.clip(((rot + 180.0) / 360.0 * n_rot_bins).astype(np.int64), 0, n_rot_bins - 1)
+    tilt_idx = np.clip((tilt / 180.0 * n_tilt_bins).astype(np.int64), 0, n_tilt_bins - 1)
+    grid = np.zeros((n_tilt_bins, n_rot_bins), dtype=np.int64)
+    np.add.at(grid, (tilt_idx, rot_idx), 1)
+
+    return {
+        "available": True,
+        "iteration": iteration,
+        "n_particles": int(valid.sum()),
+        "n_rot_bins": n_rot_bins,
+        "n_tilt_bins": n_tilt_bins,
+        "counts": grid.tolist(),
+    }
+
+
+# Job types with a meaningful 3D viewing direction -- PROGRESS_JOBS minus
+# Class2D, whose particles have no rlnAngleRot/rlnAngleTilt at all (2D
+# classification only ever estimates an in-plane rotation, rlnAnglePsi).
+ORIENTATION_DISTRIBUTION_JOBS = PROGRESS_JOBS - {"Class2D"}
+
+
+def supports_orientation_distribution(internal_name: str) -> bool:
+    return internal_name in ORIENTATION_DISTRIBUTION_JOBS
