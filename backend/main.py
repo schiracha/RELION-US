@@ -560,6 +560,65 @@ def download_run_file(run_id: str, path: str):
     return FileResponse(resolved, filename=resolved.name)
 
 
+PREVIEW_MAX_ROWS_CAP = 2000
+
+
+@app.get("/api/runs/{run_id}/files/preview")
+def preview_run_file(run_id: str, path: str, max_rows: int = 300):
+    """Outputs tab: click a .star filename (not its checkbox) to see its
+    contents without downloading it. Parses every block in the file --
+    RELION STAR files mix "list" blocks (single row of `_key value` pairs,
+    e.g. model_general) with "loop_" blocks (multi-row tables, e.g.
+    particles) -- and returns each in whatever shape it actually is, rather
+    than assuming one or the other (see progress.py's
+    _parse_model_star_cached for the bug that shape assumption caused
+    elsewhere). Loop blocks are capped at max_rows: a data.star can have
+    millions of particle rows, and this is a preview, not the download."""
+    resolved = run_manager.resolve_output_file(run_id, path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="File not found in this job's output directory")
+    if resolved.suffix.lower() != ".star":
+        raise HTTPException(status_code=400, detail="Preview is only available for .star files")
+
+    max_rows = max(1, min(max_rows, PREVIEW_MAX_ROWS_CAP))
+
+    import json as _json
+    import starfile
+
+    try:
+        raw = starfile.read(resolved, always_dict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse STAR file: {exc}")
+
+    blocks = []
+    for name, block in raw.items():
+        if isinstance(block, dict):
+            blocks.append({
+                "name": name,
+                "kind": "list",
+                "fields": [{"key": k, "value": v} for k, v in block.items()],
+            })
+        else:
+            total_rows = len(block)
+            preview_df = block.head(max_rows)
+            # Round-tripping through pandas' own to_json/loads (rather than
+            # .values.tolist()) is what turns NaN into null and numpy
+            # scalars (int64/float64) into plain JSON-safe types -- both of
+            # which FastAPI's default encoder chokes on straight from a
+            # DataFrame.
+            split = _json.loads(preview_df.to_json(orient="split", date_format="iso"))
+            blocks.append({
+                "name": name,
+                "kind": "loop",
+                "columns": split["columns"],
+                "rows": split["data"],
+                "total_rows": total_rows,
+                "truncated": total_rows > max_rows,
+            })
+
+    return {"path": path, "blocks": blocks}
+
+
 class DeleteFilesRequest(BaseModel):
     relative_paths: list[str]
 

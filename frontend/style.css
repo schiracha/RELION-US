@@ -518,6 +518,80 @@ html, body {
 .outputs-row .out-size { color: var(--text-dim); width: 70px; text-align: right; flex-shrink: 0; }
 .outputs-row .out-download { color: var(--accent); cursor: pointer; flex-shrink: 0; }
 .outputs-empty { color: var(--text-dim); padding: 10px 2px; }
+.out-path-previewable { cursor: pointer; }
+.out-path-previewable:hover { color: var(--accent); text-decoration: underline; }
+
+/* Star-file content preview: pinned to the bottom of the (scrollable)
+   Outputs tab-content via position:sticky rather than restructuring the
+   tab into its own flex layout -- it naturally settles at the bottom of
+   the list when short, and sticks at the bottom of the scroll viewport
+   once the list is taller than the window, exactly the "collapsible
+   footer" the checkbox list needs to stay fully reachable underneath. */
+.star-preview-panel {
+  position: sticky;
+  bottom: 0;
+  margin-top: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 -4px 10px rgba(0, 0, 0, .25);
+}
+.star-preview-panel[hidden] { display: none; }
+.star-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.star-preview-panel.collapsed .star-preview-header { border-bottom: none; }
+.star-preview-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.star-preview-header .btn { padding: 2px 8px; font-size: 11px; }
+.star-preview-panel.collapsed .star-preview-body { display: none; }
+.star-preview-body { max-height: 320px; overflow: auto; padding: 8px; }
+.star-block { margin-bottom: 14px; }
+.star-block:last-child { margin-bottom: 0; }
+.star-block-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.star-block-meta { font-weight: 400; color: var(--text-dim); }
+.star-kv-table { border-collapse: collapse; font-size: 11px; }
+.star-kv-key {
+  color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  padding: 1px 10px 1px 0;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.star-kv-value {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  padding: 1px 0;
+  word-break: break-all;
+}
+.star-table-scroll { overflow-x: auto; }
+.star-loop-table { border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+.star-loop-table th, .star-loop-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+.star-loop-table th { color: var(--text-dim); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
 
 /* --- Lightweight custom confirm/prompt dialogs (never native confirm()/
    prompt() -- those block the whole page including any automation) ------ */

@@ -981,13 +981,18 @@ async function openJobPopup(internalName, displayName, existingRun) {
     if (!files.length) {
       return '<div class="outputs-empty">No output files yet.</div>';
     }
-    return `<div class="outputs-list">${files.map((f) => `
+    return `<div class="outputs-list">${files.map((f) => {
+      const isStar = /\.star$/i.test(f.path);
+      return `
       <div class="outputs-row" data-path="${escapeHtml(f.path)}">
         <input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />
-        <span class="out-path">${escapeHtml(f.path)}</span>
+        <span class="out-path${isStar ? " out-path-previewable" : ""}"
+              ${isStar ? 'data-role="preview" title="Click to preview contents"' : ""}
+        >${escapeHtml(f.path)}</span>
         <span class="out-size">${formatBytes(f.size)}</span>
         <span class="out-download" data-role="download" title="Download">⬇</span>
-      </div>`).join("")}</div>`;
+      </div>`;
+    }).join("")}</div>`;
   }
 
   function wireDownloadClicks(container) {
@@ -999,6 +1004,86 @@ async function openJobPopup(internalName, displayName, existingRun) {
       });
     });
   }
+
+  // Clicking a .star filename (not its checkbox, which is a separate
+  // element and is never touched by this) opens/updates a preview panel
+  // pinned to the bottom of the Outputs tab -- collapsible so the checkbox
+  // list can be seen in full again without losing the "currently
+  // previewing X" state.
+  function wireStarPreviewClicks(container) {
+    container.querySelectorAll('[data-role="preview"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openStarPreview(el.closest(".outputs-row").dataset.path);
+      });
+    });
+  }
+
+  function starPreviewFieldRow(field) {
+    const value = field.value === null || field.value === undefined ? "" : String(field.value);
+    return `<tr><td class="star-kv-key">${escapeHtml(field.key)}</td><td class="star-kv-value">${escapeHtml(value)}</td></tr>`;
+  }
+
+  function starPreviewBlockHtml(block) {
+    if (block.kind === "list") {
+      return `
+        <div class="star-block">
+          <div class="star-block-name">${escapeHtml(block.name || "(unnamed block)")}</div>
+          <table class="star-kv-table">${block.fields.map(starPreviewFieldRow).join("")}</table>
+        </div>`;
+    }
+    const meta = block.truncated
+      ? `showing ${block.rows.length.toLocaleString()} of ${block.total_rows.toLocaleString()} rows`
+      : `${block.total_rows.toLocaleString()} row${block.total_rows === 1 ? "" : "s"}`;
+    return `
+      <div class="star-block">
+        <div class="star-block-name">${escapeHtml(block.name || "(unnamed block)")}<span class="star-block-meta">${meta}</span></div>
+        <div class="star-table-scroll">
+          <table class="star-loop-table">
+            <thead><tr>${block.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>
+            <tbody>${block.rows.map((row) => `<tr>${row.map((v) => `<td>${v === null ? "" : escapeHtml(String(v))}</td>`).join("")}</tr>`).join("")}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  async function openStarPreview(path) {
+    const panel = outputsContent.querySelector('[data-role="star-preview-panel"]');
+    if (!panel) return;
+    const title = panel.querySelector('[data-role="star-preview-title"]');
+    const bodyEl = panel.querySelector('[data-role="star-preview-body"]');
+    panel.hidden = false;
+    panel.classList.remove("collapsed");
+    title.textContent = path;
+    bodyEl.innerHTML = '<div class="outputs-empty">Loading…</div>';
+    try {
+      const data = await api(`/api/runs/${currentRun.run_id}/files/preview?path=${encodeURIComponent(path)}`);
+      bodyEl.innerHTML = data.blocks.map(starPreviewBlockHtml).join("") || '<div class="outputs-empty">Empty file.</div>';
+    } catch (err) {
+      bodyEl.innerHTML = `<div class="outputs-empty">Could not preview file: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function wireStarPreviewPanel(container) {
+    const panel = container.querySelector('[data-role="star-preview-panel"]');
+    if (!panel) return;
+    panel.querySelector('[data-role="star-preview-collapse-btn"]').addEventListener("click", () => {
+      panel.classList.toggle("collapsed");
+    });
+    panel.querySelector('[data-role="star-preview-close-btn"]').addEventListener("click", () => {
+      panel.hidden = true;
+    });
+  }
+
+  const starPreviewPanelHtml = `
+    <div class="star-preview-panel collapsed" data-role="star-preview-panel" hidden>
+      <div class="star-preview-header">
+        <span class="star-preview-title" data-role="star-preview-title"></span>
+        <button class="btn" data-role="star-preview-collapse-btn" title="Collapse/expand">⇕</button>
+        <button class="btn" data-role="star-preview-close-btn" title="Close preview">✕</button>
+      </div>
+      <div class="star-preview-body" data-role="star-preview-body"></div>
+    </div>`;
 
   // ---- Progress tab (iterative jobs only) --------------------------------
   // Charts + class thumbnails from the run_it###_model.star files RELION
@@ -1349,8 +1434,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
           <button class="btn" data-role="download-selected-btn">⬇ Download selected as .zip</button>
         </div>
         ${renderOutputsList(files)}
+        ${starPreviewPanelHtml}
       `;
       wireDownloadClicks(outputsContent);
+      wireStarPreviewClicks(outputsContent);
+      wireStarPreviewPanel(outputsContent);
 
       outputsContent.querySelector('[data-role="download-selected-btn"]').addEventListener("click", () => {
         const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
@@ -1373,8 +1461,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
             <button class="btn danger" data-role="confirm-delete-btn">Delete checked files</button>
             <button class="btn" data-role="cancel-clean-btn">Cancel</button>
           </div>
+          ${starPreviewPanelHtml}
         `;
         wireDownloadClicks(outputsContent);   // the review list has ⬇ links too
+        wireStarPreviewClicks(outputsContent);
+        wireStarPreviewPanel(outputsContent);
         outputsContent.querySelector('[data-role="cancel-clean-btn"]').addEventListener("click", loadOutputsTab);
         outputsContent.querySelector('[data-role="confirm-delete-btn"]').addEventListener("click", async () => {
           const paths = Array.from(outputsContent.querySelectorAll('[data-role="file-check"]:checked'))
