@@ -116,7 +116,17 @@ def check_job_completion() -> int:
     counter, processes = read_pipeline()
     changed = False
     for p in processes:
-        if p[3] not in ("Running", "Scheduled"):
+        # Only "Running" -- confirmed against the real 5.0.1 binary
+        # (PipeLine::checkProcessCompletion, src/pipeliner.cpp: "Only check
+        # running processes for file existence"). A job added via
+        # --addJobFromStar is always "Scheduled" and STAYS that way through
+        # this call, no matter what exit files exist in its directory --
+        # this fake used to accept "Scheduled" here too, which is exactly
+        # backwards and let a real bug (jobs stuck "Scheduled" forever)
+        # hide behind a passing test suite. See pipeline_bridge.
+        # set_process_status for the direct-write fix that's actually
+        # needed to reach "Running" at all.
+        if p[3] != "Running":
             continue
         d = Path(p[0].rstrip("/"))
         for fname, status in EXIT_FILES.items():

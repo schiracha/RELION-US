@@ -510,7 +510,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <button class="btn" data-action="close" title="Close this window">✕ Close</button>
       <button class="btn" data-action="note" title="Edit note">📝 Note</button>
       ${def.is_picker ? '<button class="btn primary" data-action="picker" hidden title="Open the in-browser picker for this job — double-click to add a pick, right-click to delete one">🔍 Open Picker</button>' : ""}
-      <button class="btn" data-action="overwrite" hidden title="Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)">⟳ Overwrite</button>
+      ${def.is_picker ? '<button class="btn" data-action="continue-picking" hidden title="Resume this picking session — keeps every pick already saved">▶ Continue</button>' : ""}
+      <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? "Start a NEW picking session in this same job — deletes every pick already saved here. Use Continue instead to keep them." : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
       <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
       <button class="btn" data-action="mark-finished" hidden title="Manually mark as finished">✓ Mark Finished</button>
@@ -540,6 +541,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     <div class="command-row active" data-role="command-row">
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
+        ${def.is_picker ? '<button class="btn primary" data-role="done-btn" hidden title="Finish this picking session — marks the job complete, including in RELION\'s own pipeline">✓ Done</button>' : ""}
         <span class="status-line" data-role="status-line"></span>
       </div>
     </div>` : `
@@ -855,12 +857,24 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     }
   }
 
+  // Declared here (before refreshToolbarState, defined just below, which
+  // reads them) rather than down near the rest of the Run/live-status
+  // wiring where they're USED -- referencing a `const` before its own
+  // declaration line throws (temporal dead zone), the exact bug this app
+  // already hit once with progressSplitCleanup (see that variable's own
+  // comment): refreshToolbarState's first call (line ~946) happens well
+  // before the Run/Done wiring section further down would otherwise
+  // declare these.
+  const runBtn = body.querySelector('[data-role="run-btn"]');
+  const doneBtn = body.querySelector('[data-role="done-btn"]');
+
   // --- Job actions toolbar --------------------------------------------
   const toolbar = body.querySelector('[data-role="actions-toolbar"]');
   const jobNameDisplay = toolbar.querySelector('[data-role="job-name-display"]');
   const noteRow = body.querySelector('[data-role="note-row"]');
   const overwriteBtn = toolbar.querySelector('[data-action="overwrite"]');
   const pickerBtn = toolbar.querySelector('[data-action="picker"]');
+  const continueBtn = toolbar.querySelector('[data-action="continue-picking"]');
   const cloneBtn = toolbar.querySelector('[data-action="clone"]');
   const abortBtn = toolbar.querySelector('[data-action="abort"]');
   const markFinishedBtn = toolbar.querySelector('[data-action="mark-finished"]');
@@ -903,11 +917,24 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // something untrue. Browsing its outputs and settings is fine.
     const fromRelion = hasRun && currentRun.source === "relion";
     jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
-    // Picking doesn't go through Overwrite/re-run semantics -- it's always
-    // available once the job exists (see custom_jobs.run_manual_pick's own
-    // docstring for why "completed" doesn't mean "done picking").
+    // Open Picker is always available once the job exists, regardless of
+    // status -- you can review/add picks whether the session is still
+    // "running" or already marked Done.
     if (pickerBtn) pickerBtn.hidden = !hasRun || fromRelion;
-    overwriteBtn.hidden = !hasRun || fromRelion || status === "running";
+    // Continue (resume "running" with existing picks kept -- job_runner.
+    // resume_run) only makes sense once a picking session has actually been
+    // marked Done/Failed; RESUMABLE_STATUSES on the backend is the same set.
+    if (continueBtn) {
+      continueBtn.hidden = !hasRun || fromRelion || !(status === "completed" || status === "failed");
+    }
+    // Overwrite blocks on "running" for a normal job (nothing sensible to
+    // re-run into while it's still going) -- NOT for a picking job, whose
+    // "running" is a steady, long-lived state with no real computation to
+    // collide with; Overwrite there means "abandon these picks and start a
+    // clean session in the same slot" (see custom_jobs.run_manual_pick),
+    // meaningful at any point.
+    const overwriteBlockedByStatus = status === "running" && !def.is_picker;
+    overwriteBtn.hidden = !hasRun || fromRelion || overwriteBlockedByStatus;
     // Clone never touches the job it's cloning FROM -- it only reads its
     // field_values and opens a fresh, separately-numbered job -- so unlike
     // Overwrite it's safe even for a RELION-native (read-only) job or one
@@ -923,6 +950,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       ? "Run in RELION itself — rename it there"
       : "Click to rename (RELION's 'Alias' job action)";
     outputsTabBtn.hidden = !hasRun;
+    // Run/Done (the bottom command-row) for a picking job: purely status
+    // -driven, so it stays correct through every path that can change
+    // currentRun.status -- a fresh Run, Continue, Done itself, Overwrite
+    // (which closes and reopens this popup with the new run already
+    // "running"), and a live "status" broadcast over the websocket (see
+    // connectWebSocket's onmessage, which calls this same function).
+    if (def.is_picker && runBtn) {
+      runBtn.style.display = hasRun ? "none" : "";
+      if (doneBtn) doneBtn.hidden = !hasRun || status !== "running";
+    }
     refreshProgressTabVisibility();
     refreshCtfQcTabVisibility();
     refreshNoteRow();
@@ -1035,6 +1072,25 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         return;
       }
       openVisualizer({ runId: currentRun.run_id, kind: def.picker_kind, sourcePath });
+    });
+  }
+
+  if (continueBtn) {
+    continueBtn.addEventListener("click", async () => {
+      if (!currentRun) return;
+      continueBtn.disabled = true;
+      try {
+        const updated = await api(`/api/runs/${currentRun.run_id}/resume`, { method: "POST" });
+        currentRun = updated;
+        statusLine.textContent = `Status: ${updated.status}`;
+        statusLine.className = statusLineClass(updated.status);
+        refreshToolbarState();
+        refreshCommandCenter();
+      } catch (err) {
+        errorDialog("Could not resume this picking session: " + err.message);
+      } finally {
+        continueBtn.disabled = false;
+      }
     });
   }
 
@@ -1694,7 +1750,6 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     ws.onerror = () => appendOutputLine("[websocket error]", true);
   }
 
-  const runBtn = body.querySelector('[data-role="run-btn"]');
   if (isReopen) {
     // Reopening history: don't offer a bare "Run" (that's what Overwrite,
     // in the toolbar, is for — re-running into the SAME job explicitly).
@@ -1736,6 +1791,35 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         // clicked into launching a second job and orphaning the first
         // job's websocket.
         runBtn.disabled = false;
+      }
+    });
+  }
+
+  if (doneBtn) {
+    doneBtn.addEventListener("click", async () => {
+      if (!currentRun) return;
+      const ok = await confirmDialog(
+        `Mark "${currentRun.job_name}" as finished? This ends the picking session -- `
+        + `you can still reopen the picker afterward, or use Continue to resume it.`,
+        { confirmLabel: "Done" }
+      );
+      if (!ok) return;
+      doneBtn.disabled = true;
+      try {
+        const updated = await api(`/api/runs/${currentRun.run_id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "completed" }),
+        });
+        currentRun = updated;
+        statusLine.textContent = `Status: ${updated.status}`;
+        statusLine.className = statusLineClass(updated.status);
+        refreshToolbarState();
+        refreshCommandCenter();
+      } catch (err) {
+        errorDialog("Could not mark this job done: " + err.message);
+      } finally {
+        doneBtn.disabled = false;
       }
     });
   }
@@ -2206,6 +2290,35 @@ async function refreshPipelineSync() {
     pipelineSyncState = { enabled: false, available: false, locked: false };
   }
   renderPipelineSyncButton();
+  await maybeWarnAboutOpenRelionGuis();
+}
+
+// RELION-US now writes directly into this project's default_pipeline.star
+// for one specific thing (a job's Running/Succeeded/Failed/Aborted status --
+// see backend/pipeline_bridge.py's set_process_status, the one deliberate
+// exception to "never hand-write that file", added because relion_pipeliner's
+// own CLI has no other way to reach those statuses without re-executing a
+// job's real command). That write takes the same .relion_lock mutex RELION's
+// own GUI does, which protects against two AUTOMATED writers colliding -- but
+// a native RELION GUI that already has this project open keeps its OWN
+// in-memory copy of the pipeline, edited and re-saved from THAT copy on its
+// own schedule, with no way for this app to coordinate with it. RELION-US is
+// meant to be usable as the sole day-to-day UI for a project with this on;
+// shown every time a project loads (not just once, ever) since leaving a
+// native GUI open is easy to forget about across sessions -- same reasoning
+// as this app's own "ask about the login password every startup" choice.
+function maybeWarnAboutOpenRelionGuis() {
+  if (!pipelineSyncState.enabled) return Promise.resolve();
+  return errorDialog(
+    "RELION sync is on for this project: RELION-US now updates this project's " +
+    "default_pipeline.star directly (job status only), not just through " +
+    "RELION's own relion_pipeliner.\n\n" +
+    "Close any native RELION GUI you have open on this project folder before " +
+    "continuing — a GUI that's already open keeps its own copy of the pipeline " +
+    "and won't see these updates, which risks corrupting the project if both " +
+    "write to it. Once closed, use RELION-US as the only interface to this " +
+    "project."
+  );
 }
 
 pipelineSyncBtn.addEventListener("click", async () => {
@@ -2214,9 +2327,14 @@ pipelineSyncBtn.addEventListener("click", async () => {
     const ok = await confirmDialog(
       "Record jobs run here in this project's default_pipeline.star?\n\n" +
       "RELION's own GUI will then list them, so you can switch between the two. " +
-      "RELION-US doesn't write that file itself — it asks RELION's own " +
-      "relion_pipeliner to add each job, which is what computes the job number, " +
-      "creates the directory and works out the input/output graph.\n\n" +
+      "RELION-US asks RELION's own relion_pipeliner to add each job and compute " +
+      "its node graph, but does directly update one thing itself: a job's " +
+      "Running/Succeeded/Failed status (relion_pipeliner's CLI has no other way " +
+      "to reach those without re-executing the job's real command).\n\n" +
+      "Close any native RELION GUI you have open on this project before turning " +
+      "this on, and use RELION-US as the only interface to it afterward — a GUI " +
+      "that's already open won't see these updates and risks corrupting the " +
+      "project if both write to it.\n\n" +
       "Jobs already run here are not added retrospectively.",
       { confirmLabel: "Turn on" }
     );
@@ -3992,3 +4110,4 @@ function currentTheme() {
 
 refreshProjectLabel();
 refreshCommandCenter();
+refreshPipelineSync();

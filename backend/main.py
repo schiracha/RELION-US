@@ -426,6 +426,14 @@ async def start_run(req: StartRunRequest):
             run = await run_manager.start_custom_job(
                 req.internal_name, display_name, factory,
                 field_values=values, overwrite_run_id=req.overwrite_run_id,
+                # The picking jobs (Manualpick/TomoManualPick) only validate
+                # their inputs here -- the real work is picking, done
+                # afterward against this job's own directory via the Picker
+                # button, not by this coroutine -- so a successful return
+                # shouldn't complete the run. See start_custom_job's own
+                # stays_running docstring; the "Done" button (set_status)
+                # is what actually finishes it.
+                stays_running=CUSTOM_JOB_DEFINITIONS[req.internal_name].get("is_picker", False),
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -485,6 +493,34 @@ async def abort_run(run_id: str):
     return {"ok": True}
 
 
+@app.post("/api/runs/{run_id}/resume")
+async def resume_run(run_id: str):
+    """The picking jobs' "Continue" toolbar action -- see
+    JobRunManager.resume_run's own docstring. Restricted to Manualpick/
+    TomoManualPick here (not exposed generically): resuming a finished
+    subprocess/compute job back to "running" has no real meaning -- there
+    is no process left to have stopped."""
+    _reject_relion_run(run_id, "resumed")
+    run = run_manager.get(run_id)
+    internal_name = run.internal_name if run else None
+    if internal_name is None:
+        history = project_manager.load_history(run_manager.project_dir)
+        entry = next((h for h in history if h.get("run_id") == run_id), None)
+        internal_name = entry.get("internal_name") if entry else None
+    if internal_name is None or not CUSTOM_JOB_DEFINITIONS.get(internal_name, {}).get("is_picker"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only a manual-picking job (Manualpick/TomoManualPick) can be resumed.",
+        )
+    try:
+        updated = await run_manager.resume_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return updated
+
+
 class RunUpdateRequest(BaseModel):
     alias: str | None = None
     note: str | None = None
@@ -492,7 +528,7 @@ class RunUpdateRequest(BaseModel):
 
 
 @app.patch("/api/runs/{run_id}")
-def update_run(run_id: str, req: RunUpdateRequest):
+async def update_run(run_id: str, req: RunUpdateRequest):
     """Command Center 'Alias' / 'Edit Note' / 'Mark as finished'/'Mark as
     failed' actions, combined into one endpoint since they're all small,
     independent metadata edits. Any combination of fields may be given in
@@ -526,7 +562,7 @@ def update_run(run_id: str, req: RunUpdateRequest):
             raise HTTPException(status_code=404, detail="Unknown run_id")
     if req.status is not None:
         try:
-            updated = run_manager.set_status(run_id, req.status)
+            updated = await run_manager.set_status(run_id, req.status)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         if updated is None:

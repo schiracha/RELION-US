@@ -314,20 +314,35 @@ async def run_manual_pick(project_dir: Path, values: dict, job_dir: Path) -> str
     resolve to something real and reports how many, so the popup's summary
     line isn't blank. The actual picking happens afterward, through the
     Picker button (app.js), which reads/writes this job's own directory via
-    /api/manual-pick/{run_id}/spa/* -- see manual_pick.py. Completing
-    immediately (rather than staying "running" the way real RELION's
-    Manualpick does while its picker window is open) is deliberate: this
-    app's job-run model is one-shot, and there is no harm in a "completed"
-    job whose output directory keeps gaining picks after the fact -- Extract
-    reads whatever manualpick.star says at ITS OWN run time, same as it
-    would for a real Manualpick job reopened and re-picked."""
+    /api/manual-pick/{run_id}/spa/* -- see manual_pick.py.
+
+    main.py passes stays_running=True for this job (is_picker), so a
+    successful return here leaves the run "running", not "completed" --
+    see job_runner.JobRunManager.start_custom_job's own docstring. The user
+    ends the session explicitly (the "Done" button, job_runner.set_status)
+    when they're actually finished picking, and can come back to a
+    "completed" one non-destructively (job_runner.resume_run, the toolbar's
+    "Continue" action -- reads whatever's already there, changes nothing).
+
+    Overwrite reuses this SAME function (start_custom_job's overwrite_
+    run_id path), which is why clearing prior picks lives HERE rather than
+    behind a separate "is this an overwrite" flag: a fresh run's directory
+    is always empty, so clear_spa_picks is a no-op there and only actually
+    removes anything on a genuine Overwrite -- matching real RELION's own
+    "Overwrite re-runs into the SAME directory" semantics (gui_mainwindow.
+    cpp's cb_toggle_overwrite_continue), the destructive counterpart to
+    Continue above.
+    """
     fn_in = values.get("fn_in", "")
     if not fn_in:
         raise ValueError("Input micrographs field is required.")
 
     def work():
+        removed = manual_pick.clear_spa_picks(job_dir)
         mics = manual_pick.list_spa_micrographs(project_dir, fn_in)
+        cleared_note = f"Cleared {removed} existing pick file(s) from a previous run.\n" if removed else ""
         return (
+            f"{cleared_note}"
             f"Found {len(mics)} micrograph(s) in {fn_in}.\n"
             f"Use the Picker button above to open the viewer and start picking "
             f"-- picks save into this job's own directory as you go, and this "
@@ -339,19 +354,23 @@ async def run_manual_pick(project_dir: Path, values: dict, job_dir: Path) -> str
 
 
 async def run_tomo_manual_pick(project_dir: Path, values: dict, job_dir: Path) -> str:
-    """Tomogram counterpart of run_manual_pick above -- same one-shot-
-    completion reasoning. Only point picking (pick_mode "Particles") is
-    wired up on the viewer side right now; other pick_mode choices (helical
-    filaments, spheres, surfaces) still round-trip into job.star (real
-    RELION option, kept for a native-GUI-repair later) but the picker
-    doesn't yet do anything different for them."""
+    """Tomogram counterpart of run_manual_pick above -- same stays_running /
+    Done / Continue / Overwrite-clears-first reasoning (see its docstring).
+    Only point picking (pick_mode "Particles") is wired up on the viewer
+    side right now; other pick_mode choices (helical filaments, spheres,
+    surfaces) still round-trip into job.star (real RELION option, kept for
+    a native-GUI-repair later) but the picker doesn't yet do anything
+    different for them."""
     in_tomoset = values.get("in_tomoset", "")
     if not in_tomoset:
         raise ValueError("Input tomograms.star field is required.")
 
     def work():
+        removed = manual_pick.clear_tomo_picks(job_dir)
         tomograms = viz._tomograms_from_star(project_dir, viz._safe(project_dir, in_tomoset))
+        cleared_note = f"Cleared {removed} existing pick file(s) from a previous run.\n" if removed else ""
         return (
+            f"{cleared_note}"
             f"Found {len(tomograms)} tomogram(s) in {in_tomoset}.\n"
             f"Use the Picker button above to open the viewer and start picking "
             f"-- picks save into this job's own directory as you go, and this "

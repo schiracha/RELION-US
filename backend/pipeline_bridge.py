@@ -2,14 +2,16 @@
 pipeline_bridge.py — registering RELION-US's jobs in RELION's own pipeline, so
 the two GUIs can be used on the same project interchangeably.
 
-**Nothing here writes `default_pipeline.star`.** Every change to it goes through
-RELION's own `relion_pipeliner` binary. That is not squeamishness — the file is
-five linked tables (general, processes, nodes, input edges, output edges), the
-node graph is computed by each job's own `getCommands<Job>Job()` C++, and access
-is guarded by a `.relion_lock/` mutex directory that RELION's GUI holds while it
-is open. Reimplementing any of that in Python would be a new source of truth
-for a file this app is only a guest in, and the failure mode is a corrupted
-project rather than an error message.
+**Almost nothing here writes `default_pipeline.star` directly.** Every change
+to it goes through RELION's own `relion_pipeliner` binary, with ONE narrow,
+deliberate exception (set_process_status, below). That is not squeamishness —
+the file is five linked tables (general, processes, nodes, input edges,
+output edges), the node graph is computed by each job's own
+`getCommands<Job>Job()` C++, and access is guarded by a `.relion_lock/` mutex
+directory that RELION's GUI holds while it is open. Reimplementing any of
+that in Python would be a new source of truth for a file this app is only a
+guest in, and the failure mode is a corrupted project rather than an error
+message.
 
 The relevant entry point, from `src/apps/pipeliner.cpp`:
 
@@ -31,22 +33,51 @@ therefore does all of this itself:
 precisely the division of labour we want: RELION owns the bookkeeping, RELION-US
 runs the command the user approved.
 
-Completion is RELION's mechanism too. `prepareFinalCommand` appends
-`--pipeline_control <jobdir>/` to every `relion_` command; the program then
-writes `RELION_JOB_EXIT_SUCCESS` / `_FAILURE` / `_ABORTED` into that directory
-when it ends (`src/pipeline_control.h`), and
+**Completion used to be documented as "RELION's mechanism too" here — that
+turned out to be untested and wrong.** `prepareFinalCommand` appends
+`--pipeline_control <jobdir>/` to every `relion_` command; the program writes
+`RELION_JOB_EXIT_SUCCESS` / `_FAILURE` / `_ABORTED` into that directory when
+it ends (`src/pipeline_control.h`), and
 
     relion_pipeliner --check_job_completion
 
-flips the pipeline's status for any Running process whose exit file has
-appeared. RELION-US appends the same flag and calls the same command, so a job
-run here reaches "Succeeded" in RELION's GUI by RELION's own route.
+reads those files back -- but only for a process whose STATUS IS ALREADY
+"Running" (`PipeLine::checkProcessCompletion`, `src/pipeliner.cpp`: "Only
+check running processes for file existence"). Confirmed live against the
+real 5.0.1 binary: registering a job (always "Scheduled" -- there is no
+`--addJobFromStar` variant that adds it as "Running") and then touching its
+exit-success file does NOT flip its status; `--check_job_completion` silently
+ignores it. And there is no other CLI path to "Running" that doesn't mean
+actually re-executing the job's real command (`--RunJobs` -- wrong for
+RELION-US, which already ran the real work itself; for the in-browser
+picking jobs specifically, that "real command" is a desktop GUI that can't
+run headlessly, which is the whole reason they exist). So every job
+RELION-US ever registered was permanently stuck showing "Scheduled" in
+RELION's own GUI, regardless of whether it had actually finished.
+
+`set_process_status()` is the fix: a narrow, surgical exception that writes
+directly to the `pipeline_processes` block's status column for one process,
+under the SAME `.relion_lock` mutex `relion_pipeliner` itself takes. It only
+ever changes one whitespace-delimited token on one line -- never node/edge
+tables, never anything `relion_pipeliner`'s own command-building or graph
+logic is the authority for -- so this cannot desync the pipeline the way
+reimplementing registration or node computation would. Called once to mark
+"Running" right when real work starts (job_runner.py), after which
+`--check_job_completion` (still called exactly as before) can actually do
+its job and promote Running -> Succeeded/Failed/Aborted through RELION's own
+route, or in one flow (picking jobs, which stay "Running" indefinitely) is
+called directly to set the terminal status when the user clicks Done. This
+is safe against RELION-US's own concurrent operations (the lock), but NOT a
+substitute for closing any native RELION GUI that already has the project
+open -- a live GUI process holds its own in-memory copy of the pipeline this
+write can't coordinate with; see the app's startup warning.
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -171,6 +202,138 @@ def is_locked(project_dir: Path) -> bool:
     pipeline operation hang for a minute and then fail.
     """
     return (Path(project_dir) / LOCK_DIRNAME).is_dir()
+
+
+# --------------------------------------------------------------------------
+# The one direct write -- see module docstring for why this exists and what
+# it deliberately does NOT touch.
+# --------------------------------------------------------------------------
+
+# The five real RELION status labels (pipeline_jobs.h's procstatus_type2label)
+# -- kept here rather than re-deriving from project_manager.RELION_STATUS_MAP,
+# which maps the OTHER direction (RELION's labels -> this app's own status
+# vocabulary) and is lossy for that purpose (several RELION labels can map to
+# one app status).
+RELION_STATUS_LABELS = frozenset({"Running", "Scheduled", "Succeeded", "Failed", "Aborted"})
+
+# RELION waits 3s a try, 20 tries (~60s) before giving up on the lock -- see
+# LOCK_DIRNAME's own comment. Matched here so a concurrent relion_pipeliner
+# invocation (this app's own registration/completion-check calls) gets the
+# same grace period rather than losing a race to an artificially short wait.
+_LOCK_TIMEOUT_SECONDS = 60.0
+_LOCK_POLL_SECONDS = 0.2
+
+
+def _acquire_pipeline_lock(project_dir: Path, timeout: Optional[float] = None) -> None:
+    """mkdir is atomic -- the same mutex idiom PipeLine::read/write use
+    against LOCK_DIRNAME. Raises PipelineBridgeError on timeout, the same
+    way a real relion_pipeliner invocation eventually gives up and errors
+    (see _run_pipeliner's own timeout).
+
+    timeout defaults to the module-level _LOCK_TIMEOUT_SECONDS, looked up
+    here (at call time) rather than as this parameter's own default value,
+    so a test monkeypatching that module attribute actually takes effect --
+    a default argument's value is bound once, at function-definition time,
+    and would otherwise ignore the patch entirely.
+    """
+    if timeout is None:
+        timeout = _LOCK_TIMEOUT_SECONDS
+    lock_dir = Path(project_dir) / LOCK_DIRNAME
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            lock_dir.mkdir()
+            return
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise PipelineBridgeError(
+                    f"Could not acquire the pipeline lock ({lock_dir}) within "
+                    f"{timeout:.0f}s -- another process (this app, or a RELION "
+                    f"GUI) is using the pipeline right now. If a RELION GUI "
+                    f"crashed, a stale {LOCK_DIRNAME}/ directory may need to "
+                    f"be removed by hand."
+                )
+            time.sleep(_LOCK_POLL_SECONDS)
+
+
+def _release_pipeline_lock(project_dir: Path) -> None:
+    try:
+        (Path(project_dir) / LOCK_DIRNAME).rmdir()
+    except OSError:
+        pass
+
+
+def _rewrite_process_status(text: str, process_name: str, status_label: str) -> tuple[str, bool]:
+    """Replace the status column of ONE row in the `pipeline_processes`
+    loop_ block, byte-for-byte everywhere else -- see module docstring for
+    why this is a text-level edit rather than a full STAR parse/rewrite
+    (smaller, more predictable blast radius: this cannot touch a table it
+    doesn't understand, because it never looks at one).
+
+    A `pipeline_processes` data row is exactly 4 whitespace-separated
+    tokens (name, alias, type label, status -- confirmed against real
+    relion_pipeliner output); every other block's rows have a different
+    column count, so scoping to `data_pipeline_processes` specifically
+    (rather than just "4 tokens, ends in a known status word") is
+    extra insurance, not the only thing preventing a wrong-block match.
+    """
+    target = process_name.rstrip("/")
+    lines = text.split("\n")
+    in_processes_block = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("data_"):
+            in_processes_block = stripped == "data_pipeline_processes"
+            continue
+        if not in_processes_block or not stripped or stripped.startswith(("_", "loop_", "#")):
+            continue
+        parts = stripped.split()
+        if len(parts) != 4 or parts[0].rstrip("/") != target:
+            continue
+        old_status = parts[3]
+        idx = line.rfind(old_status)
+        lines[i] = line[:idx] + status_label + line[idx + len(old_status):]
+        return "\n".join(lines), True
+    return text, False
+
+
+def set_process_status(project_dir: Path, process_name: str, status_label: str) -> bool:
+    """Directly set one process's status in RELION's own
+    default_pipeline.star -- see module docstring for why this exists (in
+    short: relion_pipeliner's CLI has no way to mark a job "Running" short
+    of actually re-executing its real command, and --check_job_completion
+    only ever promotes a process already marked "Running").
+
+    process_name: RELION's own process name, project-relative, e.g.
+    "MotionCorr/job007" (trailing slash optional -- normalized either way).
+    status_label: one of RELION_STATUS_LABELS.
+
+    Returns False (not an error) if default_pipeline.star doesn't exist or
+    the process isn't found in it -- nothing to update, not a failure this
+    app should block a real job over. Raises PipelineBridgeError if the
+    lock can't be acquired (see _acquire_pipeline_lock) or the file can't be
+    read/written.
+    """
+    if status_label not in RELION_STATUS_LABELS:
+        raise ValueError(f"status_label must be one of {sorted(RELION_STATUS_LABELS)}")
+    star_path = Path(project_dir) / "default_pipeline.star"
+    if not star_path.exists():
+        return False
+    _acquire_pipeline_lock(project_dir)
+    try:
+        try:
+            text = star_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PipelineBridgeError(f"could not read {star_path}: {exc}") from exc
+        new_text, changed = _rewrite_process_status(text, process_name, status_label)
+        if changed:
+            try:
+                star_path.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                raise PipelineBridgeError(f"could not write {star_path}: {exc}") from exc
+        return changed
+    finally:
+        _release_pipeline_lock(project_dir)
 
 
 # --------------------------------------------------------------------------

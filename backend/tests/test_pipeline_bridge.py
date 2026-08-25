@@ -290,6 +290,12 @@ def test_missing_pipeliner_raises_with_an_actionable_message(tmp_path, monkeypat
 
 def test_completion_moves_the_job_to_succeeded_in_relions_record(project):
     out = pipeline_bridge.register_job(project, "relion.class2d", {})
+    # --check_job_completion only ever promotes a process already marked
+    # "Running" (confirmed against the real 5.0.1 binary -- see
+    # set_process_status's own module-docstring section) -- a fresh
+    # registration is always "Scheduled", so this step is required, not
+    # optional set-dressing.
+    assert pipeline_bridge.set_process_status(project, out["process_name"], "Running") is True
     # what a relion_ program writes when it ends, because of --pipeline_control
     (project / out["process_name"] / "RELION_JOB_EXIT_SUCCESS").write_text("")
     assert pipeline_bridge.check_job_completion(project) is True
@@ -299,10 +305,23 @@ def test_completion_moves_the_job_to_succeeded_in_relions_record(project):
 
 def test_a_failed_job_reaches_relion_as_failed(project):
     out = pipeline_bridge.register_job(project, "relion.class2d", {})
+    pipeline_bridge.set_process_status(project, out["process_name"], "Running")
     (project / out["process_name"] / "RELION_JOB_EXIT_FAILURE").write_text("")
     pipeline_bridge.check_job_completion(project)
     procs = project_manager.read_relion_pipeline(project)["processes"]
     assert procs[0]["status_label"] == "Failed"
+
+
+def test_check_job_completion_ignores_a_still_scheduled_job(project):
+    """The bug set_process_status exists to fix, pinned directly: a
+    registered-but-never-marked-Running job must NOT be promoted by
+    --check_job_completion just because its exit file exists -- confirmed
+    against the real binary (see pipeline_bridge.py's module docstring)."""
+    out = pipeline_bridge.register_job(project, "relion.class2d", {})
+    (project / out["process_name"] / "RELION_JOB_EXIT_SUCCESS").write_text("")
+    assert pipeline_bridge.check_job_completion(project) is True  # the CALL succeeds...
+    procs = project_manager.read_relion_pipeline(project)["processes"]
+    assert procs[0]["status_label"] == "Scheduled"  # ...but nothing was actually promoted
 
 
 def test_pipeline_control_flag_is_appended_to_relion_commands():
@@ -669,3 +688,114 @@ def test_overwrite_leaves_command_alone_when_sync_is_off(project):
 
     second = asyncio.run(go())
     assert "--pipeline_control" not in second.command
+
+
+# --------------------------------------------------------------------------
+# set_process_status -- the one deliberate exception to "never hand-write
+# default_pipeline.star" (see pipeline_bridge.py's module docstring for why
+# it exists: --check_job_completion only ever promotes a process already
+# marked "Running", and nothing in relion_pipeliner's CLI can mark one
+# Running without actually re-executing its real command).
+# --------------------------------------------------------------------------
+
+_REAL_PROCESSES_BLOCK = """
+# version 50001
+
+data_pipeline_general
+
+_rlnPipeLineJobCounter                       2
+ 
+
+# version 50001
+
+data_pipeline_processes
+
+loop_ 
+_rlnPipeLineProcessName #1 
+_rlnPipeLineProcessAlias #2 
+_rlnPipeLineProcessTypeLabel #3 
+_rlnPipeLineProcessStatusLabel #4 
+Import/job000/       None relion.import.movies  Scheduled 
+ManualPick/job001/       None relion.manualpick  Running 
+ 
+
+# version 50001
+
+data_pipeline_nodes
+
+loop_ 
+_rlnPipeLineNodeName #1 
+_rlnPipeLineNodeTypeLabel #2 
+_rlnPipeLineNodeTypeLabelDepth #3 
+Import/job000/movies.star MicrographMovieGroupMetadata.star.relion            1 
+"""
+
+
+def test_rewrite_process_status_changes_only_the_target_row():
+    new_text, changed = pipeline_bridge._rewrite_process_status(
+        _REAL_PROCESSES_BLOCK, "Import/job000", "Running")
+    assert changed is True
+    assert "Import/job000/       None relion.import.movies  Running" in new_text
+    # Untouched: the OTHER process's row, and every other block.
+    assert "ManualPick/job001/       None relion.manualpick  Running" in new_text
+    assert "Import/job000/movies.star MicrographMovieGroupMetadata.star.relion            1" in new_text
+    assert "_rlnPipeLineJobCounter                       2" in new_text
+
+
+def test_rewrite_process_status_normalizes_trailing_slash():
+    """Callers may pass "Import/job000" or "Import/job000/" -- both must
+    match the file's own "Import/job000/" row."""
+    new_text, changed = pipeline_bridge._rewrite_process_status(
+        _REAL_PROCESSES_BLOCK, "Import/job000/", "Failed")
+    assert changed is True
+    assert "Import/job000/       None relion.import.movies  Failed" in new_text
+
+
+def test_rewrite_process_status_unknown_process_is_a_noop():
+    new_text, changed = pipeline_bridge._rewrite_process_status(
+        _REAL_PROCESSES_BLOCK, "Import/job999", "Running")
+    assert changed is False
+    assert new_text == _REAL_PROCESSES_BLOCK
+
+
+def test_rewrite_process_status_never_touches_the_nodes_block():
+    """A node row has 3 tokens (name, type label, depth) -- a node whose
+    name happened to end in a status-like word must not be mistaken for a
+    processes row."""
+    text = _REAL_PROCESSES_BLOCK.replace(
+        "Import/job000/movies.star MicrographMovieGroupMetadata.star.relion            1",
+        "Import/job000/Running MicrographMovieGroupMetadata.star.relion            1",
+    )
+    new_text, changed = pipeline_bridge._rewrite_process_status(text, "Import/job000/Running", "Failed")
+    assert changed is False
+    assert "Import/job000/Running MicrographMovieGroupMetadata.star.relion            1" in new_text
+
+
+def test_set_process_status_end_to_end(tmp_path):
+    (tmp_path / "default_pipeline.star").write_text(_REAL_PROCESSES_BLOCK)
+    assert pipeline_bridge.set_process_status(tmp_path, "Import/job000", "Running") is True
+    text = (tmp_path / "default_pipeline.star").read_text()
+    assert "Import/job000/       None relion.import.movies  Running" in text
+    # The lock is taken and released, not left behind.
+    assert not (tmp_path / pipeline_bridge.LOCK_DIRNAME).exists()
+
+
+def test_set_process_status_no_pipeline_file_returns_false(tmp_path):
+    assert pipeline_bridge.set_process_status(tmp_path, "Import/job000", "Running") is False
+
+
+def test_set_process_status_rejects_an_unknown_label(tmp_path):
+    (tmp_path / "default_pipeline.star").write_text(_REAL_PROCESSES_BLOCK)
+    with pytest.raises(ValueError):
+        pipeline_bridge.set_process_status(tmp_path, "Import/job000", "InProgress")
+
+
+def test_set_process_status_times_out_on_a_held_lock(tmp_path, monkeypatch):
+    (tmp_path / "default_pipeline.star").write_text(_REAL_PROCESSES_BLOCK)
+    (tmp_path / pipeline_bridge.LOCK_DIRNAME).mkdir()
+    monkeypatch.setattr(pipeline_bridge, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(pipeline_bridge, "_LOCK_POLL_SECONDS", 0.01)
+    with pytest.raises(pipeline_bridge.PipelineBridgeError, match="lock"):
+        pipeline_bridge.set_process_status(tmp_path, "Import/job000", "Running")
+    # A lock this call didn't take must not be removed by it.
+    assert (tmp_path / pipeline_bridge.LOCK_DIRNAME).exists()
