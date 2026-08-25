@@ -3,6 +3,7 @@ Tests for project_manager.py — the "Change Project" feature (switching the
 active RELION project directory at runtime instead of it being hardcoded to
 wherever the app happens to be installed) and its history persistence.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -217,6 +218,125 @@ def test_detect_pipeline_hint_unknown_on_corrupt_pipeline_star(tmp_path):
     d.mkdir()
     (d / project_manager.RELION_PIPELINE_STAR).write_text("this is not valid STAR\n")
     assert project_manager.detect_pipeline_hint(d) == "unknown"
+
+
+# --------------------------------------------------------------------------
+# estimate_job_timestamps -- neither RELION's own pipeline files nor a run
+# this app lost track of are guaranteed to have real timing recorded, so
+# this is the best-effort fallback: specific marker files' mtimes, never the
+# job directory's own (which changes on any touch at all).
+# --------------------------------------------------------------------------
+
+def _touch_at(path, mtime):
+    path.write_text("x")
+    os.utime(path, (mtime, mtime))
+
+
+def test_estimate_timestamps_missing_directory_returns_nothing(tmp_path):
+    assert project_manager.estimate_job_timestamps(tmp_path / "nope", "completed") == (None, None)
+
+
+def test_estimate_start_from_job_star_mtime(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    _touch_at(d / "job.star", 1000.0)
+    started_at, ended_at = project_manager.estimate_job_timestamps(d, "completed")
+    assert started_at == 1000.0
+    assert ended_at is None   # no exit marker and no run.out/run.err to fall back to
+
+
+def test_start_marker_priority_prefers_job_star_over_the_rest(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    _touch_at(d / "run.out", 500.0)
+    _touch_at(d / "job.star", 1000.0)
+    started_at, _ = project_manager.estimate_job_timestamps(d, "completed")
+    assert started_at == 1000.0
+
+
+def test_estimate_end_from_exit_marker_mtime(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    _touch_at(d / "job.star", 1000.0)
+    _touch_at(d / "RELION_JOB_EXIT_SUCCESS", 1200.0)
+    started_at, ended_at = project_manager.estimate_job_timestamps(d, "completed")
+    assert started_at == 1000.0
+    assert ended_at == 1200.0
+
+
+def test_estimate_end_falls_back_to_run_out_err_without_an_exit_marker(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    _touch_at(d / "job.star", 1000.0)
+    _touch_at(d / "run.out", 1100.0)
+    _touch_at(d / "run.err", 1150.0)   # the later of the two wins
+    _, ended_at = project_manager.estimate_job_timestamps(d, "failed")
+    assert ended_at == 1150.0
+
+
+def test_no_end_estimate_for_a_still_running_job(tmp_path):
+    """There is no sensible "end" for a job that hasn't ended -- even if an
+    exit marker somehow exists (e.g. a stale one from a prior run in the
+    same directory, via Overwrite), a "running" status must not report one."""
+    d = tmp_path / "job001"
+    d.mkdir()
+    _touch_at(d / "job.star", 1000.0)
+    _touch_at(d / "RELION_JOB_EXIT_SUCCESS", 1200.0)
+    started_at, ended_at = project_manager.estimate_job_timestamps(d, "running")
+    assert started_at == 1000.0
+    assert ended_at is None
+
+
+# --------------------------------------------------------------------------
+# read_relion_last_command -- the one place a RELION-native job's real
+# command survives at all (RELION's own pipeline file records none, and
+# neither does job.star), letting an old job's command be shown, edited and
+# copy-pasted here instead of starting blank.
+# --------------------------------------------------------------------------
+
+
+def test_read_last_command_extracts_the_verbatim_command(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    (d / "note.txt").write_text(
+        "\n ++++ Executing new job on Tue Aug 18 10:59:21 2026\n"
+        " ++++ with the following command(s): \n"
+        "`which relion_refine` --o Class3D/job027/run --ini_high 40 --iter 50\n"
+        " ++++ \n"
+    )
+    assert project_manager.read_relion_last_command(d) == (
+        "`which relion_refine` --o Class3D/job027/run --ini_high 40 --iter 50"
+    )
+
+
+def test_read_last_command_uses_the_most_recent_of_several_runs(tmp_path):
+    """note.txt is append-only (RELION opens it with std::ofstream::app) --
+    a job overwritten more than once has one block per run, and the LAST
+    one is what actually produced the job's current output."""
+    d = tmp_path / "job001"
+    d.mkdir()
+    (d / "note.txt").write_text(
+        " ++++ Executing new job on Mon Aug 17 07:00:00 2026\n"
+        " ++++ with the following command(s): \n"
+        "relion_refine --o Class3D/job001/run --iter 25\n"
+        " ++++ \n"
+        " ++++ Executing new job on Tue Aug 18 10:59:21 2026\n"
+        " ++++ with the following command(s): \n"
+        "relion_refine --o Class3D/job001/run --iter 50\n"
+        " ++++ \n"
+    )
+    assert "--iter 50" in project_manager.read_relion_last_command(d)
+
+
+def test_read_last_command_missing_note_file_returns_empty(tmp_path):
+    assert project_manager.read_relion_last_command(tmp_path / "job001") == ""
+
+
+def test_read_last_command_unrecognized_format_returns_empty(tmp_path):
+    d = tmp_path / "job001"
+    d.mkdir()
+    (d / "note.txt").write_text("just a free-text note, no command block here\n")
+    assert project_manager.read_relion_last_command(d) == ""
 
 
 # --------------------------------------------------------------------------

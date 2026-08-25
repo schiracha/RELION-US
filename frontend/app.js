@@ -33,22 +33,38 @@ function formatBytes(n) {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
-function formatTimestamp(t) {
+// estimated: true when this came from project_manager.estimate_job_timestamps
+// (file mtimes) rather than being recorded by RELION-US itself -- RELION's
+// own pipeline file records no timing at all, and a file's mtime reflects
+// when it was last touched, which can be long after (or entirely unrelated
+// to) when the job actually ran if the project was ever copied/migrated.
+// Marked with "~" and a tooltip so it never reads as a recorded fact.
+function formatTimestamp(t, estimated) {
   if (!t) return "—";
-  return new Date(t * 1000).toLocaleString();
+  const text = new Date(t * 1000).toLocaleString();
+  if (!estimated) return escapeHtml(text);
+  return `<span class="ts-estimated" title="Estimated from file timestamps, not recorded by RELION or RELION-US — may be off, especially if this project's files were copied from elsewhere after the job ran.">~ ${escapeHtml(text)}</span>`;
 }
 
-function formatDuration(startedAt, endedAt) {
+function formatDuration(startedAt, endedAt, estimated) {
   if (!startedAt) return "—";
   const end = endedAt || Date.now() / 1000;
   const secs = Math.max(0, Math.round(end - startedAt));
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const remSecs = secs % 60;
-  if (mins < 60) return `${mins}m ${remSecs}s`;
-  const hrs = Math.floor(mins / 60);
-  const remMins = mins % 60;
-  return `${hrs}h ${remMins}m`;
+  let text;
+  if (secs < 60) text = `${secs}s`;
+  else {
+    const mins = Math.floor(secs / 60);
+    const remSecs = secs % 60;
+    if (mins < 60) text = `${mins}m ${remSecs}s`;
+    else {
+      const hrs = Math.floor(mins / 60);
+      const remMins = mins % 60;
+      text = `${hrs}h ${remMins}m`;
+    }
+  }
+  // Inherits the same uncertainty as the timestamps it's computed from --
+  // see formatTimestamp's estimated handling.
+  return estimated ? `<span class="ts-estimated" title="Computed from estimated timestamps — may be off.">~ ${text}</span>` : text;
 }
 
 // --- Lightweight custom confirm/prompt/error dialogs -----------------------
@@ -427,8 +443,14 @@ function buildFieldRow(key, option, value) {
 // tears down properly rather than streaming into a hidden window.
 let currentJobWinbox = null;
 
-async function openJobPopup(internalName, displayName, existingRun) {
+async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const isReopen = !!existingRun;
+  // Clone (see cloneBtn's handler above): a genuinely NEW job -- isReopen
+  // stays false, so this behaves exactly like opening this job type fresh
+  // from the sidebar (fresh job number, Run button, no historical
+  // websocket) -- with only the prefilled field values coming from
+  // somewhere other than the job type's own defaults.
+  const cloneFieldValues = opts.cloneFieldValues || null;
 
   let def;
   try {
@@ -443,11 +465,14 @@ async function openJobPopup(internalName, displayName, existingRun) {
   // A job imported from RELION's pipeline carries the values RELION saved in
   // its job.star; merge them over the defaults so options RELION's job.star
   // doesn't mention (a newer RELION-US field, say) still get sane values.
-  const prefillValues = isReopen && existingRun.field_values
-    ? (existingRun.source === "relion"
-        ? { ...(def.default_values || {}), ...existingRun.field_values }
-        : existingRun.field_values)
-    : (def.default_values || {});
+  // Same reasoning applies to a clone source, RELION-native or not.
+  const prefillValues = cloneFieldValues
+    ? { ...(def.default_values || {}), ...cloneFieldValues }
+    : isReopen && existingRun.field_values
+      ? (existingRun.source === "relion"
+          ? { ...(def.default_values || {}), ...existingRun.field_values }
+          : existingRun.field_values)
+      : (def.default_values || {});
 
   // The RELION-style output dir (<JobDir>/jobNNN) this popup targets. For a
   // fresh job it's the prospective next dir from the job definition; passed
@@ -460,6 +485,17 @@ async function openJobPopup(internalName, displayName, existingRun) {
   // gives it one. Actions (abort/rename/note/clean/delete/etc.) all key
   // off currentRun.run_id.
   let currentRun = existingRun ? { ...existingRun } : null;
+
+  // Set by wireProgressSplitter (see below) once the Progress tab's shell
+  // exists; declared up here, well before refreshToolbarState()'s first
+  // call, since that call reaches renderProgressShell() synchronously and
+  // immediately for a REOPENED job with progress support (currentRun is
+  // already set above) -- referencing this before a `let` further down had
+  // executed was a real bug (temporal dead zone ReferenceError, aborting
+  // the whole popup before it opened) for exactly that case: Class3D/
+  // Autorefine/etc. popups failing to open at all when reopening an
+  // already-run job.
+  let progressSplitCleanup = null;
 
   const body = document.createElement("div");
   body.className = "job-popup";
@@ -474,6 +510,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       <button class="btn" data-action="close" title="Close this window">✕ Close</button>
       <button class="btn" data-action="note" title="Edit note">📝 Note</button>
       <button class="btn" data-action="overwrite" hidden title="Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)">⟳ Overwrite</button>
+      <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
       <button class="btn" data-action="mark-finished" hidden title="Manually mark as finished">✓ Mark Finished</button>
       <button class="btn" data-action="mark-failed" hidden title="Manually mark as failed">✗ Mark Failed</button>
@@ -733,7 +770,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
   if (commandBox) {
     commandBox.value = isReopen ? (currentRun.command || "") : (def.draft_command || "");
     const recomputeBtn = body.querySelector('[data-role="recompute-btn"]');
- recomputeBtn.addEventListener("click", async () => {
+    async function recomputeDraft() {
   try {
     const resp = await api(`/api/jobs/${internalName}/draft`, {
       method: "POST",
@@ -759,7 +796,29 @@ async function openJobPopup(internalName, displayName, existingRun) {
   } catch (err) {
     errorDialog("Could not recompute draft: " + err.message);
   }
-});
+    }
+    recomputeBtn.addEventListener("click", recomputeDraft);
+    // Clone (see cloneBtn's handler above) prefilled the FORM from another
+    // job's field_values, but the command box above still shows this job
+    // type's plain default draft -- recompute immediately so the two never
+    // disagree. Run sends commandBox.value as the command AND
+    // collectValues() as field_values together; leaving them mismatched
+    // here would silently run a command built from the wrong values next
+    // to a form that looks right.
+    //
+    // A reopened RELION-native job (source: "relion") usually DOES have a
+    // real recorded `command` by now -- read straight from its own
+    // note.txt (see project_manager.read_relion_last_command) -- so the
+    // line above already shows the exact command that actually ran,
+    // verbatim, unedited. Only fall back to a synthetic reconstruction
+    // from the form's own (job.star-sourced) values when note.txt had
+    // nothing to give (older RELION versions, a hand-created job, or a
+    // directory missing its note.txt) -- recomputing unconditionally here
+    // would silently replace that verbatim record with a rebuilt
+    // approximation even when the real thing was sitting right there.
+    if (cloneFieldValues || (isReopen && existingRun.source === "relion" && !currentRun.command)) {
+      recomputeDraft();
+    }
   }
 
   const statusLine = body.querySelector('[data-role="status-line"]');
@@ -768,18 +827,31 @@ async function openJobPopup(internalName, displayName, existingRun) {
   let errorLines = [];
   let ws = null;
 
-  // stderr goes to the dedicated Errors tab (errorsPre/errorBadge) only --
-  // no separate always-visible output block duplicating it underneath
-  // every tab. stdout isn't discarded, just not streamed live inline: it's
-  // still written to run.out and browsable/downloadable from the Outputs
-  // tab like every other output file.
+  // stderr always goes to the dedicated Errors tab (errorsPre/errorBadge).
+  // Full stdout+stderr also streams into the Progress tab's own live-output
+  // pane (see renderProgressShell) for jobs that have one -- the classic
+  // scrolling RELION console view, split under the charts rather than
+  // duplicated as a separate always-visible block under every tab the way
+  // an earlier version of this had it (that showed stderr twice: once
+  // there, once in Errors). Queried fresh each line rather than cached,
+  // since the Progress tab's shell may not be built yet the first time a
+  // line arrives.
   function appendOutputLine(text, isStderr) {
-    if (!isStderr) return;
-    errorLines.push(text);
-    errorsPre.textContent = errorLines.join("\n");
-    errorsPre.classList.add("has-errors");
-    errorBadge.style.display = "";
-    errorBadge.textContent = String(errorLines.length);
+    const liveBody = progressContent.querySelector('[data-role="progress-live-output-body"]');
+    if (liveBody) {
+      const line = document.createElement("div");
+      line.className = "progress-live-line" + (isStderr ? " stderr" : "");
+      line.textContent = text;
+      liveBody.appendChild(line);
+      liveBody.scrollTop = liveBody.scrollHeight;
+    }
+    if (isStderr) {
+      errorLines.push(text);
+      errorsPre.textContent = errorLines.join("\n");
+      errorsPre.classList.add("has-errors");
+      errorBadge.style.display = "";
+      errorBadge.textContent = String(errorLines.length);
+    }
   }
 
   // --- Job actions toolbar --------------------------------------------
@@ -787,6 +859,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
   const jobNameDisplay = toolbar.querySelector('[data-role="job-name-display"]');
   const noteRow = body.querySelector('[data-role="note-row"]');
   const overwriteBtn = toolbar.querySelector('[data-action="overwrite"]');
+  const cloneBtn = toolbar.querySelector('[data-action="clone"]');
   const abortBtn = toolbar.querySelector('[data-action="abort"]');
   const markFinishedBtn = toolbar.querySelector('[data-action="mark-finished"]');
   const markFailedBtn = toolbar.querySelector('[data-action="mark-failed"]');
@@ -829,6 +902,11 @@ async function openJobPopup(internalName, displayName, existingRun) {
     const fromRelion = hasRun && currentRun.source === "relion";
     jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
     overwriteBtn.hidden = !hasRun || fromRelion || status === "running";
+    // Clone never touches the job it's cloning FROM -- it only reads its
+    // field_values and opens a fresh, separately-numbered job -- so unlike
+    // Overwrite it's safe even for a RELION-native (read-only) job or one
+    // that's still running.
+    cloneBtn.hidden = !hasRun;
     abortBtn.hidden = !hasRun || fromRelion || status !== "running";
     markFinishedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "completed";
     markFailedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "failed";
@@ -974,6 +1052,19 @@ async function openJobPopup(internalName, displayName, existingRun) {
     }
   });
 
+  // Clone: a fresh job of this same type, pre-filled from this run's own
+  // field_values, going through the normal Run path -- not Overwrite -- so
+  // it gets its own newly-allocated job number and (if RELION sync is on)
+  // actually registers in RELION's pipeline. Works for a RELION-native job
+  // too (source: "relion"), which is the point: it's the supported way to
+  // get an unregistered job's settings into a properly tracked, registrable
+  // RELION-US run without touching the original.
+  cloneBtn.addEventListener("click", () => {
+    if (!currentRun) return;
+    win.close();
+    openJobPopup(internalName, displayName, null, { cloneFieldValues: currentRun.field_values || {} });
+  });
+
   // --- Outputs tab: file listing, download, Clean / Harsh Clean --------
   const outputsContent = body.querySelector('[data-tab-content="outputs"]');
 
@@ -1097,23 +1188,81 @@ async function openJobPopup(internalName, displayName, existingRun) {
     return currentRun && PROGRESS_JOB_TYPES.has(internalName);
   }
 
+  // The Progress tab is a top/bottom split: charts/thumbnails above, the
+  // classic scrolling RELION console (full stdout+stderr, see
+  // appendOutputLine) below, divided by a drag-to-resize handle. Only this
+  // one tab gets a live-output pane -- other tabs don't have anywhere this
+  // naturally belongs, and duplicating it under all of them is exactly what
+  // an earlier version of this did and was removed for (see the commit
+  // removing the old always-visible output block).
+  const PROGRESS_LIVE_OUTPUT_MIN_PX = 40;
+
+  function wireProgressSplitter() {
+    if (progressSplitCleanup) { progressSplitCleanup(); progressSplitCleanup = null; }
+    const handle = progressContent.querySelector('[data-role="progress-split-handle"]');
+    const bottom = progressContent.querySelector('[data-role="progress-live-output"]');
+    const wrap = progressContent.querySelector('[data-role="progress-split-wrap"]');
+    if (!handle || !bottom || !wrap) return;
+    let dragging = false;
+    let startY = 0;
+    let startHeight = 0;
+    function onMove(e) {
+      if (!dragging) return;
+      const delta = startY - e.clientY;   // dragging up grows the bottom pane
+      const maxHeight = Math.max(PROGRESS_LIVE_OUTPUT_MIN_PX, wrap.clientHeight - 80);
+      const next = Math.min(maxHeight, Math.max(PROGRESS_LIVE_OUTPUT_MIN_PX, startHeight + delta));
+      bottom.style.height = `${next}px`;
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("dragging");
+      document.body.style.userSelect = "";
+    }
+    function onDown(e) {
+      dragging = true;
+      startY = e.clientY;
+      startHeight = bottom.getBoundingClientRect().height;
+      handle.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    }
+    handle.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    progressSplitCleanup = () => {
+      handle.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }
+
   function renderProgressShell() {
     progressContent.innerHTML = `
-      <div class="progress-controls">
-        <label class="progress-check" title="Turn off to stop polling this job entirely — no charts, no thumbnails, no extra work.">
-          <input type="checkbox" data-role="prog-enabled" ${progressState.enabled ? "checked" : ""} /> Live progress
-        </label>
-        <label class="progress-num" title="Spacing of the iterations offered below, e.g. 5 lists iteration 1, 5, 10, 15… (the latest iteration is always included too).">
-          Every
-          <input type="number" data-role="prog-every" min="1" max="99" value="${progressState.everyN}" /> it
-        </label>
-        <label class="progress-select" title="Which iteration's class images to show below. Pick an earlier one to compare against the latest — while a run keeps going, your pick stays put unless you switch it back to Latest.">
-          Iteration
-          <select data-role="prog-iter-select"></select>
-        </label>
-        <span class="progress-status" data-role="prog-status"></span>
+      <div class="progress-split-wrap" data-role="progress-split-wrap">
+        <div class="progress-split-top">
+          <div class="progress-controls">
+            <label class="progress-check" title="Turn off to stop polling this job entirely — no charts, no thumbnails, no extra work.">
+              <input type="checkbox" data-role="prog-enabled" ${progressState.enabled ? "checked" : ""} /> Live progress
+            </label>
+            <label class="progress-num" title="Spacing of the iterations offered below, e.g. 5 lists iteration 1, 5, 10, 15… (the latest iteration is always included too).">
+              Every
+              <input type="number" data-role="prog-every" min="1" max="99" value="${progressState.everyN}" /> it
+            </label>
+            <label class="progress-select" title="Which iteration's class images to show below. Pick an earlier one to compare against the latest — while a run keeps going, your pick stays put unless you switch it back to Latest.">
+              Iteration
+              <select data-role="prog-iter-select"></select>
+            </label>
+            <span class="progress-status" data-role="prog-status"></span>
+          </div>
+          <div data-role="prog-body"></div>
+        </div>
+        <div class="progress-split-handle" data-role="progress-split-handle" title="Drag to resize"></div>
+        <div class="progress-live-output" data-role="progress-live-output">
+          <div class="progress-live-output-header">Live output</div>
+          <div class="progress-live-output-body" data-role="progress-live-output-body"></div>
+        </div>
       </div>
-      <div data-role="prog-body"></div>
     `;
     progressContent.querySelector('[data-role="prog-enabled"]').addEventListener("change", (e) => {
       progressState.enabled = e.target.checked;
@@ -1129,6 +1278,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
       progressState.selectedIteration = e.target.value === "latest" ? "latest" : parseInt(e.target.value, 10);
       renderProgressBody();
     });
+    wireProgressSplitter();
   }
 
   // Populates the iteration <select> from the current d.iterations (already
@@ -1586,6 +1736,7 @@ async function openJobPopup(internalName, displayName, existingRun) {
     class: ["no-full", "job-popup-window"],
     onclose: () => {
       stopProgressPolling();
+      if (progressSplitCleanup) { progressSplitCleanup(); progressSplitCleanup = null; }
       document.removeEventListener("relion-us-theme-changed", onThemeChange);
       if (ws) try { ws.close(); } catch (e) { /* noop */ }
       if (currentJobWinbox === win) currentJobWinbox = null;
@@ -1657,8 +1808,8 @@ function renderTable() {
           : ""}</td>
       <td>${escapeHtml(run.display_name || run.internal_name)}</td>
       <td>${statusBadge(run.status)}</td>
-      <td>${formatTimestamp(run.started_at)}</td>
-      <td>${formatDuration(run.started_at, run.ended_at)}</td>
+      <td>${formatTimestamp(run.started_at, run.timestamp_estimated)}</td>
+      <td>${formatDuration(run.started_at, run.ended_at, run.timestamp_estimated)}</td>
     `;
     tr.addEventListener("click", () => reopenRun(run));
     tbody.appendChild(tr);
@@ -1706,11 +1857,14 @@ function renderTimeline() {
         ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
       </div>
       <div class="cc-card-meta">${
-        run.source === "relion"
-          // RELION's pipeline file records no timestamps -- saying so beats
-          // showing a made-up one.
+        run.source === "relion" && !run.started_at
+          // RELION's own pipeline file records no timestamps, and this
+          // particular job's directory had nothing to estimate from either
+          // (missing, or none of the expected marker files) -- saying so
+          // beats showing a made-up one.
           ? "from RELION's pipeline" + (run.exists_on_disk === false ? " · directory missing" : "")
-          : formatTimestamp(run.started_at) + " · " + formatDuration(run.started_at, run.ended_at)
+          : formatTimestamp(run.started_at, run.timestamp_estimated) + " · " +
+            formatDuration(run.started_at, run.ended_at, run.timestamp_estimated)
       }</div>
       ${inputsLine}
       ${noteLine}

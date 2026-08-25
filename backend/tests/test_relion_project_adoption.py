@@ -251,11 +251,30 @@ def test_missing_directories_are_flagged_not_hidden(relion_project):
     assert runs["job003"]["exists_on_disk"] is False   # listed, never created here
 
 
-def test_imported_jobs_carry_no_invented_timestamps(relion_project):
-    """RELION's pipeline records none, and a directory mtime is not a start
-    time. A blank Started column beats a plausible wrong one."""
+def test_imported_jobs_without_a_job_star_carry_no_invented_timestamps(relion_project):
+    """RELION's pipeline file itself records no timing at all, and a job
+    directory's own mtime is not a start time -- only a job that actually
+    has a job.star (or another once-at-a-specific-moment marker file, see
+    project_manager.estimate_job_timestamps) gets an estimate. A job with
+    neither (no directory, or an empty one) stays blank: a blank Started
+    column beats a plausible wrong one."""
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
-    assert all(r["started_at"] is None and r["ended_at"] is None for r in runs)
+    without_job_star = [r for r in runs if r["job_number"] in (1, 2, 3, 11)]
+    assert len(without_job_star) == 4
+    assert all(r["started_at"] is None and r["ended_at"] is None for r in without_job_star)
+    assert all(r["timestamp_estimated"] is False for r in without_job_star)
+
+
+def test_imported_job_with_a_job_star_gets_an_estimated_start_time(relion_project):
+    """job005 is the one job in this fixture that actually has a job.star
+    on disk (see the fixture above) -- exactly the once-at-registration
+    marker file estimate_job_timestamps looks for, so it should get an
+    estimated started_at rather than a permanent blank."""
+    runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
+    job005 = next(r for r in runs if r["job_number"] == 5)
+    job_star_mtime = (relion_project / "Class2D/job005/job.star").stat().st_mtime
+    assert job005["timestamp_estimated"] is True
+    assert job005["started_at"] == pytest.approx(job_star_mtime)
 
 
 def test_our_own_runs_still_show_alongside(relion_project):
@@ -283,6 +302,48 @@ def test_reopening_reads_the_values_from_relions_job_star(relion_project):
     assert values["fn_img"] == "Select/job004/particles.star"
     # the Running-tab fields RELION saves too
     assert values["nr_mpi"] == "5" and values["nr_threads"] == "8"
+
+
+def test_reopening_reads_the_real_command_from_note_txt(relion_project):
+    """RELION's own pipeline file records no command for a job it ran (same
+    gap as timestamps -- see estimate_job_timestamps), but note.txt does:
+    RELION appends a "with the following command(s):" block there every
+    time a job runs. This is what makes an old RELION-native job's command
+    show up ready to read/edit/copy instead of starting blank."""
+    (relion_project / "Class2D/job005/note.txt").write_text(
+        " ++++ Executing new job on Tue Aug 18 10:59:21 2026\n"
+        " ++++ with the following command(s): \n"
+        "`which relion_refine` --o Class2D/job005/run --K 50 --iter 25\n"
+        " ++++ \n"
+    )
+    m = job_runner.JobRunManager(relion_project)
+    detail = m.relion_run_detail("relion:job005", relion_project)
+    assert detail["command"] == "`which relion_refine` --o Class2D/job005/run --K 50 --iter 25"
+
+
+def test_overwrite_target_resolves_a_relion_native_run(relion_project):
+    """The bug this fixes: "Recompute draft" on a reopened RELION-native
+    job used to 409 with "Unknown run_id to overwrite" (it only ever
+    looked in this app's OWN history, which never has these) instead of
+    showing a real draft built from the job's own job.star values. The
+    actual Overwrite ACTION stays blocked for these jobs regardless (see
+    main.py's _reject_relion_run, checked before start_subprocess_job is
+    ever reached) -- this only makes the read-only preview work."""
+    m = job_runner.JobRunManager(relion_project)
+    subdir = m.overwrite_target_subdir("relion:job005", relion_project)
+    assert subdir == "Class2D/job005"
+
+
+def test_overwrite_target_for_a_relion_native_job_with_no_directory_on_disk(relion_project):
+    """job003 is in RELION's pipeline but its directory was never created in
+    this fixture (see relion_project above) -- _resolve_overwrite_target
+    only checks that a cwd was recorded at all (empty string), not that it
+    exists on disk, so this still resolves to the theoretical path rather
+    than raising. Harmless for a read-only draft preview; relion_run_detail
+    is what actually surfaces "directory missing" to the user."""
+    subdir = job_runner.JobRunManager(relion_project).overwrite_target_subdir(
+        "relion:job003", relion_project)
+    assert subdir == "CtfFind/job003"
 
 
 def test_job_without_a_job_star_says_so_instead_of_pretending(relion_project):

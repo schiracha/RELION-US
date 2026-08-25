@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import shutil
 import signal
 import time
@@ -123,6 +124,50 @@ def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) 
     return seen
 
 
+def _extract_output_subdir(command: str) -> Optional[str]:
+    """Best-effort extraction of the value following RELION's `--o` (most
+    programs) or `--output-directory` (the Python tomography tools) flag
+    from a raw command string -- used only to validate an Overwrite's
+    command against the directory it's actually supposed to reuse (see
+    _output_subdir_matches). Not a full shell parser: uses shlex.split for
+    the same whitespace/quoting handling RELION commands actually need
+    (verified against a real command containing a backtick command
+    substitution -- shlex treats it as an inert token, which is fine here,
+    since finding "--o" and the token after it doesn't require resolving
+    it). Returns None for anything shlex can't tokenize, or if no output
+    flag is present -- callers treat that as "can't verify," not "invalid."
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok in ("--o", "--output-directory") and i + 1 < len(tokens):
+            return tokens[i + 1].rstrip("/")
+    return None
+
+
+def _output_subdir_matches(command: str, authoritative_subdir: str) -> bool:
+    """Whether `command`'s own --o/--output-directory argument is this job's
+    real directory (authoritative_subdir, e.g. "Refine3D/job029") or a path
+    inside it (RELION's own convention is "<JobDir>/jobNNN/run", the "run"
+    being the output filename PREFIX for that job, not another directory
+    level). Used to block an Overwrite whose (freely user-editable) command
+    text was pointed at some OTHER job's directory -- see
+    start_subprocess_job's overwrite branch for what a mismatch would
+    actually do if allowed to run (RELION-US's own tracking, and the
+    --pipeline_control exit markers if sync is on, would point at
+    authoritative_subdir while the real output lands wherever the command
+    says, silently). Returns True (don't block) when extraction found
+    nothing to check -- this is a safety net against a specific, confirmed
+    failure mode, not a command interpreter this app owns."""
+    actual = _extract_output_subdir(command)
+    if actual is None:
+        return True
+    auth = authoritative_subdir.rstrip("/")
+    return actual == auth or actual.startswith(auth + "/")
+
+
 def _rewrite_output_subdir(command: str, old_subdir: str, new_subdir: str) -> tuple[str, bool]:
     """Replace the output directory token in `command` when the prospective
     job number shown in the draft (old_subdir, e.g. "Import/job005") no
@@ -158,14 +203,24 @@ class JobRun:
     stdout_lines: list[str] = field(default_factory=list)
     stderr_lines: list[str] = field(default_factory=list)
     exit_code: Optional[int] = None
+    # The OS process group leader's PID (== proc.pid, since start_new_session
+    # =True makes it its own session/group leader -- see _run_subprocess).
+    # Unlike proc/task below, this IS persisted (to_summary() includes it):
+    # a backend restart loses the live handle but not the fact that some PID
+    # was launched, and abort_run()'s fallback for an orphaned "running" run
+    # needs it to actually signal the real process rather than just
+    # reconciling a status nothing has verified. See _pid_matches_persisted_
+    # run for why this alone isn't treated as sufficient without a plausible
+    # -match check first (PIDs get reused by the OS).
+    pid: Optional[int] = None
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
     subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
     # Runtime-only handles for abort_run(); never serialized (to_summary()
-    # builds an explicit dict below and doesn't include them), so a
+    # builds an explicit dict below and doesn't include them). A
     # persisted-history run loaded back after a restart simply has these as
-    # None -- correctly making it non-abortable, since the real process is
-    # long gone anyway.
+    # None -- the live asyncio handles are always gone, but the process
+    # itself (see `pid` above) may well not be.
     proc: Any = field(default=None, repr=False, compare=False)
     task: Any = field(default=None, repr=False, compare=False)
     # One-off note emitted into the live output at start (currently: the
@@ -173,6 +228,14 @@ class JobRun:
     # taken). Declared here rather than set ad hoc so both start paths and
     # the reader agree it exists.
     rewrite_note: Optional[str] = field(default=None, repr=False, compare=False)
+    # Set when RELION pipeline sync was on but registering this job with
+    # relion_pipeliner failed (pipeline locked, job type not recognised,
+    # etc.) -- surfaced into the Errors tab at the start of
+    # _run_subprocess, same as rewrite_note is surfaced into stdout. The
+    # job still runs under RELION-US's own numbering either way (see
+    # start_subprocess_job); this only means it won't show up in RELION's
+    # own GUI, which is worth knowing rather than discovering later.
+    pipeline_sync_error: Optional[str] = field(default=None, repr=False, compare=False)
     # Set when Abort arrives before the subprocess handle exists (see
     # abort_run + _run_subprocess); the launcher honours it as soon as it
     # has a process to signal.
@@ -201,6 +264,7 @@ class JobRun:
             "command": self.command,
             "status": self.status,
             "exit_code": self.exit_code,
+            "pid": self.pid,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "project_dir": self.project_dir,
@@ -239,7 +303,8 @@ class JobRunManager:
 
     def relion_run_detail(self, run_id: str, project_dir: Optional[Path] = None) -> Optional[dict]:
         """One imported RELION job, with the option values it actually ran
-        with.
+        with and (see project_manager.read_relion_last_command) the exact
+        command that produced its current output.
 
         RELION saves every JobOption into `job.star` in the job's own
         directory when the job runs -- the same file its GUI reads to reopen a
@@ -247,7 +312,10 @@ class JobRunManager:
         job type's defaults. Jobs from RELION 3.0 or earlier (a `run.job` in a
         different format) and directories that have since been deleted come
         back with empty values and a note saying so, which is the honest
-        answer.
+        answer. Both reads are scoped to this per-job detail lookup, not the
+        bulk _relion_pipeline_entries list every Command Center refresh
+        polls -- reading and regex-scanning every job's job.star/note.txt on
+        every poll would be real, needless I/O for a project with many jobs.
         """
         pd = project_dir if project_dir is not None else self.project_dir
         for entry in self._relion_pipeline_entries(pd):
@@ -257,6 +325,7 @@ class JobRunManager:
             job_dir = Path(entry["cwd"])
             values = project_manager.read_relion_job_options(job_dir)
             entry["field_values"] = values
+            entry["command"] = project_manager.read_relion_last_command(job_dir)
             if not entry["exists_on_disk"]:
                 entry["import_note"] = (
                     "This job is listed in RELION's pipeline but its directory "
@@ -351,10 +420,13 @@ class JobRunManager:
         owns these jobs. Reopening one still works -- the options come from the
         job's own `job.star` (see get_run_detail).
 
-        Timestamps are left empty: RELION's pipeline file records none, and a
-        job directory's mtime is when it was last touched, not when the job
-        ran. A blank Started column is honest; a plausible-looking wrong
-        timestamp is not.
+        Timestamps: RELION's own pipeline file records none. Best-effort
+        estimates come from project_manager.estimate_job_timestamps
+        (specific marker files' mtimes, not the directory's own, which
+        changes on any touch) and are always marked `timestamp_estimated`
+        so the UI can show them as approximate rather than fact -- see that
+        function's docstring for exactly how unreliable "approximate" can
+        be when a project's files were copied after the jobs actually ran.
         """
         info = project_manager.read_relion_pipeline(project_dir)
         out: list[dict] = []
@@ -376,17 +448,23 @@ class JobRunManager:
             # it the natural identifier.
             slug = (f"job{proc['job_number']:03d}" if proc["job_number"]
                     else name.replace("/", "-"))
+            status = project_manager.RELION_STATUS_MAP.get(proc["status_label"], "completed")
+            started_at = ended_at = None
+            timestamp_estimated = False
+            if exists:
+                started_at, ended_at = project_manager.estimate_job_timestamps(job_dir, status)
+                timestamp_estimated = started_at is not None or ended_at is not None
             entry = {
                 "run_id": f"relion:{slug}",
                 "source": "relion",
                 "internal_name": internal or "",
                 "display_name": display,
                 "command": "",
-                "status": project_manager.RELION_STATUS_MAP.get(
-                    proc["status_label"], "completed"),
+                "status": status,
                 "exit_code": None,
-                "started_at": None,
-                "ended_at": None,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "timestamp_estimated": timestamp_estimated,
                 "project_dir": str(project_dir),
                 "cwd": str(job_dir),
                 "job_number": proc["job_number"],
@@ -482,14 +560,15 @@ class JobRunManager:
     def _register_in_relion_pipeline(
         self, project_dir: Path, internal_name: str, field_values: dict
     ) -> Optional[dict]:
-        """Ask RELION to allocate and record this job. None on any failure.
-
-        Failing back to this app's own numbering is deliberate: a job the user
-        asked to run should still run when the pipeline is momentarily locked
-        by an open RELION GUI, or when relion_pipeliner errors on a job type it
-        does not recognise. The run then simply isn't in RELION's record, which
-        is the behaviour without two-way sync at all, and the reason is put in
-        the run's own output rather than swallowed.
+        """Ask RELION to allocate and record this job. None if this job type
+        isn't in the catalog (nothing to register). Raises
+        PipelineBridgeError on registration failure -- callers decide how to
+        surface that; see start_subprocess_job, which falls back to this
+        app's own numbering (a job the user asked to run should still run
+        when the pipeline is momentarily locked by an open RELION GUI, or
+        when relion_pipeliner errors on a job type it does not recognise)
+        but puts the reason into the run's own output rather than
+        swallowing it.
         """
         meta = job_catalog.JOB_CATALOG.get(internal_name)
         if not meta:
@@ -503,12 +582,8 @@ class JobRunManager:
             }
         except Exception:
             options_by_key = {}
-        try:
-            return pipeline_bridge.register_job(
-                project_dir, type_label, field_values or {}, options_by_key)
-        except pipeline_bridge.PipelineBridgeError as exc:
-            self._pipeline_sync_error = str(exc)
-            return None
+        return pipeline_bridge.register_job(
+            project_dir, type_label, field_values or {}, options_by_key)
 
     def sync_completion_to_relion(self, project_dir: Optional[Path] = None) -> bool:
         """Let RELION notice that a job finished (it reads the exit files the
@@ -569,11 +644,25 @@ class JobRunManager:
 
     def _resolve_overwrite_target(self, overwrite_run_id: str, project_dir: Path) -> dict:
         """Looks up the run being overwritten, whether it's still live in
-        self.runs (this session) or only survives in persisted history (a
-        previous session) -- Overwrite should work either way, the same as
-        delete_run()/file operations above. Raises ValueError (caller turns
-        this into a 409) if the run can't be found, is still running, or
-        belongs to a different/inactive project."""
+        self.runs (this session), only survives in persisted history (a
+        previous session), or -- for the read-only callers, i.e. draft
+        recompute; see overwrite_target_subdir -- was never in this app's
+        own history at all because RELION itself ran it (a synthetic
+        "relion:jobNNN" run_id, resolved via relion_run_detail's own read
+        of that job's job.star). Overwrite should work either way, the
+        same as delete_run()/file operations above. Raises ValueError
+        (caller turns this into a 409) if the run can't be found, is still
+        running, or belongs to a different/inactive project.
+
+        Resolving a RELION-native run here does NOT reopen the door on
+        actually overwriting one: start_subprocess_job's overwrite_run_id
+        branch (which calls this too) is only ever reached from /api/runs,
+        and that endpoint rejects a RELION-native run_id itself, before
+        this method runs at all (see main.py's _reject_relion_run). This
+        method has no way to distinguish "just show me a draft" from "I'm
+        about to actually run this," so that distinction has to live with
+        the caller that knows which one it's doing -- it does.
+        """
         run = self.get(overwrite_run_id)
         if run is not None:
             info = {
@@ -585,6 +674,8 @@ class JobRunManager:
                 (h for h in project_manager.load_history(project_dir) if h.get("run_id") == overwrite_run_id),
                 None,
             )
+            if entry is None and self.is_relion_run(overwrite_run_id):
+                entry = self.relion_run_detail(overwrite_run_id, project_dir)
             if entry is None:
                 raise ValueError(f"Unknown run_id to overwrite: {overwrite_run_id}")
             info = {
@@ -673,6 +764,7 @@ class JobRunManager:
         """
         project_dir = self.project_dir
         rewrite_note = None
+        pipeline_sync_error = None
 
         if overwrite_run_id is not None:
             target = self._resolve_overwrite_target(overwrite_run_id, project_dir)
@@ -720,6 +812,28 @@ class JobRunManager:
                         f"this job's actual directory ({authoritative_subdir}/); "
                         f"command's output path updated to match."
                     )
+                # The rewrite above only catches drift between the PROSPECTIVE
+                # path the popup opened with and this job's real directory --
+                # both are pinned to authoritative_subdir for an Overwrite, so
+                # it's a no-op here. It does NOT catch a user manually
+                # retyping --o in the (freely editable) command box to point
+                # somewhere else entirely, which is a real, confirmed failure
+                # mode: RELION-US's own tracking and --pipeline_control's exit
+                # markers would stay pinned to authoritative_subdir while the
+                # actual command output lands wherever the edited --o says,
+                # silently. Block it outright rather than warn -- there is no
+                # legitimate reason an Overwrite's command should target a
+                # different directory than the job it's overwriting; Clone
+                # (a fresh, newly-numbered job) is the right tool for that.
+                if not _output_subdir_matches(command, authoritative_subdir):
+                    raise ValueError(
+                        f"This command's output directory doesn't match the job "
+                        f"being overwritten ({authoritative_subdir}/) -- Overwrite "
+                        f"must reuse the SAME directory, or this app's tracking "
+                        f"would point at one directory while the command actually "
+                        f"writes to another. Use Clone to run this as a new job "
+                        f"instead."
+                    )
                 if self.pipeline_sync_enabled(project_dir):
                     command = pipeline_bridge.pipeline_control_args(command, authoritative_subdir)
         else:
@@ -731,8 +845,11 @@ class JobRunManager:
                 # graph) in default_pipeline.star. Whatever slot it gives back is
                 # authoritative from here on -- guessing our own number while the
                 # pipeline is also allocating them is how the two records drift.
-                registered = self._register_in_relion_pipeline(
-                    project_dir, internal_name, field_values or {})
+                try:
+                    registered = self._register_in_relion_pipeline(
+                        project_dir, internal_name, field_values or {})
+                except pipeline_bridge.PipelineBridgeError as exc:
+                    pipeline_sync_error = str(exc)
             if registered:
                 job_number = registered["job_number"]
                 authoritative_subdir = registered["process_name"]
@@ -767,6 +884,13 @@ class JobRunManager:
                     f"{authoritative_subdir}/ — it will appear in RELION's own GUI."
                 )
                 rewrite_note = (rewrite_note + "\n" + pipeline_note) if rewrite_note else pipeline_note
+            elif pipeline_sync_error:
+                pipeline_sync_error = (
+                    f"[RELION-US] Could not register this job in RELION's own "
+                    f"pipeline ({pipeline_sync_error}). It still ran under "
+                    f"RELION-US's own numbering, but won't show up in RELION's "
+                    f"own GUI."
+                )
         cwd.mkdir(parents=True, exist_ok=True)
 
         detect_text = command + " " + " ".join(str(v) for v in (field_values or {}).values())
@@ -784,6 +908,7 @@ class JobRunManager:
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
         )
         run.rewrite_note = rewrite_note
+        run.pipeline_sync_error = pipeline_sync_error
         self.runs[run_id] = run
         self._persist(run)
         run.task = asyncio.create_task(self._run_subprocess(run))
@@ -806,6 +931,13 @@ class JobRunManager:
         if run.rewrite_note:
             run.stdout_lines.append(run.rewrite_note)
             await run.broadcast({"type": "stdout", "line": run.rewrite_note})
+
+        # Pipeline-sync registration failures go to stderr specifically (not
+        # rewrite_note's stdout channel) so they land in the Errors tab,
+        # where a failure is actually noticed -- see JobRun.pipeline_sync_error.
+        if run.pipeline_sync_error:
+            run.stderr_lines.append(run.pipeline_sync_error)
+            await run.broadcast({"type": "stderr", "line": run.pipeline_sync_error})
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -841,6 +973,12 @@ class JobRunManager:
             return
 
         run.proc = proc
+        run.pid = proc.pid
+        # Persisted immediately, not batched with a later write: if the
+        # backend dies moments from now, this PID is the only way
+        # abort_run() will ever be able to find and signal the real process
+        # again (see JobRun.pid's docstring).
+        self._persist(run)
         if run.abort_requested:
             # Abort arrived while this process was still being spawned.
             self._terminate_process_group(run)
@@ -1042,23 +1180,103 @@ class JobRunManager:
     # (a free-text annotation per job) -- exposed here as set_note().
 
     @staticmethod
+    def _pgids_in_session(sid: int) -> set[int]:
+        """Every distinct process group id among processes belonging to
+        session `sid`. start_new_session=True (see _run_subprocess) makes
+        the launched shell both the session id and its own initial process
+        group -- but that is not the only process group in the session by
+        the time a real job is running: MPI launchers (prterun/orted/
+        mpirun, which every multi-rank RELION command uses) commonly move
+        their worker ranks into process groups of their own while staying
+        in the same session, specifically so a signal sent to the launcher's
+        group doesn't automatically reach them. Confirmed live against a
+        real relion_refine_mpi run: its two worker ranks -- the processes
+        actually using the CPU/GPU -- had PGIDs distinct from the /bin/sh
+        wrapper's, sharing only the session, so killing only that one group
+        left them running untouched. Linux-only (/proc), matching the
+        killpg/start_new_session=True this module already assumes."""
+        pgids: set[int] = set()
+        try:
+            candidates = [p for p in os.listdir("/proc") if p.isdigit()]
+        except OSError:
+            return pgids
+        for pid_str in candidates:
+            try:
+                stat = Path(f"/proc/{pid_str}/stat").read_text()
+                # "pid (comm) state ppid pgrp session ..." -- comm can itself
+                # contain spaces or parens, so split after the LAST ')'
+                # rather than on whitespace from the start.
+                fields = stat.rsplit(")", 1)[1].split()
+                pgrp, session = int(fields[2]), int(fields[3])
+            except (OSError, IndexError, ValueError):
+                continue
+            if session == sid:
+                pgids.add(pgrp)
+        return pgids
+
+    @staticmethod
+    def _kill_session(leader_pid: int, sig: int) -> bool:
+        """Signal every process group in the session `leader_pid` leads (see
+        _pgids_in_session), not just its own -- falls back to the leader's
+        own process group alone, then to the bare pid, if session
+        inspection finds nothing (process already gone, or /proc
+        unavailable). Returns whether any kill signal was actually sent."""
+        pgids = JobRunManager._pgids_in_session(leader_pid)
+        if not pgids:
+            try:
+                pgids = {os.getpgid(leader_pid)}
+            except (ProcessLookupError, OSError):
+                pgids = {leader_pid}
+        sent = False
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, sig)
+                sent = True
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+        return sent
+
+    @staticmethod
     def _terminate_process_group(run: JobRun) -> None:
-        """Signal the whole process group (see start_new_session=True in
-        _run_subprocess), not just the /bin/sh wrapper -- a plain terminate()
-        only reaches the shell itself and can leave its actual child (the real
-        relion_* command) running orphaned. Falls back to terminate() if the
-        process somehow isn't its own group leader (shouldn't happen given
-        start_new_session=True, but a crashed/reaped process could make
-        getpgid raise)."""
+        """Signal the whole session (see _kill_session), not just the
+        /bin/sh wrapper's own process group -- a plain terminate() only
+        reaches the shell itself and can leave its actual children (the
+        real relion_* command, and any MPI worker ranks it spawned into
+        their own process groups) running orphaned. Falls back to
+        proc.terminate() if session-wide signalling found nothing to kill."""
         if run.proc is None:
             return
-        try:
-            os.killpg(os.getpgid(run.proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
+        if not JobRunManager._kill_session(run.proc.pid, signal.SIGTERM):
             try:
                 run.proc.terminate()
             except ProcessLookupError:
                 pass
+
+    @staticmethod
+    def _pid_matches_persisted_run(pid: int, entry: dict) -> bool:
+        """Safety check before signalling a PID recovered from persisted
+        history rather than a live handle: PIDs get reused by the OS, so
+        blindly killing "whatever is running at that number now" risks
+        killing a completely unrelated process that happens to have started
+        later with the same number. Reads /proc/<pid>/cmdline (Linux-only,
+        matching the os.killpg/start_new_session=True this module already
+        assumes) and looks for this run's own project-relative output
+        directory -- unique per job, and always part of the real command's
+        --o/--output-directory argument -- rather than trusting the PID
+        alone. False (not raising) for any read failure, including the
+        process simply no longer existing."""
+        cwd, project_dir = entry.get("cwd"), entry.get("project_dir")
+        if not cwd or not project_dir:
+            return False
+        try:
+            subdir = str(Path(cwd).relative_to(Path(project_dir)))
+        except ValueError:
+            return False
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return False
+        return subdir in cmdline
 
     async def abort_run(self, run_id: str) -> bool:
         """Real RELION 'Abort running' (gui_mainwindow.cpp's cb_abort ->
@@ -1068,13 +1286,40 @@ class JobRunManager:
         being overwritten by the process's own non-zero exit code from the
         termination signal) before actually asking the process/task to
         stop, so the UI reflects the abort right away rather than racing
-        the process's own shutdown."""
+        the process's own shutdown.
+
+        If the run isn't live in THIS session (self.runs is in-memory only,
+        so a backend restart loses every handle) but persisted history still
+        says pending/running, there is no live asyncio handle here to signal
+        -- but the real OS process may well still be running regardless
+        (confirmed live: a backend restart orphans the process, it just
+        keeps going, invisible to this app until something notices). Using
+        the PID persisted at launch (see JobRun.pid), verified against
+        _pid_matches_persisted_run before touching it, actually signals that
+        process rather than only updating a status nothing has verified --
+        the earlier version of this fallback did the latter, which left the
+        real compute running indefinitely with the UI confidently, wrongly,
+        showing the job as aborted. Reconciles the persisted status to
+        aborted either way (verified-killed or nothing left to find),
+        because leaving it at "running" forever blocks Overwrite and Mark as
+        finished/failed too, both of which refuse to touch a "running" job
+        by design."""
         run = self.get(run_id)
+        if run is None:
+            history = project_manager.load_history(self.project_dir)
+            entry = next((h for h in history if h.get("run_id") == run_id), None)
+            if entry is None or entry.get("status") not in (STATUS_PENDING, STATUS_RUNNING):
+                return False
+            pid = entry.get("pid")
+            if pid is not None and self._pid_matches_persisted_run(pid, entry):
+                self._kill_session(pid, signal.SIGTERM)
+            self._update_persisted_only(run_id, status=STATUS_ABORTED, ended_at=time.time())
+            return True
         # PENDING counts: there is a real window between start_*_job() creating
         # the run and its task setting status to RUNNING, so a click landing in
         # that window must still abort cleanly. The abort_requested flag below
         # covers the process handle not existing yet.
-        if run is None or run.status not in (STATUS_PENDING, STATUS_RUNNING):
+        if run.status not in (STATUS_PENDING, STATUS_RUNNING):
             return False
         run.status = STATUS_ABORTED
         run.ended_at = time.time()
@@ -1098,14 +1343,60 @@ class JobRunManager:
             run.abort_requested = True
         return True
 
+    def backfill_missing_timestamps(self, project_dir: Optional[Path] = None) -> list[dict]:
+        """One-time repair for run_history.json entries with no
+        started_at/ended_at recorded -- e.g. a run from before abort_run()
+        could reconcile an orphaned "running" status (see its docstring),
+        or one whose backend crashed before a single _persist() ever ran.
+        Fills in whatever project_manager.estimate_job_timestamps can find
+        from the job directory's own files, marks every filled entry
+        `timestamp_estimated` so the UI never confuses a guess for a
+        recorded fact (see that function's docstring for exactly how wrong
+        an estimate can be if the project was copied after the jobs ran),
+        and leaves anything it can't estimate untouched. A currently-live
+        run in self.runs is skipped -- its own status/timing win, this only
+        ever touches history nothing in this session is tracking.
+
+        Returns the updated entries (empty if there was nothing to do).
+        """
+        pd = Path(project_dir) if project_dir is not None else self.project_dir
+        history = project_manager.load_history(pd)
+        updated = []
+        for entry in history:
+            if entry.get("run_id") in self.runs:
+                continue
+            cwd = entry.get("cwd")
+            status = entry.get("status")
+            needs_start = entry.get("started_at") is None
+            needs_end = (
+                entry.get("ended_at") is None
+                and status not in (STATUS_PENDING, STATUS_RUNNING)
+            )
+            if not cwd or not (needs_start or needs_end):
+                continue
+            started_at, ended_at = project_manager.estimate_job_timestamps(Path(cwd), status)
+            changed = False
+            if needs_start and started_at is not None:
+                entry["started_at"] = started_at
+                changed = True
+            if needs_end and ended_at is not None:
+                entry["ended_at"] = ended_at
+                changed = True
+            if changed:
+                entry["timestamp_estimated"] = True
+                updated.append(entry)
+        if updated:
+            project_manager.save_history(pd, history)
+        return updated
+
     def _update_persisted_only(self, run_id: str, **fields: Any) -> Optional[dict]:
-        """Fallback for set_alias()/set_note() when a run only survives in
-        persisted history (a previous backend session -- self.runs is
-        in-memory and empty again after every restart). Renaming/annotating
-        an old job shouldn't require it still being in this session's
-        memory, unlike abort (nothing real left to stop) or Mark as
-        finished/failed (nothing to override once it's already final and
-        persisted honestly)."""
+        """Fallback for set_alias()/set_note()/set_status()/abort_run() when
+        a run only survives in persisted history (a previous backend
+        session -- self.runs is in-memory and empty again after every
+        restart). Editing metadata, overriding a stuck terminal status, and
+        reconciling a run whose "running" status outlived the session that
+        would have updated it all need to work the same whether the run is
+        still live in this session's memory or not."""
         history = project_manager.load_history(self.project_dir)
         entry = next((h for h in history if h.get("run_id") == run_id), None)
         if entry is None:

@@ -364,6 +364,15 @@ def recompute_draft(internal_name: str, req: DraftRequest):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
     if req.overwrite_run_id:
+        # Deliberately NOT guarded by _reject_relion_run here, unlike the
+        # real start-run/abort/delete endpoints: recomputing a draft is
+        # read-only (nothing is submitted or written), and a job RELION
+        # itself ran still has real settings worth showing, editing, and
+        # copying -- readable straight from its own job.star, the same way
+        # note.txt is. overwrite_target_subdir now resolves a RELION-native
+        # run_id too (see _resolve_overwrite_target), so this Just Works;
+        # the ACTUAL Overwrite action stays blocked for these jobs via
+        # start_run's own _reject_relion_run check below.
         try:
             output_subdir = run_manager.overwrite_target_subdir(req.overwrite_run_id)
         except ValueError as exc:

@@ -257,6 +257,113 @@ def read_relion_job_options(job_dir: Path) -> dict[str, str]:
     }
 
 
+_NOTE_COMMAND_RE = re.compile(r"with the following command\(s\):\s*\n(.+?)\s*\n")
+
+
+def read_relion_last_command(job_dir: Path) -> str:
+    """The exact command RELION's own GUI most recently ran for this job,
+    read straight from its own `note.txt`.
+
+    RELION appends (never overwrites, src/pipeliner.cpp's fn_note is opened
+    with std::ofstream::app) a block to note.txt every time a job runs or
+    is overwritten:
+
+        ++++ Executing new job on <date>
+        ++++ with the following command(s):
+        <the real command, verbatim>
+        ++++
+
+    -- so a job that's been overwritten several times has one block per
+    run; the LAST one is what actually produced the job's current output.
+    This is the one place a RELION-native job's real command survives at
+    all (RELION's own pipeline file records none, same as timestamps --
+    see estimate_job_timestamps), which is what makes an old job's command
+    readable/editable/copy-pasteable here rather than starting blank.
+
+    Returns "" if note.txt doesn't exist or doesn't match this format
+    (RELION 3.0 and earlier wrote a differently-shaped note, or the file
+    was hand-edited) -- not an error, just nothing to show.
+    """
+    note_path = Path(job_dir) / "note.txt"
+    if not note_path.exists():
+        return ""
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    matches = _NOTE_COMMAND_RE.findall(text)
+    return matches[-1].strip() if matches else ""
+
+
+# RELION writes one of these into a job's own directory the moment the
+# program exits (src/pipeline_control.cpp) -- see estimate_job_timestamps.
+_EXIT_MARKER_FILENAMES = (
+    "RELION_JOB_EXIT_SUCCESS",
+    "RELION_JOB_EXIT_FAILURE",
+    "RELION_JOB_EXIT_ABORTED",
+)
+# Written once, at job start, and (for these two) never touched again --
+# job.star is RELION's own registration file; run.out/run.err are RELION-US's
+# equivalent tee target for jobs it ran itself (see job_runner.py's
+# _run_subprocess). Checked in this order because job.star is the most
+# specific signal.
+_START_MARKER_FILENAMES = ("job.star", "run.job", "run.out", "run.err")
+
+
+def estimate_job_timestamps(job_dir: Path, status: str) -> tuple[float | None, float | None]:
+    """Best-effort (started_at, ended_at) for a job with no recorded timing
+    of its own, inferred from the mtimes of files RELION (or RELION-US)
+    writes once at a specific moment rather than the job directory's own
+    mtime (which changes on literally any touch -- browsing it, an rsync,
+    RELION's own GUI re-saving a note -- and is what the earlier "leave it
+    blank" design here was specifically avoiding).
+
+    This is still only an ESTIMATE, not ground truth: if the job directory
+    was copied, rsynced, or the whole project migrated to a new machine
+    *after* the job actually ran, every file's mtime reflects the copy, not
+    the original run -- confirmed against a real downloaded EMPIAR project,
+    where every job's job.star mtime landed within the same few minutes
+    (the download), regardless of when the original lab actually ran them
+    over what would have been weeks. Callers must treat and label whatever
+    this returns as an estimate, never as an authoritative value -- see the
+    `timestamp_estimated` flag on the callers of this function.
+
+    Returns (None, None) if the directory doesn't exist or has none of the
+    expected marker files. `ended_at` is only ever estimated for a status
+    that RELION itself would call finished (not "running"/"pending" --
+    there is no sensible "end" for a job still going).
+    """
+    job_dir = Path(job_dir)
+    if not job_dir.is_dir():
+        return None, None
+
+    def _mtime(name: str) -> float | None:
+        p = job_dir / name
+        try:
+            return p.stat().st_mtime if p.is_file() else None
+        except OSError:
+            return None
+
+    started_at = next(
+        (m for name in _START_MARKER_FILENAMES if (m := _mtime(name)) is not None), None
+    )
+
+    ended_at = None
+    if status not in ("running", "pending"):
+        ended_at = next(
+            (m for name in _EXIT_MARKER_FILENAMES if (m := _mtime(name)) is not None), None
+        )
+        if ended_at is None:
+            # No exit marker (a custom-bridge job, or one that predates
+            # --pipeline_control being appended) -- the later of run.out/
+            # run.err's mtime is the last moment anything was logged, which
+            # is as close to "when it stopped" as this app can infer.
+            candidates = [m for name in ("run.out", "run.err") if (m := _mtime(name)) is not None]
+            ended_at = max(candidates) if candidates else None
+
+    return started_at, ended_at
+
+
 def detect_pipeline_hint(project_dir: Path) -> str:
     """Best-effort 'tomo' | 'spa' | 'mixed' | 'unknown' guess, used only to
     optionally auto-select the Jobs-list SPA/Tomo/All toggle when a project

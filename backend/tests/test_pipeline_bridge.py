@@ -13,6 +13,7 @@ for what it does and does not imitate.
 """
 import asyncio
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -90,6 +91,52 @@ def test_written_job_star_reads_back_through_our_own_reader(tmp_path):
     values = project_manager.read_relion_job_options(tmp_path)
     assert values["nr_classes"] == "50"
     assert values["do_ctf_correction"] == "Yes"
+
+
+# --------------------------------------------------------------------------
+# _rlnJobIsTomo -- RelionJob's own getCommands*Job() dispatches to an
+# entirely different validation/command-building branch depending on this
+# flag (confirmed against a real 3D Auto-refine (tomo) job: hardcoding it to
+# 0 made the pipeliner check the SPA fn_img field, which stays empty for a
+# job actually using in_optimisation, and reject the job outright with
+# "empty field for input STAR file").
+# --------------------------------------------------------------------------
+
+
+def test_is_tomo_true_when_using_the_optimisation_set_input():
+    assert pipeline_bridge._is_tomo_job(
+        {"in_optimisation": "Class3D/job027/run_it050_optimisation_set.star"}
+    ) is True
+
+
+def test_is_tomo_true_when_using_direct_entries():
+    assert pipeline_bridge._is_tomo_job({"use_direct_entries": True}) is True
+
+
+def test_is_tomo_false_for_a_plain_spa_job():
+    """Neither of RELION's tomo input fields is set -- e.g. a genuine SPA
+    Auto-refine using fn_img instead."""
+    assert pipeline_bridge._is_tomo_job({"fn_img": "particles.star"}) is False
+
+
+def test_is_tomo_false_for_an_empty_optimisation_field():
+    """A job type that HAS the in_optimisation field (RELION-US shows it
+    even outside RELION's own --tomo GUI mode) but where it's simply blank
+    must not be misread as tomo."""
+    assert pipeline_bridge._is_tomo_job({"in_optimisation": "", "fn_img": "particles.star"}) is False
+
+
+def test_job_star_declares_is_tomo_for_a_tomo_job(tmp_path):
+    star = pipeline_bridge.write_job_star(
+        tmp_path / "job.star", "relion.refine3d",
+        {"in_optimisation": "Class3D/job027/run_it050_optimisation_set.star"})
+    assert "_rlnJobIsTomo                                 1" in star.read_text()
+
+
+def test_job_star_declares_is_tomo_zero_for_a_spa_job(tmp_path):
+    star = pipeline_bridge.write_job_star(
+        tmp_path / "job.star", "relion.refine3d", {"fn_img": "particles.star"})
+    assert "_rlnJobIsTomo                                 0" in star.read_text()
 
 
 # --------------------------------------------------------------------------
@@ -313,18 +360,48 @@ def test_runner_uses_relions_slot_not_its_own_guess(project):
     assert registered["process_name"] == "Class2D/job007"
 
 
-def test_registration_failure_falls_back_instead_of_losing_the_job(project, monkeypatch):
-    """A job the user asked to run should still run when the pipeline is
-    momentarily unavailable -- it just won't be in RELION's record."""
+def test_registration_failure_raises_for_the_caller_to_handle(project, monkeypatch):
+    """_register_in_relion_pipeline no longer swallows this itself -- it
+    raises, and start_subprocess_job (tested below) is what falls back to
+    this app's own numbering and decides how to surface the reason."""
     project_manager.set_pipeline_sync(project, True)
     m = job_runner.JobRunManager(project)
 
     def boom(*a, **k):
         raise pipeline_bridge.PipelineBridgeError("pipeline is locked")
     monkeypatch.setattr(pipeline_bridge, "register_job", boom)
-    assert m._register_in_relion_pipeline(project, "Class2D", {}) is None
+    with pytest.raises(pipeline_bridge.PipelineBridgeError):
+        m._register_in_relion_pipeline(project, "Class2D", {})
     # ...and the app's own numbering still produces a usable, unused slot
     assert m.prospective_subdir("Class2D", project) == "Class2D/job007"
+
+
+def test_registration_failure_falls_back_and_surfaces_in_the_run(project, monkeypatch):
+    """A job the user asked to run should still run when the pipeline is
+    momentarily unavailable -- it just won't be in RELION's record -- and
+    the reason should land on the run (and its Errors tab) instead of being
+    swallowed, which is what a bare instance attribute nothing ever read
+    used to do here."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+
+    def boom(*a, **k):
+        raise pipeline_bridge.PipelineBridgeError("pipeline is locked")
+    monkeypatch.setattr(pipeline_bridge, "register_job", boom)
+
+    async def go():
+        run = await m.start_subprocess_job("Class2D", "Class2D", "echo hi", subdir="Class2D/job001")
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.job_number is not None   # fell back to the app's own numbering, not lost
+    assert run.pipeline_sync_error is not None
+    assert "pipeline is locked" in run.pipeline_sync_error
+    assert any("pipeline is locked" in line for line in run.stderr_lines)
 
 
 def test_synced_job_appears_once_not_twice_in_the_command_center(project):
@@ -371,6 +448,40 @@ def test_a_job_relion_ran_outside_this_app_still_appears(project):
     assert len(matching) == 1
     assert matching[0]["source"] == "relion"
     assert matching[0]["run_id"] == f"relion:job{registered['job_number']:03d}"
+
+
+def test_a_relion_native_job_gets_an_estimated_timestamp_from_its_job_star(project):
+    """RELION's own pipeline file records no timing at all -- the job.star
+    register_job() just wrote into the job directory is exactly the kind of
+    once-at-start marker estimate_job_timestamps looks for, so a job RELION
+    ran outside this app should still show an (estimated) started_at rather
+    than a permanent blank."""
+    registered = pipeline_bridge.register_job(project, "relion.class2d", {"nr_classes": 4})
+    job_dir = Path(project) / registered["process_name"]
+    assert (job_dir / "job.star").exists()   # the fixture this test relies on
+
+    m = job_runner.JobRunManager(project)
+    rows = m.list_runs(project)
+    entry = next(r for r in rows if r["run_id"] == f"relion:job{registered['job_number']:03d}")
+    assert entry["source"] == "relion"   # still read-only -- estimating timing doesn't change that
+    assert entry["timestamp_estimated"] is True
+    assert entry["started_at"] == pytest.approx((job_dir / "job.star").stat().st_mtime)
+
+
+def test_a_relion_native_job_with_no_directory_gets_no_estimate(project):
+    """A pipeline entry whose job directory doesn't exist on disk (moved,
+    deleted, or a project opened somewhere the files aren't) has nothing to
+    estimate from -- must stay blank, not raise."""
+    registered = pipeline_bridge.register_job(project, "relion.class2d", {"nr_classes": 4})
+    job_dir = Path(project) / registered["process_name"]
+    shutil.rmtree(job_dir)
+
+    m = job_runner.JobRunManager(project)
+    rows = m.list_runs(project)
+    entry = next(r for r in rows if r["run_id"] == f"relion:job{registered['job_number']:03d}")
+    assert entry["exists_on_disk"] is False
+    assert entry["timestamp_estimated"] is False
+    assert entry["started_at"] is None
 
 
 def test_custom_bridges_are_never_registered(project):

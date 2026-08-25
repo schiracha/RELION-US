@@ -261,6 +261,13 @@ html, body {
 .cc-status-badge.status-aborted { background: rgba(226, 88, 77, .15); color: var(--err); }
 .cc-status-badge.status-pending { background: rgba(154, 164, 178, .15); color: var(--text-dim); }
 
+/* A started_at/ended_at/duration inferred from file mtimes rather than
+   recorded by RELION-US itself (see formatTimestamp/formatDuration in
+   app.js and project_manager.estimate_job_timestamps' docstring for why
+   this can be off) -- dashed underline + tooltip, never styled to look
+   like a plain recorded value. */
+.ts-estimated { border-bottom: 1px dashed var(--text-dim); cursor: help; }
+
 /* --- Timeline view -------------------------------------------------------- */
 #ccTimelineList { padding: 20px 16px 20px 28px; position: relative; }
 #ccTimelineList::before {
@@ -884,6 +891,51 @@ html, body {
 .viz-check { display: flex; align-items: center; gap: 5px; font-size: 11px; }
 
 /* ---- Job Progress tab (live charts + class thumbnails) ---- */
+/* The Progress tab is a top/bottom split (charts above, the classic
+   scrolling RELION console below -- see appendOutputLine/
+   renderProgressShell in app.js), so it needs its own flex-column layout
+   rather than the plain scrolling block every other tab-content uses. */
+.tab-content[data-tab-content="progress"].active {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.progress-split-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.progress-split-top { flex: 1 1 auto; min-height: 60px; overflow-y: auto; padding: 8px 10px; }
+.progress-split-handle {
+  flex: 0 0 auto;
+  height: 6px;
+  cursor: row-resize;
+  background: var(--border);
+}
+.progress-split-handle:hover, .progress-split-handle.dragging { background: var(--accent); }
+.progress-live-output {
+  flex: 0 0 auto;
+  height: 160px;
+  min-height: 40px;
+  display: flex;
+  flex-direction: column;
+  background: var(--console-bg);
+}
+.progress-live-output-header {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.progress-live-output-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px 8px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--console-text);
+}
+.progress-live-line { white-space: pre-wrap; word-break: break-all; }
+.progress-live-line.stderr { color: var(--err); }
 .progress-controls {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 6px 2px 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px;

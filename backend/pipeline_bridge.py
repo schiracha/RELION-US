@@ -196,6 +196,37 @@ def _job_option_value(value: Any, option: Optional[dict]) -> str:
     return str(value)
 
 
+def _is_tomo_job(values: dict[str, Any]) -> bool:
+    """Whether this job instance is using RELION's tomo optimisation-set
+    input convention (RelionJob::addTomoInputOptions/getTomoInputCommmand,
+    src/pipeline_jobs.cpp) -- the shared input block Class3D/Inimodel/
+    Autorefine/MultiBody all use in RELION's own tomo GUI mode: an
+    `in_optimisation` STAR file, or (if "OR: use direct entries?" is
+    ticked) the direct in_particles/in_tomograms/in_trajectories fields
+    instead.
+
+    Why this matters here: RelionJob's own is_tomo is normally fixed at GUI
+    *launch* time (`relion` vs `relion --tomo`) and RELION-US has no
+    equivalent -- job_registry.py's draft-command builder deliberately
+    treats is_tomo as an always-false constant for that reason (see its
+    _evaluate_condition docstring). That's fine for what it's used for
+    there (a handful of cosmetic field-visibility conditions), but the
+    _rlnJobIsTomo this function feeds into is different: RELION's own
+    pipeliner reads it back to decide which of TWO ENTIRELY DIFFERENT
+    validation/command-building code paths a job class uses (confirmed via
+    RelionJob::getCommandsAutorefineJob -- the tomo branch checks
+    in_optimisation; the non-tomo branch checks fn_img, and rejects the job
+    with "empty field for input STAR file" if that's blank, which it always
+    is for a job actually using in_optimisation). Registering a real tomo
+    job with is_tomo hardcoded to 0 means the pipeliner validates it against
+    the wrong job class's rules and rejects it outright -- confirmed live
+    against a real 3D Auto-refine (tomo) job. Inferring is_tomo from
+    whether these fields are actually populated is the closest equivalent
+    RELION-US has to "which GUI mode created this job."
+    """
+    return bool(values.get("in_optimisation")) or bool(values.get("use_direct_entries"))
+
+
 def write_job_star(
     path: Path,
     type_label: str,
@@ -204,12 +235,14 @@ def write_job_star(
 ) -> Path:
     """Write a `job.star` in RELION's own format (RelionJob::write).
 
-    Two blocks: `job` (type label, is_continue, is_tomo) and
-    `joboptions_values` (rlnJobOptionVariable / rlnJobOptionValue). Values are
-    quoted, since RELION's STAR reader is whitespace-separated and paths,
-    additional arguments and help-ish strings all contain spaces.
+    Two blocks: `job` (type label, is_continue, is_tomo -- see
+    _is_tomo_job for how the latter is determined) and `joboptions_values`
+    (rlnJobOptionVariable / rlnJobOptionValue). Values are quoted, since
+    RELION's STAR reader is whitespace-separated and paths, additional
+    arguments and help-ish strings all contain spaces.
     """
     options_by_key = options_by_key or {}
+    is_tomo_flag = "1" if _is_tomo_job(values) else "0"
     lines = [
         "",
         "# version 30001",
@@ -218,7 +251,7 @@ def write_job_star(
         "",
         f"_rlnJobTypeLabel                     {type_label}",
         "_rlnJobIsContinue                             0",
-        "_rlnJobIsTomo                                 0",
+        f"_rlnJobIsTomo                                 {is_tomo_flag}",
         "",
         "",
         "# version 30001",
