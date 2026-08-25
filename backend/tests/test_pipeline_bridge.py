@@ -139,6 +139,26 @@ def test_job_star_declares_is_tomo_zero_for_a_spa_job(tmp_path):
     assert "_rlnJobIsTomo                                 0" in star.read_text()
 
 
+def test_is_tomo_true_from_field_values():
+    """Motioncorr/Ctffind have neither in_optimisation nor use_direct_entries
+    -- real RELION has one RelionJob class for either regardless of SPA vs
+    tomo input, so their real is_tomo comes from field_values["is_tomo"],
+    set by job_runner._register_in_relion_pipeline from WHICH of the two
+    menu entries (Motioncorr/TomoMotioncorr, Ctffind/TomoCtffind -- see
+    job_catalog.TOMO_VARIANT_OF) the user actually picked, not a value this
+    function derives itself. Without the right value, every tomo Motioncorr/
+    Ctffind job used to register the wrong output node type in RELION's own
+    pipeline (confirmed against real RELION source: corrected_tilt_series.
+    star/LABEL_MOCORR_TOMOGRAMS vs corrected_micrographs.star/
+    LABEL_MOCORR_MICS)."""
+    assert pipeline_bridge._is_tomo_job(
+        {"input_star_mics": "TomoImport/job001/tilt_series.star", "is_tomo": True}
+    ) is True
+    assert pipeline_bridge._is_tomo_job(
+        {"input_star_mics": "MotionCorr/job002/movies.star", "is_tomo": False}
+    ) is False
+
+
 # --------------------------------------------------------------------------
 # Bootstrapping a brand-new project's default_pipeline.star
 #
@@ -358,6 +378,66 @@ def test_runner_uses_relions_slot_not_its_own_guess(project):
     m = job_runner.JobRunManager(project)
     registered = m._register_in_relion_pipeline(project, "Class2D", {"nr_classes": 3})
     assert registered["process_name"] == "Class2D/job007"
+
+
+def test_manualpick_registers_under_its_real_relion_label(project):
+    """Manualpick is a custom job (backend/custom_jobs.py) now, not a
+    JOB_CATALOG subprocess one -- registration has to fall through to
+    job_catalog.CUSTOM_JOBS's relion.manualpick label to find it at all."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    registered = m._register_in_relion_pipeline(project, "Manualpick", {"fn_in": "mics.star"})
+    assert registered["process_name"] == "ManualPick/job007"
+
+
+def test_tomo_manualpick_registers_under_the_same_label_as_automated_picking(project):
+    """TomoManualPick shares relion.picktomo with the real, automated
+    TomoPickTomograms job (see job_catalog.py's CUSTOM_JOBS docstring) so
+    downstream tomo jobs treat either one's output the same way."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    registered = m._register_in_relion_pipeline(
+        project, "TomoManualPick", {"in_tomoset": "tomograms.star"})
+    assert registered["process_name"] == "Picks/job007"
+
+
+def test_tomo_motioncorr_registers_is_tomo_and_shares_dirname_with_spa_sibling(project):
+    """TomoMotioncorr and Motioncorr register under the SAME real RELION
+    label (relion.motioncorr -- see job_catalog.TOMO_VARIANT_OF) and so land
+    in the same MotionCorr/ dirname RELION's own pipeliner would allocate
+    for either; only _rlnJobIsTomo in the written job.star differs, set from
+    internal_name by _register_in_relion_pipeline."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    registered = m._register_in_relion_pipeline(
+        project, "TomoMotioncorr", {"input_star_mics": "tilt_series.star"})
+    assert registered["process_name"] == "MotionCorr/job007"
+    job_star = (project / registered["process_name"] / "job.star").read_text()
+    assert "_rlnJobIsTomo                                 1" in job_star
+
+
+def test_spa_motioncorr_registers_is_tomo_zero(project):
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    registered = m._register_in_relion_pipeline(
+        project, "Motioncorr", {"input_star_mics": "movies.star"})
+    assert registered["process_name"] == "MotionCorr/job007"
+    job_star = (project / registered["process_name"] / "job.star").read_text()
+    assert "_rlnJobIsTomo                                 0" in job_star
+
+
+def test_plain_custom_bridge_never_even_attempts_registration(project, monkeypatch):
+    """Distinct from Manualpick/TomoManualPick above: a custom.* label
+    (ImodImport etc) is never tried against relion_pipeliner at all, not
+    just expected to fail gracefully -- confirmed here by making
+    register_job blow up if it's ever reached."""
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+
+    def boom(*a, **k):
+        raise AssertionError("register_job should not be called for a custom.* label")
+    monkeypatch.setattr(pipeline_bridge, "register_job", boom)
+    assert m._register_in_relion_pipeline(project, "ImodImport", {}) is None
 
 
 def test_registration_failure_raises_for_the_caller_to_handle(project, monkeypatch):

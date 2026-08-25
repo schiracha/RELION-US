@@ -393,6 +393,19 @@ def test_label_lookup_prefers_the_longest_matching_base():
     assert job_catalog.internal_name_for_label("") is None
 
 
+def test_label_lookup_disambiguates_the_shared_motioncorr_ctffind_label():
+    """relion.motioncorr/relion.ctffind are shared between a SPA and a Tomo
+    menu entry (job_catalog.TOMO_VARIANT_OF) -- the label alone can't say
+    which; is_tomo (read from the job's own job.star by the caller, see
+    project_manager.read_relion_job_is_tomo) does."""
+    assert job_catalog.internal_name_for_label("relion.motioncorr") == "Motioncorr"
+    assert job_catalog.internal_name_for_label("relion.motioncorr", is_tomo=False) == "Motioncorr"
+    assert job_catalog.internal_name_for_label("relion.motioncorr", is_tomo=True) == "TomoMotioncorr"
+    assert job_catalog.internal_name_for_label("relion.ctffind", is_tomo=True) == "TomoCtffind"
+    # A non-ambiguous label ignores is_tomo entirely.
+    assert job_catalog.internal_name_for_label("relion.import", is_tomo=True) == "Import"
+
+
 def test_pipeline_hint_matches_relions_sub_labelled_types(tmp_path):
     """The exact-match version returned "unknown" for every real project,
     silently disabling the SPA/Tomo auto-switch: RELION records
@@ -414,3 +427,45 @@ def test_pipeline_hint_is_unknown_when_only_shared_types_were_run(relion_project
     between the SPA and tomography pipelines, so there is nothing to infer --
     and the toggle is left wherever the user put it."""
     assert project_manager.detect_pipeline_hint(relion_project) == "unknown"
+
+
+def test_command_center_disambiguates_spa_vs_tomo_motioncorr_in_the_same_project(tmp_path):
+    """End-to-end: two Motioncorr processes in the SAME project, one SPA one
+    Tomo, sharing the relion.motioncorr label (job_catalog.TOMO_VARIANT_OF)
+    -- the Command Center listing (job_runner._relion_pipeline_entries)
+    must tell them apart by reading each one's own job.star
+    (_rlnJobIsTomo), not just the shared label."""
+    (tmp_path / "default_pipeline.star").write_text("""
+data_pipeline_general
+
+_rlnPipeLineJobCounter                      3
+
+data_pipeline_processes
+
+loop_
+_rlnPipeLineProcessName #1
+_rlnPipeLineProcessAlias #2
+_rlnPipeLineProcessTypeLabel #3
+_rlnPipeLineProcessStatusLabel #4
+MotionCorr/job001/   None   relion.motioncorr   Succeeded
+MotionCorr/job002/   None   relion.motioncorr   Succeeded
+""")
+    spa_dir = tmp_path / "MotionCorr" / "job001"
+    tomo_dir = tmp_path / "MotionCorr" / "job002"
+    spa_dir.mkdir(parents=True)
+    tomo_dir.mkdir(parents=True)
+    (spa_dir / "job.star").write_text(
+        "\ndata_job\n\n_rlnJobTypeLabel                     relion.motioncorr\n"
+        "_rlnJobIsContinue                             0\n"
+        "_rlnJobIsTomo                                 0\n\n\n"
+    )
+    (tomo_dir / "job.star").write_text(
+        "\ndata_job\n\n_rlnJobTypeLabel                     relion.motioncorr\n"
+        "_rlnJobIsContinue                             0\n"
+        "_rlnJobIsTomo                                 1\n\n\n"
+    )
+
+    entries = job_runner.JobRunManager._relion_pipeline_entries(tmp_path)
+    by_dir = {e["cwd"]: e for e in entries}
+    assert by_dir[str(spa_dir)]["display_name"] == "Motion Correction"
+    assert by_dir[str(tomo_dir)]["display_name"] == "Motion Correction (Tomo)"

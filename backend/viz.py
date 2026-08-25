@@ -265,6 +265,20 @@ _CONTRAST_SAMPLE_SLICES = 24
 _CONTRAST_SAMPLE_STRIDE = 4
 
 
+def _as_3d(data, name: str):
+    """Normalize an mrcfile array to (nz, ny, nx). A 2D image (a plain SPA
+    micrograph, not a tomogram) becomes a 1-slice "volume" -- nz=1 -- so
+    volume_info/_extract_slice/render_slice_png don't need a separate code
+    path for it; the frontend recognizes nz==1 and shows a single flat pane
+    instead of the tri-view (there is no Z axis to browse). Raises for
+    anything that isn't a 2D image or a 3D volume (e.g. a 4D stack)."""
+    if data.ndim == 2:
+        return data[np.newaxis, :, :]
+    if data.ndim == 3:
+        return data
+    raise VizError(f"{name}: not a 2D image or 3D MRC volume (got {data.ndim}D)")
+
+
 def volume_info(project_dir: Path, mrc_path: str) -> dict:
     """Header dims, voxel size, and a robust default contrast (0.5-99.5%
     percentile from a strided slice sample) — without loading the whole
@@ -274,16 +288,19 @@ def volume_info(project_dir: Path, mrc_path: str) -> dict:
     volume (reading every voxel to get a true min/max would defeat the
     memory-mapped design). They exist to give the contrast sliders a sensible
     span, and are named so no caller mistakes them for the volume's true
-    dynamic range."""
+    dynamic range. For a 2D micrograph (see _as_3d) the "sample" is just the
+    one slice -- still cheap, a micrograph is orders of magnitude smaller
+    than a tomogram, so there's no need for the tomogram path's Z-striding."""
     import mrcfile
 
     p = _safe(project_dir, mrc_path)
     if not p.is_file():
         raise VizError(f"tomogram not found: {mrc_path}")
     with mrcfile.mmap(p, mode="r", permissive=True) as mrc:
-        data = mrc.data
-        if data is None or data.ndim != 3:
-            raise VizError(f"{p.name}: not a 3D MRC volume")
+        raw = mrc.data
+        if raw is None:
+            raise VizError(f"{p.name}: not a 2D image or 3D MRC volume")
+        data = _as_3d(raw, p.name)
         nz, ny, nx = data.shape
         try:
             voxel = float(mrc.voxel_size.x)
@@ -362,9 +379,10 @@ def render_slice_png(
     if not p.is_file():
         raise VizError(f"tomogram not found: {mrc_path}")
     with mrcfile.mmap(p, mode="r", permissive=True) as mrc:
-        data = mrc.data
-        if data is None or data.ndim != 3:
-            raise VizError(f"{p.name}: not a 3D MRC volume")
+        raw = mrc.data
+        if raw is None:
+            raise VizError(f"{p.name}: not a 2D image or 3D MRC volume")
+        data = _as_3d(raw, p.name)
         sl = _extract_slice(data, axis, int(index))
     if transpose:
         sl = np.ascontiguousarray(sl.T)

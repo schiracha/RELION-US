@@ -257,11 +257,54 @@ def read_relion_job_options(job_dir: Path) -> dict[str, str]:
     }
 
 
-_NOTE_COMMAND_RE = re.compile(r"with the following command\(s\):\s*\n(.+?)\s*\n")
+def read_relion_job_is_tomo(job_dir: Path) -> bool:
+    """Whether RELION's own job.star declares this job tomo (`_rlnJobIsTomo`,
+    the `data_job` block -- see pipeline_bridge.write_job_star for the format
+    this app itself writes).
+
+    Needed to disambiguate a REAL RELION-native job whose type label alone
+    doesn't say which of a job_catalog.TOMO_VARIANT_OF pair it is --
+    Motioncorr/Ctffind share ONE real RELION type label between their SPA
+    and Tomo menu entries (see that constant's own docstring), unlike every
+    other Tomo/non-Tomo pair, which has a genuinely distinct label.
+
+    Returns False (not an error) if job.star is missing/unreadable or the
+    field itself is absent -- the same "no signal, assume no" default
+    pipeline_bridge._is_tomo_job uses when registering a fresh job.
+    """
+    star_path = Path(job_dir) / "job.star"
+    if not star_path.exists():
+        return False
+    try:
+        from converters.star_io import StarDocument
+
+        block = StarDocument.read(star_path).block("job")
+    except Exception:
+        return False
+    # `data_job` is a STAR *list* block (one label per line, no loop_), same
+    # dict-vs-DataFrame ambiguity as `pipeline_general` in
+    # read_relion_pipeline above -- see that function's own note.
+    if isinstance(block, dict):
+        raw = block.get("rlnJobIsTomo")
+    elif block is not None and not block.empty:
+        raw = block.iloc[0].get("rlnJobIsTomo")
+    else:
+        raw = None
+    if raw is None:
+        return False
+    try:
+        return int(float(raw)) != 0
+    except (TypeError, ValueError):
+        return False
+
+
+_NOTE_COMMAND_RE = re.compile(
+    r"with the following command\(s\):[ \t]*\n(.*?)\n[ \t]*\+\+\+\+", re.DOTALL
+)
 
 
 def read_relion_last_command(job_dir: Path) -> str:
-    """The exact command RELION's own GUI most recently ran for this job,
+    """The exact command(s) RELION's own GUI most recently ran for this job,
     read straight from its own `note.txt`.
 
     RELION appends (never overwrites, src/pipeliner.cpp's fn_note is opened
@@ -279,6 +322,20 @@ def read_relion_last_command(job_dir: Path) -> str:
     all (RELION's own pipeline file records none, same as timestamps --
     see estimate_job_timestamps), which is what makes an old job's command
     readable/editable/copy-pasteable here rather than starting blank.
+
+    "command(s)" is plural for a reason RELION-US's own regex used to
+    ignore: pipeliner.cpp writes ONE LINE PER ENTRY in the job's `commands`
+    vector (`for (icom...) ofs << commands[icom] << endl;`), and several
+    real job types push more than one -- confirmed by counting
+    commands.push_back() calls in pipeline_jobs.cpp: Inimodel (4, e.g. a
+    relion_refine plus a separate relion_align_symmetry -- the SECOND
+    command is the one that actually writes initial_model.mrc, the job's
+    real deliverable), MultiBody/ModelAngelo/TomoReconPart (2 each) and
+    Localres/TomoPickTomograms (3 each). The regex below (DOTALL, capturing
+    up to the closing "++++" marker rather than the first "\n") captures
+    every line in the block, not just the first -- verified against a real
+    multi-command InitialModel job.star from a genuine RELION 5.0.1 project,
+    where the single-line version silently dropped everything after line 1.
 
     Returns "" if note.txt doesn't exist or doesn't match this format
     (RELION 3.0 and earlier wrote a differently-shaped note, or the file
@@ -403,11 +460,25 @@ def detect_pipeline_hint(project_dir: Path) -> str:
     if df.empty or "rlnPipeLineProcessTypeLabel" not in df.columns:
         return "unknown"
 
-    from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY
+    from job_catalog import (
+        AMBIGUOUS_TOMO_LABELS, CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY,
+    )
 
     tomo_labels = {JOB_CATALOG[n][0] for n in PIPELINE_TOMO_ONLY if n in JOB_CATALOG}
     tomo_labels |= {CUSTOM_JOBS[n]["label_new"] for n in PIPELINE_TOMO_ONLY if n in CUSTOM_JOBS}
     spa_labels = {JOB_CATALOG[n][0] for n in PIPELINE_SPA_ONLY if n in JOB_CATALOG}
+    # relion.motioncorr/relion.ctffind are each shared between a SPA and a
+    # Tomo menu entry (job_catalog.TOMO_VARIANT_OF) -- both PIPELINE_SPA_ONLY
+    # and PIPELINE_TOMO_ONLY legitimately contain an internal_name using one
+    # of these labels, so both sets above end up containing it too. Without
+    # this, ANY project that ever ran Motioncorr/Ctffind (nearly all of
+    # them) would register as both spa and tomo and permanently read
+    # "mixed" -- unlike the Command Center's own job-by-job listing, this
+    # heuristic has no per-job job.star to disambiguate with (see
+    # read_relion_job_is_tomo), so the honest answer for these two labels is
+    # "no signal either way", same as before they had their own menu entries.
+    tomo_labels -= AMBIGUOUS_TOMO_LABELS
+    spa_labels -= AMBIGUOUS_TOMO_LABELS
 
     # RELION appends a sub-label to the base type for many jobs
     # (`label += ".movies"`, `".em"`, `".topaz"` -- 35 places in

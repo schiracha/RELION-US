@@ -434,7 +434,18 @@ class JobRunManager:
         for proc in info["processes"]:
             name = proc["name"]                        # e.g. "Class2D/job005"
             job_dir = project_dir / name
-            internal = job_catalog.internal_name_for_label(proc["type_label"])
+            # relion.motioncorr/relion.ctffind are shared between a SPA and
+            # a Tomo menu entry (job_catalog.TOMO_VARIANT_OF) -- the type
+            # label alone can't say which, so this reads the job's own
+            # job.star ONLY for those two labels (AMBIGUOUS_TOMO_LABELS),
+            # not for every job in the project, to keep this per-poll list
+            # from doing per-job file I/O the way it deliberately avoids
+            # everywhere else (see this method's own docstring).
+            is_tomo_hint = (
+                project_manager.read_relion_job_is_tomo(job_dir)
+                if proc["type_label"] in job_catalog.AMBIGUOUS_TOMO_LABELS else False
+            )
+            internal = job_catalog.internal_name_for_label(proc["type_label"], is_tomo=is_tomo_hint)
             display = job_catalog.JOB_CATALOG.get(internal, (None, proc["type_label"]))[1] \
                 if internal else proc["type_label"]
             try:
@@ -561,19 +572,48 @@ class JobRunManager:
         self, project_dir: Path, internal_name: str, field_values: dict
     ) -> Optional[dict]:
         """Ask RELION to allocate and record this job. None if this job type
-        isn't in the catalog (nothing to register). Raises
-        PipelineBridgeError on registration failure -- callers decide how to
-        surface that; see start_subprocess_job, which falls back to this
-        app's own numbering (a job the user asked to run should still run
-        when the pipeline is momentarily locked by an open RELION GUI, or
-        when relion_pipeliner errors on a job type it does not recognise)
-        but puts the reason into the run's own output rather than
-        swallowing it.
+        has no real RELION type label to register under (nothing for
+        relion_pipeliner to recognise). Raises PipelineBridgeError on
+        registration failure -- callers decide how to surface that; see
+        start_subprocess_job, which falls back to this app's own numbering
+        (a job the user asked to run should still run when the pipeline is
+        momentarily locked by an open RELION GUI, or when relion_pipeliner
+        errors on a job type it does not recognise) but puts the reason into
+        the run's own output rather than swallowing it.
+
+        Checks job_catalog.JOB_CATALOG (real relion_* subprocess jobs) first,
+        then job_catalog.CUSTOM_JOBS -- but only a CUSTOM_JOBS entry whose
+        label_new is a REAL RELION type label (relion.*) is worth even
+        trying: relion_pipeliner would just reject anything else outright
+        ("unknown job type label"), and trying anyway would mean a doomed
+        --addJobFromStar subprocess call (with its own pipeline-lock wait)
+        plus a confusing "could not register" warning on EVERY run of a
+        plain custom.* job (the IMOD/Warp/DeepETPicker/AreTomo2 import
+        bridges) that was never meant to register at all -- same as before
+        this method knew about CUSTOM_JOBS. Manualpick/TomoManualPick (the
+        in-browser picking jobs) are the real-label case this exists for:
+        relion.manualpick / relion.picktomo, so they show up correctly in
+        RELION's own GUI and their output is a valid input to real
+        downstream RELION jobs -- see CUSTOM_JOBS's own docstring in
+        job_catalog.py.
+
+        TomoMotioncorr/TomoCtffind (job_catalog.TOMO_VARIANT_OF) register
+        under the SAME label as their SPA sibling (Motioncorr/Ctffind --
+        real RELION has only the one class for either, is_tomo is a runtime
+        flag inside it, not a separate label) -- field_values["is_tomo"] is
+        set here from internal_name, the same way job_registry._build_draft_
+        command sets it for the command this job actually runs, so
+        write_job_star's _rlnJobIsTomo (and the output nodes RELION's own
+        pipeliner computes from it) matches what really happened.
         """
         meta = job_catalog.JOB_CATALOG.get(internal_name)
-        if not meta:
-            return None
-        type_label = meta[0]
+        if meta:
+            type_label = meta[0]
+        else:
+            custom_meta = job_catalog.CUSTOM_JOBS.get(internal_name)
+            type_label = custom_meta["label_new"] if custom_meta else ""
+            if not type_label.startswith("relion."):
+                return None
         try:
             import job_registry
 
@@ -582,8 +622,10 @@ class JobRunManager:
             }
         except Exception:
             options_by_key = {}
+        field_values = dict(field_values or {})
+        field_values["is_tomo"] = internal_name in job_catalog.TOMO_VARIANT_OF
         return pipeline_bridge.register_job(
-            project_dir, type_label, field_values or {}, options_by_key)
+            project_dir, type_label, field_values, options_by_key)
 
     def sync_completion_to_relion(self, project_dir: Optional[Path] = None) -> bool:
         """Let RELION notice that a job finished (it reads the exit files the
@@ -1096,20 +1138,33 @@ class JobRunManager:
         runner_coro_factory: a callable taking the job's own output directory
         and returning a coroutine that does the actual work and returns a
         human-readable summary string (or raises). Used by custom_jobs.py for
-        the IMOD/Warp/DeepETPicker/AreTomo2 bridges, which call converters/
-        directly instead of spawning a subprocess. It receives the job dir so
-        its outputs land in `<JobDir>/jobNNN/` -- the same directory the
-        Outputs tab, Clean and Delete operate on -- rather than the project
-        root, which would leave the tracked job dir empty and let successive
-        runs silently overwrite each other's results.
+        the IMOD/Warp/DeepETPicker/AreTomo2/manual-picking bridges, which
+        call converters/ (or the picker) directly instead of spawning a
+        subprocess. It receives the job dir so its outputs land in
+        `<JobDir>/jobNNN/` -- the same directory the Outputs tab, Clean and
+        Delete operate on -- rather than the project root, which would leave
+        the tracked job dir empty and let successive runs silently overwrite
+        each other's results.
 
         overwrite_run_id: same "Overwrite" semantics as
         start_subprocess_job() -- reuses the original run's run_id/cwd/
         job_number/alias/note (same job slot) instead of allocating new
         ones. Same restrictions (must exist, not still running, same
         project) apply.
+
+        Registers in RELION's own pipeline the same way start_subprocess_job
+        does (when two-way sync is on) -- a custom job is real work with real
+        outputs, and a user who turned sync on wants to see ALL their jobs in
+        RELION's own GUI, not just the ones that happen to shell out to a
+        real relion_* binary. There is no real subprocess here for
+        `--pipeline_control` to instrument, so _run_custom writes the
+        RELION_JOB_EXIT_* marker file itself once the coroutine finishes --
+        the same file a real RELION program would have written, which is all
+        `relion_pipeliner --check_job_completion` (called from there, exactly
+        like _run_subprocess) actually looks for.
         """
         project_dir = self.project_dir
+        pipeline_sync_error = None
 
         if overwrite_run_id is not None:
             target = self._resolve_overwrite_target(overwrite_run_id, project_dir)
@@ -1117,11 +1172,31 @@ class JobRunManager:
             cwd = Path(target["cwd"])
             job_number = target["job_number"]
             alias, note = target["alias"], target["note"]
+            registered = self.pipeline_sync_enabled(project_dir)
         else:
             run_id = self.new_run_id()
-            job_number = self._next_job_number(project_dir, internal_name)
-            cwd = project_dir / f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
+            registered = None
+            if self.pipeline_sync_enabled(project_dir):
+                try:
+                    registered = self._register_in_relion_pipeline(
+                        project_dir, internal_name, field_values or {})
+                except pipeline_bridge.PipelineBridgeError as exc:
+                    pipeline_sync_error = str(exc)
+            if registered:
+                job_number = registered["job_number"]
+                cwd = project_dir / registered["process_name"]
+            else:
+                job_number = self._next_job_number(project_dir, internal_name)
+                cwd = project_dir / f"{job_catalog.job_dirname(internal_name)}/job{job_number:03d}"
             alias, note = "", ""
+            if registered:
+                pipeline_sync_error = None
+            elif pipeline_sync_error:
+                pipeline_sync_error = (
+                    f"[RELION-US] Could not register this job in RELION's own "
+                    f"pipeline: {pipeline_sync_error} Continuing with this app's "
+                    f"own job numbering instead -- the job itself is unaffected."
+                )
         cwd.mkdir(parents=True, exist_ok=True)
 
         detect_text = " ".join(str(v) for v in (field_values or {}).values())
@@ -1136,20 +1211,27 @@ class JobRunManager:
             project_dir=str(project_dir),
             job_number=job_number,
             field_values=field_values,
+            pipeline_sync_error=pipeline_sync_error,
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
         )
         self.runs[run_id] = run
         self._persist(run)
-        run.task = asyncio.create_task(self._run_custom(run, runner_coro_factory, cwd))
+        run.task = asyncio.create_task(
+            self._run_custom(run, runner_coro_factory, cwd, registered=bool(registered)))
         return run
 
-    async def _run_custom(self, run: JobRun, runner_coro_factory, job_dir: Path) -> None:
+    async def _run_custom(
+        self, run: JobRun, runner_coro_factory, job_dir: Path, registered: bool = False
+    ) -> None:
         if run.abort_requested:
             return  # aborted before this task got scheduled; see _run_subprocess
         run.status = STATUS_RUNNING
         run.started_at = time.time()
         self._persist(run)
         await run.broadcast({"type": "status", "status": run.status})
+        if run.pipeline_sync_error:
+            run.stderr_lines.append(run.pipeline_sync_error)
+            await run.broadcast({"type": "stderr", "line": run.pipeline_sync_error})
         try:
             result = await runner_coro_factory(job_dir)
             for line in str(result).splitlines() or ["(no output)"]:
@@ -1170,6 +1252,26 @@ class JobRunManager:
         finally:
             run.ended_at = time.time()
             self._persist(run)
+            if registered:
+                marker = {
+                    STATUS_COMPLETED: "RELION_JOB_EXIT_SUCCESS",
+                    STATUS_FAILED: "RELION_JOB_EXIT_FAILURE",
+                    STATUS_ABORTED: "RELION_JOB_EXIT_ABORTED",
+                }.get(run.status)
+                if marker:
+                    try:
+                        (job_dir / marker).touch()
+                    except OSError:
+                        pass
+                synced = await asyncio.to_thread(
+                    self.sync_completion_to_relion, Path(run.project_dir))
+                if not synced:
+                    note = ("[RELION-US] Could not update RELION's pipeline with this "
+                            "job's final status. The job itself is unaffected; run "
+                            "`relion_pipeliner --check_job_completion` in the project, "
+                            "or open RELION's GUI, to refresh it.")
+                    run.stdout_lines.append(note)
+                    await run.broadcast({"type": "stdout", "line": note})
             await run.broadcast({"type": "status", "status": run.status, "exit_code": run.exit_code})
 
     # --- Command Center job actions -----------------------------------

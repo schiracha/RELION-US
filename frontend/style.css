@@ -857,6 +857,14 @@ html, body {
 /* Before a volume is loaded the panels are empty boxes; don't show three
    black rectangles at the user. */
 .viz-ortho:not(.loaded) .viz-panel { background: transparent; border: 1px dashed var(--border); }
+/* A 2D image (SPA micrograph) has no Z axis -- see layoutStage()'s "flat"
+   branch. Only the main XY panel gets a grid-template (set inline, in JS,
+   from the actual image aspect ratio), so the ZY/XZ siblings need to be out
+   of that single-cell grid's flow entirely, not just hidden in place. */
+.viz-ortho-flat .viz-panel[data-panel="zy"],
+.viz-ortho-flat .viz-panel[data-panel="xz"],
+.viz-ortho-flat .viz-corner { display: none; }
+.viz-ortho-flat { grid-template-areas: "xy"; }
 .viz-meta { font-size: 11px; color: var(--text-dim); padding: 6px 2px 0; }
 
 .viz-side {

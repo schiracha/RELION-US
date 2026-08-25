@@ -203,28 +203,47 @@ def _is_tomo_job(values: dict[str, Any]) -> bool:
     Autorefine/MultiBody all use in RELION's own tomo GUI mode: an
     `in_optimisation` STAR file, or (if "OR: use direct entries?" is
     ticked) the direct in_particles/in_tomograms/in_trajectories fields
-    instead.
+    instead. Motioncorr/Ctffind take a third route, below.
 
     Why this matters here: RelionJob's own is_tomo is normally fixed at GUI
     *launch* time (`relion` vs `relion --tomo`) and RELION-US has no
-    equivalent -- job_registry.py's draft-command builder deliberately
-    treats is_tomo as an always-false constant for that reason (see its
-    _evaluate_condition docstring). That's fine for what it's used for
-    there (a handful of cosmetic field-visibility conditions), but the
-    _rlnJobIsTomo this function feeds into is different: RELION's own
-    pipeliner reads it back to decide which of TWO ENTIRELY DIFFERENT
-    validation/command-building code paths a job class uses (confirmed via
-    RelionJob::getCommandsAutorefineJob -- the tomo branch checks
-    in_optimisation; the non-tomo branch checks fn_img, and rejects the job
-    with "empty field for input STAR file" if that's blank, which it always
-    is for a job actually using in_optimisation). Registering a real tomo
-    job with is_tomo hardcoded to 0 means the pipeliner validates it against
-    the wrong job class's rules and rejects it outright -- confirmed live
-    against a real 3D Auto-refine (tomo) job. Inferring is_tomo from
-    whether these fields are actually populated is the closest equivalent
-    RELION-US has to "which GUI mode created this job."
+    equivalent GUI-mode concept -- but the _rlnJobIsTomo this function feeds
+    into is read back by RELION's own pipeliner to decide which of TWO
+    ENTIRELY DIFFERENT validation/command-building code paths a job class
+    uses (confirmed via RelionJob::getCommandsAutorefineJob -- the tomo
+    branch checks in_optimisation; the non-tomo branch checks fn_img, and
+    rejects the job with "empty field for input STAR file" if that's blank,
+    which it always is for a job actually using in_optimisation). Registering
+    a real tomo job with is_tomo hardcoded to 0 means the pipeliner validates
+    it against the wrong job class's rules and rejects it outright --
+    confirmed live against a real 3D Auto-refine (tomo) job. Inferring
+    is_tomo from whether these fields are actually populated is the closest
+    equivalent RELION-US has to "which GUI mode created this job," for the
+    Class3D/Inimodel/Autorefine/MultiBody family.
+
+    Motioncorr/Ctffind have no in_optimisation-style field at all -- real
+    RELION has exactly one RelionJob class for each, with is_tomo a runtime
+    flag inside it rather than a field a user fills in (see
+    initialiseMotioncorrJob/initialiseCtffindJob's own is_tomo-conditioned
+    JobOption sets). RELION-US gives each its own menu entry instead of a
+    same-popup toggle (job_catalog.TOMO_VARIANT_OF: TomoMotioncorr/
+    TomoCtffind share their SPA sibling's label_new, since it's genuinely
+    the same real job type either way) -- job_runner._register_in_relion_
+    pipeline sets field_values["is_tomo"] from which menu entry was picked
+    before calling register_job, which is what write_job_star below reads.
+    The pipeliner's output-node bookkeeping for these two (corrected_tilt_
+    series.star + LABEL_MOCORR_TOMOGRAMS vs corrected_micrographs.star +
+    LABEL_MOCORR_MICS, and similarly for Ctffind's tilt_series_ctf.star)
+    depends on the same _rlnJobIsTomo flag, so it needs the same real
+    answer. job_registry.py's draft command builder derives is_tomo the same
+    way, from internal_name, for the identical reason -- see
+    _build_draft_command and _evaluate_condition.
     """
-    return bool(values.get("in_optimisation")) or bool(values.get("use_direct_entries"))
+    return (
+        bool(values.get("in_optimisation"))
+        or bool(values.get("use_direct_entries"))
+        or bool(values.get("is_tomo"))
+    )
 
 
 def write_job_star(

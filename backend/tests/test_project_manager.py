@@ -328,6 +328,57 @@ def test_read_last_command_uses_the_most_recent_of_several_runs(tmp_path):
     assert "--iter 50" in project_manager.read_relion_last_command(d)
 
 
+def test_read_last_command_captures_every_line_of_a_multi_command_job(tmp_path):
+    """pipeliner.cpp writes one line per entry in the job's `commands`
+    vector, and several real job types push more than one -- e.g. Inimodel
+    (relion_refine, then a separate relion_align_symmetry that's the step
+    which actually writes initial_model.mrc, the job's real deliverable).
+    Confirmed against a real multi-command InitialModel job.star from a
+    genuine RELION 5.0.1 project: the single-line-only version of this regex
+    silently dropped everything after the first line."""
+    d = tmp_path / "job021"
+    d.mkdir()
+    (d / "note.txt").write_text(
+        " ++++ Executing new job on Wed Aug 12 13:30:46 2026\n"
+        " ++++ with the following command(s): \n"
+        "`which relion_refine` --o InitialModel/job021/run --iter 100\n"
+        "rm -f InitialModel/job021/RELION_JOB_EXIT_SUCCESS\n"
+        "`which relion_align_symmetry` --i InitialModel/job021/run_it100_model.star"
+        " --o InitialModel/job021/initial_model.mrc --sym C1\n"
+        "touch InitialModel/job021/RELION_JOB_EXIT_SUCCESS\n"
+        " ++++ \n"
+    )
+    cmd = project_manager.read_relion_last_command(d)
+    assert "relion_refine" in cmd
+    assert "relion_align_symmetry" in cmd
+    assert "initial_model.mrc" in cmd
+    assert cmd.count("\n") == 3  # all 4 lines survived
+
+
+def test_read_last_command_multi_line_still_uses_the_most_recent_run(tmp_path):
+    """A multi-line block must not bleed into the next one -- the capture
+    has to stop at ITS OWN closing "++++" marker, not the file's last one."""
+    d = tmp_path / "job021"
+    d.mkdir()
+    (d / "note.txt").write_text(
+        " ++++ Executing new job on Wed Aug 12 13:00:00 2026\n"
+        " ++++ with the following command(s): \n"
+        "relion_refine --o InitialModel/job021/run --iter 10\n"
+        "relion_align_symmetry --o InitialModel/job021/initial_model.mrc\n"
+        " ++++ \n"
+        " ++++ Executing new job on Wed Aug 12 14:00:00 2026\n"
+        " ++++ with the following command(s): \n"
+        "relion_refine --o InitialModel/job021/run --iter 100\n"
+        "relion_align_symmetry --o InitialModel/job021/initial_model.mrc --sym C1\n"
+        " ++++ \n"
+    )
+    cmd = project_manager.read_relion_last_command(d)
+    assert "--iter 10\n" not in cmd  # the FIRST block's line, not "--iter 100"'s prefix
+    assert "--iter 100" in cmd
+    assert cmd.count("relion_align_symmetry") == 1
+    assert "--sym C1" in cmd
+
+
 def test_read_last_command_missing_note_file_returns_empty(tmp_path):
     assert project_manager.read_relion_last_command(tmp_path / "job001") == ""
 
@@ -337,6 +388,49 @@ def test_read_last_command_unrecognized_format_returns_empty(tmp_path):
     d.mkdir()
     (d / "note.txt").write_text("just a free-text note, no command block here\n")
     assert project_manager.read_relion_last_command(d) == ""
+
+
+# --------------------------------------------------------------------------
+# read_relion_job_is_tomo -- disambiguates a REAL RELION-native job whose
+# type label alone can't say SPA vs Tomo (relion.motioncorr/relion.ctffind,
+# see job_catalog.TOMO_VARIANT_OF).
+# --------------------------------------------------------------------------
+
+
+def _write_job_star_with_is_tomo(job_dir, is_tomo_value):
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "job.star").write_text(
+        "\n# version 30001\n\ndata_job\n\n"
+        "_rlnJobTypeLabel                     relion.motioncorr\n"
+        "_rlnJobIsContinue                             0\n"
+        f"_rlnJobIsTomo                                 {is_tomo_value}\n\n\n"
+    )
+
+
+def test_read_relion_job_is_tomo_true(tmp_path):
+    d = tmp_path / "MotionCorr" / "job001"
+    _write_job_star_with_is_tomo(d, 1)
+    assert project_manager.read_relion_job_is_tomo(d) is True
+
+
+def test_read_relion_job_is_tomo_false(tmp_path):
+    d = tmp_path / "MotionCorr" / "job002"
+    _write_job_star_with_is_tomo(d, 0)
+    assert project_manager.read_relion_job_is_tomo(d) is False
+
+
+def test_read_relion_job_is_tomo_missing_job_star_returns_false(tmp_path):
+    assert project_manager.read_relion_job_is_tomo(tmp_path / "job003") is False
+
+
+def test_read_relion_job_is_tomo_missing_field_returns_false(tmp_path):
+    d = tmp_path / "MotionCorr" / "job004"
+    d.mkdir(parents=True)
+    (d / "job.star").write_text(
+        "\ndata_job\n\n_rlnJobTypeLabel                     relion.motioncorr\n"
+        "_rlnJobIsContinue                             0\n\n\n"
+    )
+    assert project_manager.read_relion_job_is_tomo(d) is False
 
 
 # --------------------------------------------------------------------------

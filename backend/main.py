@@ -163,6 +163,7 @@ import progress
 import pipeline_bridge
 import program_help
 import project_manager
+import manual_pick
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
 from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
@@ -360,7 +361,10 @@ def recompute_draft(internal_name: str, req: DraftRequest):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         raise HTTPException(status_code=400, detail="Custom jobs don't use draft commands")
     try:
-        raw = job_registry._load_raw()[internal_name]
+        # raw_job() (not _load_raw()[internal_name] directly) resolves a
+        # job_catalog.TOMO_VARIANT_OF entry (TomoMotioncorr/TomoCtffind) to
+        # its real RELION job class's raw data -- see its own docstring.
+        raw = job_registry.raw_job(internal_name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
     if req.overwrite_run_id:
@@ -1084,6 +1088,74 @@ def viz_picks(req: VizPicksRequest):
             run_manager.project_dir, req.particles_path, req.tomo_name, req.volume
         )
     except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --------------------------------------------------------------------------
+# Manual picking (Manualpick / TomoManualPick) -- the in-browser picker
+# (viz.py's viewer, with picking enabled) saves/loads into a specific job's
+# own output directory, rather than the standalone Visualize tool's
+# arbitrary-file read-only mode above. See manual_pick.py's module docstring
+# for the STAR formats this writes.
+# --------------------------------------------------------------------------
+
+
+def _manual_pick_job_dir(run_id: str) -> Path:
+    """The output directory of a manual-picking job, by run_id -- 404 if the
+    run doesn't exist, matching every other run_id-scoped endpoint."""
+    run = run_manager.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return Path(run.cwd)
+
+
+class SpaPickSaveRequest(BaseModel):
+    mic_path: str
+    picks: list[dict]
+
+
+@app.get("/api/manual-pick/{run_id}/spa/micrographs")
+def manual_pick_spa_micrographs(run_id: str, fn_in: str = Query(...)):
+    try:
+        return {"micrographs": manual_pick.list_spa_micrographs(run_manager.project_dir, fn_in)}
+    except manual_pick.ManualPickError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/manual-pick/{run_id}/spa/load")
+def manual_pick_spa_load(run_id: str, mic_path: str = Query(...)):
+    job_dir = _manual_pick_job_dir(run_id)
+    return {"picks": manual_pick.load_spa_picks(run_manager.project_dir, job_dir, mic_path)}
+
+
+@app.post("/api/manual-pick/{run_id}/spa/save")
+def manual_pick_spa_save(run_id: str, req: SpaPickSaveRequest):
+    job_dir = _manual_pick_job_dir(run_id)
+    try:
+        return manual_pick.save_spa_picks(run_manager.project_dir, job_dir, req.mic_path, req.picks)
+    except (manual_pick.ManualPickError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class TomoPickSaveRequest(BaseModel):
+    tomo_name: str
+    picks: list[dict]
+    tomograms_star_path: str
+
+
+@app.get("/api/manual-pick/{run_id}/tomo/load")
+def manual_pick_tomo_load(run_id: str, tomo_name: str = Query(...)):
+    job_dir = _manual_pick_job_dir(run_id)
+    return {"picks": manual_pick.load_tomo_picks(run_manager.project_dir, job_dir, tomo_name)}
+
+
+@app.post("/api/manual-pick/{run_id}/tomo/save")
+def manual_pick_tomo_save(run_id: str, req: TomoPickSaveRequest):
+    job_dir = _manual_pick_job_dir(run_id)
+    try:
+        return manual_pick.save_tomo_picks(
+            run_manager.project_dir, job_dir, req.tomo_name, req.picks, req.tomograms_star_path)
+    except (manual_pick.ManualPickError, viz.VizError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 

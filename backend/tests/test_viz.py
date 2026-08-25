@@ -73,6 +73,41 @@ def test_particles_only_star_needs_mrc(tmp_path):
     assert info.get("needs_mrc") is True
 
 
+def _make_micrograph(tmp_path, name="mic001.mrc"):
+    """A plain 2D SPA micrograph -- no Z axis, unlike _make_project's
+    tomogram. Manual picking (SPA) needs the viewer to handle these too."""
+    (tmp_path / ".relion_us").mkdir(exist_ok=True)
+    img = (np.random.rand(50, 40) * 100).astype(np.float32)  # y, x -- 2D
+    with mrcfile.new(tmp_path / name, overwrite=True) as m:
+        m.set_data(img)
+        m.voxel_size = 1.5
+    return tmp_path
+
+
+def test_volume_info_handles_a_2d_micrograph(tmp_path):
+    """A 2D image is exposed as a 1-slice volume (nz=1) rather than
+    rejected -- SPA manual picking has no Z axis, unlike tomography."""
+    _make_micrograph(tmp_path)
+    vi = viz.volume_info(tmp_path, "mic001.mrc")
+    assert (vi["nx"], vi["ny"], vi["nz"]) == (40, 50, 1)
+    assert vi["voxel_size"] == pytest.approx(1.5)
+
+
+def test_render_slice_handles_a_2d_micrograph(tmp_path):
+    _make_micrograph(tmp_path)
+    png = viz.render_slice_png(tmp_path, "mic001.mrc", "z", 0)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_4d_stack_is_rejected(tmp_path):
+    (tmp_path / ".relion_us").mkdir(exist_ok=True)
+    stack = (np.random.rand(2, 5, 6, 7) * 100).astype(np.float32)
+    with mrcfile.new(tmp_path / "stack.mrcs", overwrite=True) as m:
+        m.set_data(stack)
+    with pytest.raises(viz.VizError, match="not a 2D image or 3D"):
+        viz.volume_info(tmp_path, "stack.mrcs")
+
+
 def test_path_traversal_blocked(tmp_path):
     _make_project(tmp_path)
     with pytest.raises(viz.VizError, match="outside the project"):

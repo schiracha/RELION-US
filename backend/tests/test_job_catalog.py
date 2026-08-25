@@ -71,8 +71,20 @@ def test_unmapped_key_on_an_overridden_job_still_gets_defaults():
 
 
 def test_plain_flag_override_has_no_condition_and_is_not_negated():
+    assert draft_flag_for("Motioncorr", "do_dose_weighting") == "--dose_weighting"
+    assert draft_flag_condition_for("Motioncorr", "do_dose_weighting") is None
+    assert draft_flag_is_negated("Motioncorr", "do_dose_weighting") is False
+
+
+def test_ctffind_use_nodw_is_spa_only():
+    # use_noDW is genuinely SPA-only in real RELION (initialiseCtffindJob
+    # only creates this JobOption `if (!is_tomo)`) -- unlike Motioncorr's
+    # do_dose_weighting above, this override carries a real condition so it
+    # stops being emitted once the SPA/Tomo toggle (frontend TOMO_TOGGLE_JOBS)
+    # sends field_values["is_tomo"] = True. See job_catalog.py's Ctffind
+    # entry for the full reasoning.
     assert draft_flag_for("Ctffind", "use_noDW") == "--use_noDW"
-    assert draft_flag_condition_for("Ctffind", "use_noDW") is None
+    assert draft_flag_condition_for("Ctffind", "use_noDW") == "!is_tomo"
     assert draft_flag_is_negated("Ctffind", "use_noDW") is False
 
 

@@ -16,6 +16,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import job_registry
+import manual_pick
+import viz
 from converters import aretomo_bridge, deepetpicker_bridge, imod_bridge, warp_bridge
 from converters.star_io import backup_before_overwrite, write_particles
 
@@ -53,7 +56,61 @@ def _opt_float(value) -> float | None:
 # frontend renders them identically. All fields are "standard" (no advanced
 # tab needed — these are already small, focused jobs).
 
+
+def _picker_definition(internal_name: str, real_job_name: str, label_new: str,
+                        display_name: str, description: str, picker_kind: str) -> dict:
+    """Manualpick/TomoManualPick reuse the REAL RELION option list/layout
+    (job_registry.raw_job(real_job_name), still present in
+    data/job_definitions_raw.json even though job_catalog.JOB_CATALOG no
+    longer lists Manualpick as a real subprocess job -- see job_catalog.py's
+    CUSTOM_JOBS docstring) rather than hand-picking a subset. That keeps the
+    Inputs tab identical to what real RELION's own GUI would show for the
+    same job type, which is what makes the job.star this ultimately
+    registers (see run_manual_pick/run_tomo_manual_pick below) a genuinely
+    realistic one -- every field a real relion_manualpick/
+    relion_python_tomo_pick job would have, not just the handful this app's
+    own picker actually uses.
+
+    picker_kind ("spa" | "tomo") tags the popup so app.js knows to show the
+    Picker button/embedded viewer instead of (custom jobs') plain Run
+    button, and which manual_pick.py functions + /api/manual-pick/* routes
+    to call.
+    """
+    raw = job_registry.raw_job(real_job_name)
+    return {
+        "internal_name": internal_name,
+        "label_new": label_new,
+        "display_name": display_name,
+        "category": "Particle Picking",
+        "description": description,
+        "options": raw.get("options", []),
+        "standard_groups": job_registry._standard_groups(raw),
+        # default_values is NOT set here -- main.py's _custom_job_definition()
+        # always derives it fresh from each option's own "default" for every
+        # custom job (the single source of truth for all of them, not just
+        # these two), so anything set here would be dead and misleadingly
+        # imply otherwise.
+        "program_guess": (
+            f"(no subprocess -- see backend/manual_pick.py; picking happens in "
+            f"the in-browser viewer, not {raw.get('program_guess', 'the real binary')})"
+        ),
+        "flags_used": [],
+        "commands_source": raw.get("commands_source", ""),
+        "is_custom": True,
+        "is_picker": True,
+        "picker_kind": picker_kind,
+    }
+
+
 CUSTOM_JOB_DEFINITIONS = {
+    "Manualpick": _picker_definition(
+        "Manualpick", "Manualpick", "relion.manualpick", "Manual Picking",
+        "Manually pick particle coordinates from micrographs", "spa",
+    ),
+    "TomoManualPick": _picker_definition(
+        "TomoManualPick", "TomoPickTomograms", "relion.picktomo", "Manual Picking (Tomo)",
+        "Manually pick particles in tomograms", "tomo",
+    ),
     "ImodImport": {
         "internal_name": "ImodImport",
         "label_new": "custom.imod_import",
@@ -252,7 +309,62 @@ async def run_aretomo_import(project_dir: Path, values: dict, job_dir: Path) -> 
     return await asyncio.to_thread(work)
 
 
+async def run_manual_pick(project_dir: Path, values: dict, job_dir: Path) -> str:
+    """Doesn't pick anything itself -- just validates the input micrographs
+    resolve to something real and reports how many, so the popup's summary
+    line isn't blank. The actual picking happens afterward, through the
+    Picker button (app.js), which reads/writes this job's own directory via
+    /api/manual-pick/{run_id}/spa/* -- see manual_pick.py. Completing
+    immediately (rather than staying "running" the way real RELION's
+    Manualpick does while its picker window is open) is deliberate: this
+    app's job-run model is one-shot, and there is no harm in a "completed"
+    job whose output directory keeps gaining picks after the fact -- Extract
+    reads whatever manualpick.star says at ITS OWN run time, same as it
+    would for a real Manualpick job reopened and re-picked."""
+    fn_in = values.get("fn_in", "")
+    if not fn_in:
+        raise ValueError("Input micrographs field is required.")
+
+    def work():
+        mics = manual_pick.list_spa_micrographs(project_dir, fn_in)
+        return (
+            f"Found {len(mics)} micrograph(s) in {fn_in}.\n"
+            f"Use the Picker button above to open the viewer and start picking "
+            f"-- picks save into this job's own directory as you go, and this "
+            f"job's outputs stay valid for Extract to read even after you close "
+            f"the picker."
+        )
+
+    return await asyncio.to_thread(work)
+
+
+async def run_tomo_manual_pick(project_dir: Path, values: dict, job_dir: Path) -> str:
+    """Tomogram counterpart of run_manual_pick above -- same one-shot-
+    completion reasoning. Only point picking (pick_mode "Particles") is
+    wired up on the viewer side right now; other pick_mode choices (helical
+    filaments, spheres, surfaces) still round-trip into job.star (real
+    RELION option, kept for a native-GUI-repair later) but the picker
+    doesn't yet do anything different for them."""
+    in_tomoset = values.get("in_tomoset", "")
+    if not in_tomoset:
+        raise ValueError("Input tomograms.star field is required.")
+
+    def work():
+        tomograms = viz._tomograms_from_star(project_dir, viz._safe(project_dir, in_tomoset))
+        return (
+            f"Found {len(tomograms)} tomogram(s) in {in_tomoset}.\n"
+            f"Use the Picker button above to open the viewer and start picking "
+            f"-- picks save into this job's own directory as you go, and this "
+            f"job's outputs (particles.star + optimisation_set.star) stay valid "
+            f"for TomoSubtomo to read even after you close the picker."
+        )
+
+    return await asyncio.to_thread(work)
+
+
 CUSTOM_JOB_RUNNERS = {
+    "Manualpick": run_manual_pick,
+    "TomoManualPick": run_tomo_manual_pick,
     "ImodImport": run_imod_import,
     "WarpImport": run_warp_import,
     "DeepETPickerImport": run_deepetpicker_import,

@@ -46,15 +46,26 @@ JOB_CATALOG = {
     "TomoImport":                ("relion.importtomo", "Import Tomo Tilt Series", "Import & Conversion",
                                    "Import for tomography GUI"),
     "Motioncorr":                ("relion.motioncorr", "Motion Correction", "Motion Correction",
-                                   "Motion-correct movies/tilt-series frames"),
+                                   "Motion-correct movies"),
+    # See TOMO_VARIANT_OF below: real RELION has exactly one RelionJob class
+    # for Motioncorr/Ctffind, with is_tomo a runtime flag inside it rather
+    # than a separate class (unlike every other Tomo/non-Tomo pair in this
+    # table, e.g. Ctfrefine/TomoCtfRefine right below, which really are two
+    # distinct classes/labels). RELION-US still gives each its own menu
+    # entry -- same label_new as its SPA sibling, since it registers as the
+    # exact same real RELION job type -- for consistency with every other
+    # pair here and with the sidebar's SPA/Tomo/All filter, rather than a
+    # same-popup toggle a user could forget to flip.
+    "TomoMotioncorr":            ("relion.motioncorr", "Motion Correction (Tomo)", "Motion Correction",
+                                   "Motion-correct tilt-series frames"),
     "Ctffind":                   ("relion.ctffind", "CTF Estimation", "CTF",
-                                   "Estimate CTF parameters from micrographs for either entire micrographs and/or particles"),
+                                   "Estimate CTF parameters from micrographs"),
+    "TomoCtffind":               ("relion.ctffind", "CTF Estimation (Tomo)", "CTF",
+                                   "Estimate CTF parameters for tilt-series"),
     "Ctfrefine":                 ("relion.ctfrefine", "CTF Refinement", "CTF",
                                    "Defocus and beamtilt optimisation"),
     "TomoCtfRefine":             ("relion.ctfrefinetomo", "CTF Refinement (Tomo)", "CTF",
                                    "CTF refinement (defocus & aberrations) for tomography"),
-    "Manualpick":                ("relion.manualpick", "Manual Picking", "Particle Picking",
-                                   "Manually pick particle coordinates from micrographs"),
     "Autopick":                  ("relion.autopick", "Auto-picking", "Particle Picking",
                                    "Automatically pick particle coordinates from micrographs, their CTF and 2D references"),
     "TomoPickTomograms":         ("relion.picktomo", "Pick Particles (Tomo)", "Particle Picking",
@@ -111,20 +122,92 @@ JOB_CATALOG = {
 # and pipeline_jobs.cpp's RelionJob::initialise<X>Job() (see data/extract_job_definitions.py
 # GUI_TO_JOB_NAME_ALIASES for where this was first identified and verified by diff).
 assert set(JOB_CATALOG) == {
-    "Import", "TomoImport", "Motioncorr", "Ctffind", "Ctfrefine", "TomoCtfRefine",
-    "Manualpick", "Autopick", "TomoPickTomograms", "TomoAlignTiltSeries",
+    "Import", "TomoImport", "Motioncorr", "TomoMotioncorr", "Ctffind", "TomoCtffind",
+    "Ctfrefine", "TomoCtfRefine",
+    "Autopick", "TomoPickTomograms", "TomoAlignTiltSeries",
     "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
     "Extract", "TomoSubtomo", "Select", "Class2D", "Inimodel", "Class3D",
     "Autorefine", "MultiBody", "TomoAlign", "TomoReconPart", "Motionrefine",
     "Maskcreate", "Joinstar", "Subtract", "Postprocess", "Localres", "DynaMight",
     "ModelAngelo", "External",
-}, "JOB_CATALOG must exactly match the 32 job types extracted from RELION source"
+}, (
+    "JOB_CATALOG must exactly match the 31 real relion_* job classes this "
+    "app runs as a subprocess, PLUS TomoMotioncorr/TomoCtffind -- two extra "
+    "menu entries for the SAME two classes (see TOMO_VARIANT_OF below), not "
+    "two more classes. Manualpick is deliberately NOT here -- relion_manualpick "
+    "is a desktop FLTK GUI (see manualpicker.cpp/displayer.cpp), unusable as "
+    "a headless subprocess on a remote/browser-driven backend. It's "
+    "registered in CUSTOM_JOBS below instead, under its own real RELION type "
+    "label (relion.manualpick) so it still shows up correctly in RELION's "
+    "own pipeline/GUI, but its actual picking happens through the in-browser "
+    "tomogram/micrograph viewer (viz.py) rather than a subprocess -- see "
+    "custom_jobs.py."
+)
+
+# Motioncorr/Ctffind are ONE real RelionJob class each, with is_tomo a plain
+# runtime flag inside it (set once by which GUI mode launched it -- `relion`
+# vs `relion --tomo`) rather than a genuinely separate class the way every
+# other Tomo/non-Tomo pair in JOB_CATALOG is (confirmed against RELION
+# source: initialiseMotioncorrJob/initialiseCtffindJob in pipeline_jobs.cpp
+# build a different JobOption set per is_tomo, but there's only the one
+# function, one PROC_* constant, one label). {tomo_name: base_name} --
+# job_registry.py resolves every raw_job()/DRAFT_OVERRIDES lookup to
+# base_name (the actual RELION job class the options/overrides belong to)
+# and sets field_values["is_tomo"] from whichever menu entry (internal_name)
+# was actually picked, instead of a same-popup toggle a user could forget to
+# flip. See job_registry._resolve_tomo_variant.
+TOMO_VARIANT_OF = {
+    "TomoMotioncorr": "Motioncorr",
+    "TomoCtffind": "Ctffind",
+}
+
+# The real RELION type labels TOMO_VARIANT_OF's pairs share -- reading a
+# REAL RELION-native project's default_pipeline.star, a process with one of
+# these labels could be either variant; the label alone can't say (that's
+# the whole reason TOMO_VARIANT_OF exists). internal_name_for_label()'s
+# is_tomo parameter disambiguates it using the job's own job.star
+# (_rlnJobIsTomo -- see project_manager.read_relion_job_is_tomo). Kept as
+# its own set so job_runner.py's Command Center listing only pays for that
+# extra job.star read on the jobs that actually need it, not every job in
+# the project.
+AMBIGUOUS_TOMO_LABELS = {JOB_CATALOG[base][0] for base in set(TOMO_VARIANT_OF.values())}
 
 # Custom (non-RELION) import bridges built earlier in this project. Same
 # category/description shape as the table above, so they render identically
 # in the Jobs list, but see job_runner.py for how they execute (direct
 # in-process Python calls into backend/converters/, not a subprocess).
+#
+# Manualpick/TomoManualPick are a different kind of "custom" job from the
+# import bridges below: their label_new is a REAL RELION type label
+# (relion.manualpick / relion.picktomo, the same one TomoPickTomograms uses
+# for automated tomogram picking), not a custom.* one -- see
+# job_runner.py's _register_in_relion_pipeline, which now checks CUSTOM_JOBS
+# for a label_new the same way it checks JOB_CATALOG, and pipeline_bridge's
+# module docstring for why registering under the real label matters: it's
+# what lets `relion_pipeliner --addJobFromStar` (called on Run, same as any
+# other job when two-way sync is on) recognize the job type, validate it,
+# and compute its real output nodes -- so a picking job registered here
+# shows up correctly in RELION's own pipeline/GUI and its output is a valid
+# input to any real downstream RELION job (Extract, TomoSubtomo, ...),
+# exactly as if a real relion_manualpick/relion_python_tomo_pick had
+# produced it. The import bridges below use custom.* labels precisely
+# because they AREN'T standing in for a real RELION job type -- registering
+# those under a label relion_pipeliner has never heard of would just fail
+# (harmlessly; _register_in_relion_pipeline's caller already falls back to
+# this app's own numbering on any registration error).
 CUSTOM_JOBS = {
+    "Manualpick": {
+        "label_new": "relion.manualpick",
+        "display_name": "Manual Picking",
+        "category": "Particle Picking",
+        "description": "Manually pick particle coordinates from micrographs",
+    },
+    "TomoManualPick": {
+        "label_new": "relion.picktomo",
+        "display_name": "Manual Picking (Tomo)",
+        "category": "Particle Picking",
+        "description": "Manually pick particles in tomograms",
+    },
     "ImodImport": {
         "label_new": "custom.imod_import",
         "display_name": "Import from IMOD (.mod)",
@@ -180,16 +263,18 @@ CUSTOM_JOBS = {
 #      non-Tomo original is single-particle-only — RELION built a whole
 #      separate Tomo job rather than reusing it.
 #
-# Everything else (Import, Motioncorr, Ctffind, and the classification/
-# refinement/post-processing jobs from Select through External) is treated
-# as shared: RELION-5's tomography pipeline explicitly funnels pseudo
-# -subtomograms through the *same* Class2D/Class3D/Inimodel/Autorefine/
-# Postprocess/Localres/Maskcreate/etc. jobs SPA particles use — that's the
-# documented purpose of "pseudo-subtomograms" (Burt et al. 2024, FEBS Open
-# Bio 14(11):1788-1804, PMID 39147729: making tomography particles look
-# like ordinary particles.star rows so the same downstream jobs work
-# unmodified) — and Motioncorr/Ctffind process movies/tilt-images the same
-# way regardless of which pipeline consumes their output afterward.
+# Everything else (Import, and the classification/refinement/post-processing
+# jobs from Select through External) is treated as shared: RELION-5's
+# tomography pipeline explicitly funnels pseudo-subtomograms through the
+# *same* Class2D/Class3D/Inimodel/Autorefine/Postprocess/Localres/
+# Maskcreate/etc. jobs SPA particles use — that's the documented purpose of
+# "pseudo-subtomograms" (Burt et al. 2024, FEBS Open Bio 14(11):1788-1804,
+# PMID 39147729: making tomography particles look like ordinary
+# particles.star rows so the same downstream jobs work unmodified).
+# Motioncorr/Ctffind are NOT in this "shared" bucket despite also being one
+# real RELION class each (see TOMO_VARIANT_OF) -- each now has its own
+# dedicated Tomo menu entry, so (unlike Class2D etc, which have no such
+# split) there's a real internal_name to classify SPA-only vs Tomo-only by.
 #
 # The three custom bridges are tomography-only in *this app's* scope, per
 # each bridge module's own docstring: imod_bridge.py's picks-on-tomograms
@@ -202,9 +287,11 @@ CUSTOM_JOBS = {
 # the specific assignment beyond which button shows that job by default.
 PIPELINE_SPA_ONLY = {
     "Manualpick", "Autopick", "Extract", "Ctfrefine", "Motionrefine",
+    "Motioncorr", "Ctffind",
 }
 PIPELINE_TOMO_ONLY = {
-    "TomoImport", "TomoCtfRefine", "TomoPickTomograms", "TomoAlignTiltSeries",
+    "TomoImport", "TomoCtfRefine", "TomoPickTomograms", "TomoManualPick",
+    "TomoAlignTiltSeries", "TomoMotioncorr", "TomoCtffind",
     "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
     "TomoSubtomo", "TomoAlign", "TomoReconPart",
     "ImodImport", "WarpImport", "DeepETPickerImport", "AreTomoImport",
@@ -249,12 +336,23 @@ JOB_DIRNAME = {
     "Import": "Import",
     "TomoImport": "Import",
     "Motioncorr": "MotionCorr",
+    # Same dirname/job-number sequence as its SPA sibling -- both register
+    # under the SAME real RELION type label (see TOMO_VARIANT_OF), so this
+    # is what RELION's own pipeliner would allocate for either one anyway.
+    "TomoMotioncorr": "MotionCorr",
     "Ctffind": "CtfFind",
+    "TomoCtffind": "CtfFind",
     "Ctfrefine": "CtfRefine",
     "TomoCtfRefine": "CtfRefine",
     "Manualpick": "ManualPick",
     "Autopick": "AutoPick",
     "TomoPickTomograms": "Picks",
+    # Same dirname as TomoPickTomograms, deliberately: both register under
+    # the same real RELION type label (relion.picktomo -- see CUSTOM_JOBS
+    # above) and share its job-number sequence, matching how RELION itself
+    # numbers every job in a project from one counter regardless of type
+    # (see this table's own docstring above).
+    "TomoManualPick": "Picks",
     "TomoAlignTiltSeries": "AlignTiltSeries",
     "TomoReconstructTomograms": "Tomograms",
     "TomoDenoiseTomograms": "Denoise",
@@ -304,7 +402,7 @@ def _label_to_internal() -> dict[str, str]:
     return out
 
 
-def internal_name_for_label(type_label: str) -> str | None:
+def internal_name_for_label(type_label: str, is_tomo: bool = False) -> str | None:
     """Reverse of a job's `label_new`, for reading RELION's own
     `default_pipeline.star` (whose rows carry only the type label).
 
@@ -313,10 +411,21 @@ def internal_name_for_label(type_label: str) -> str | None:
     real project records "relion.class2d.em" where this catalog holds
     "relion.class2d". Longest matching base wins, so "relion.class2d" is not
     mistaken for a prefix of something more specific that also exists.
+
+    is_tomo: which of a TOMO_VARIANT_OF pair to resolve a shared label
+    (relion.motioncorr / relion.ctffind) to -- the label alone can't say,
+    since real RELION uses the SAME one for both the SPA and Tomo form (see
+    TOMO_VARIANT_OF's docstring). Read the job's own job.star
+    (_rlnJobIsTomo) to get this -- see
+    project_manager.read_relion_job_is_tomo. Ignored for every other label,
+    which isn't ambiguous in the first place.
     """
     label = (type_label or "").strip()
     if not label:
         return None
+    for tomo_name, base_name in TOMO_VARIANT_OF.items():
+        if JOB_CATALOG[base_name][0] == label:
+            return tomo_name if is_tomo else base_name
     table = _label_to_internal()
     if label in table:
         return table[label]
@@ -654,15 +763,29 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         },
         suppress=frozenset({"use_gpu"}),
     ),
-    # Motioncorr/Ctffind's `is_tomo`-guarded fields (job_registry._evaluate_
-    # condition resolves the `is_tomo`/`!is_tomo` tokens itself -- see that
-    # module for why False is the correct constant here). do_dose_weighting
-    # and do_own_motioncor are additionally mapped because their OWN flag
-    # also doesn't spell out as "--" + key, so they need a name override on
-    # top of the self-guard:
+    # Motioncorr/Ctffind's `is_tomo`-guarded fields. This table is keyed by
+    # BASE name (see TOMO_VARIANT_OF above) -- job_registry._resolve_tomo_
+    # variant resolves TomoMotioncorr/TomoCtffind to "Motioncorr"/"Ctffind"
+    # before every lookup here, since the override/flag-name facts below are
+    # about the real RELION job CLASS, shared by both menu entries; only
+    # is_tomo's actual value (which entry the user picked) differs, and
+    # that's threaded in separately as field_values["is_tomo"] -- see
+    # job_registry._build_draft_command and _evaluate_condition's docstring.
+    # do_dose_weighting and do_own_motioncor are additionally
+    # mapped because their OWN flag also doesn't spell out as "--" + key, so
+    # they need a name override on top of the self-guard:
     #   do_dose_weighting (~1641, condition `!is_tomo && joboptions[
-    #   "do_dose_weighting"].getBoolean()`, itself self-guarded once
-    #   is_tomo is known false): command += " --dose_weighting ";
+    #   "do_dose_weighting"].getBoolean()`) -- job_registry._self_guarded
+    #   only inspects joboptions[...] references, so this condition's bare
+    #   `!is_tomo` term is invisible to it and the field is treated as
+    #   self-guarded regardless of SPA/Tomo (same as real RELION's GUI never
+    #   showing this JobOption at all in tomo mode -- see
+    #   initialiseMotioncorrJob's `if (!is_tomo) joboptions["do_dose_
+    #   weighting"] = ...`, ~1501 -- RELION-US shows one static field list
+    #   either way). Emitting --dose_weighting when checked in Tomo mode is
+    #   therefore still possible by leaving the box checked; low-risk since
+    #   its own RELION default is enabled and this mirrors the box's own
+    #   plain reading, not a change from before the toggle existed.
     #   do_own_motioncor (~1559-1580, found by actually running a
     #   Motioncorr job against RELION 5.0.1 -- it failed with "You have to
     #   choose either UCSF MotionCor2 or RELION's own implementation", the
@@ -676,12 +799,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     #   do_coords branch) -- switching to UCSF MotionCor2 still needs
     #   hand-editing the command box.
     #   do_even_odd_split (~1554, condition `is_tomo && joboptions[
-    #   "do_even_odd_split"].getBoolean()`) -- given is_tomo is a fixed,
-    #   known-false constant in every draft this app builds, this box can
-    #   never affect the default draft's command; suppressed rather than
-    #   "unmapped" (there is nothing to fix; add --even_odd_split to the
-    #   editable command box by hand for a tomography tilt-series run that
-    #   wants it).
+    #   "do_even_odd_split"].getBoolean()`) -- real MotionCor2 denoising
+    #   option, tomo-only. Its flag (--even_odd_split) doesn't spell out as
+    #   "--" + key either, so it needs the same kind of override as
+    #   do_dose_weighting/do_own_motioncor above, here with an explicit
+    #   condition since (unlike those two) there's a genuine SPA-vs-Tomo
+    #   difference worth enforcing: no reason to ever emit a tomo-only flag
+    #   for an SPA job.
     #
     # value_transforms: gain_rot/gain_flip are "radio" fields whose stored
     # value is the human-facing label ("No rotation (0)"), but
@@ -693,8 +817,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         flags={
             "do_dose_weighting": FlagOverride("--dose_weighting"),
             "do_own_motioncor": FlagOverride("--use_own"),
+            "do_even_odd_split": FlagOverride("--even_odd_split", condition="is_tomo"),
         },
-        suppress=frozenset({"do_even_odd_split"}),
         value_transforms={
             "gain_rot": {
                 "No rotation (0)": "0", "90 degrees (1)": "1",
@@ -708,10 +832,21 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     ),
     "Ctffind": JobDraftOverride(
         # (~1809-1813, condition `else { if (joboptions["use_noDW"]
-        # .getBoolean()) ...}` -- the `else` is the !is_tomo branch,
-        # likewise self-guarded once is_tomo is known false):
+        # .getBoolean()) ...}` -- the `else` closes the `if (is_tomo) {...}`
+        # above it, i.e. this is the !is_tomo branch. use_noDW is genuinely
+        # SPA-only (RELION's own GUI never shows this JobOption in tomo
+        # mode -- initialiseCtffindJob's `if (!is_tomo) joboptions[
+        # "use_noDW"] = ...`, ~1711), so the override carries that condition
+        # explicitly rather than assuming it like do_dose_weighting above:
+        # unlike that field, RELION-US's own Ctffind gained a real SPA/Tomo
+        # toggle, and there's no reason to ever emit this flag for a tomo
+        # job. localsearch_nominal_defocus/exp_factor_dose need no override
+        # at all -- their extracted condition is the bare token "is_tomo"
+        # (no joboptions[] reference), which _self_guarded correctly treats
+        # as a real branch and job_registry._evaluate_condition now resolves
+        # against the toggle like any other is_tomo-gated field.
         #   command += " --use_noDW ";
-        flags={"use_noDW": FlagOverride("--use_noDW")},
+        flags={"use_noDW": FlagOverride("--use_noDW", condition="!is_tomo")},
     ),
     # getCommandsImportJob (src/pipeline_jobs.cpp:1439-1441, found by
     # actually running an Import job against RELION 5.0.1 -- the draft

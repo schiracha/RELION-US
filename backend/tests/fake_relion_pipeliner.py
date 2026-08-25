@@ -38,6 +38,8 @@ DIRNAME_BY_LABEL = {
     "relion.autopick": "AutoPick",
     "relion.extract": "Extract",
     "relion.select": "Select",
+    "relion.manualpick": "ManualPick",
+    "relion.picktomo": "Picks",
 }
 
 EXIT_FILES = {

@@ -509,6 +509,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <button class="btn" data-action="collapse" title="Minimize this window">− Collapse</button>
       <button class="btn" data-action="close" title="Close this window">✕ Close</button>
       <button class="btn" data-action="note" title="Edit note">📝 Note</button>
+      ${def.is_picker ? '<button class="btn primary" data-action="picker" hidden title="Open the in-browser picker for this job — double-click to add a pick, right-click to delete one">🔍 Open Picker</button>' : ""}
       <button class="btn" data-action="overwrite" hidden title="Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)">⟳ Overwrite</button>
       <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
@@ -859,6 +860,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const jobNameDisplay = toolbar.querySelector('[data-role="job-name-display"]');
   const noteRow = body.querySelector('[data-role="note-row"]');
   const overwriteBtn = toolbar.querySelector('[data-action="overwrite"]');
+  const pickerBtn = toolbar.querySelector('[data-action="picker"]');
   const cloneBtn = toolbar.querySelector('[data-action="clone"]');
   const abortBtn = toolbar.querySelector('[data-action="abort"]');
   const markFinishedBtn = toolbar.querySelector('[data-action="mark-finished"]');
@@ -901,6 +903,10 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // something untrue. Browsing its outputs and settings is fine.
     const fromRelion = hasRun && currentRun.source === "relion";
     jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
+    // Picking doesn't go through Overwrite/re-run semantics -- it's always
+    // available once the job exists (see custom_jobs.run_manual_pick's own
+    // docstring for why "completed" doesn't mean "done picking").
+    if (pickerBtn) pickerBtn.hidden = !hasRun || fromRelion;
     overwriteBtn.hidden = !hasRun || fromRelion || status === "running";
     // Clone never touches the job it's cloning FROM -- it only reads its
     // field_values and opens a fresh, separately-numbered job -- so unlike
@@ -1015,6 +1021,22 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       errorDialog("Could not delete job: " + err.message);
     }
   });
+
+  if (pickerBtn) {
+    pickerBtn.addEventListener("click", () => {
+      if (!currentRun) return;
+      const sourceKey = def.picker_kind === "spa" ? "fn_in" : "in_tomoset";
+      const sourcePath = (currentRun.field_values || {})[sourceKey];
+      if (!sourcePath) {
+        errorDialog(
+          `This job has no ${sourceKey === "fn_in" ? "input micrographs" : "input tomograms.star"} `
+          + `recorded to pick against.`
+        );
+        return;
+      }
+      openVisualizer({ runId: currentRun.run_id, kind: def.picker_kind, sourcePath });
+    });
+  }
 
   overwriteBtn.addEventListener("click", async () => {
     if (!currentRun) return;
@@ -2527,7 +2549,14 @@ function choiceDialog(message, choices) {
   });
 }
 
-async function openVisualizer() {
+// pickingContext (optional): {runId, kind: "spa"|"tomo", sourcePath} -- set
+// when opened from a Manualpick/TomoManualPick job popup's Picker button
+// (see openJobPopup) rather than the standalone "🔍 Visualize" topbar tool.
+// Locks the input fields to the job's own source, adds double-click-to-add
+// / right-click-to-delete picking on the panels, and a Save button that
+// writes into that job's own directory via /api/manual-pick/{runId}/* --
+// see manual_pick.py for the STAR files that produces.
+async function openVisualizer(pickingContext = null) {
   const body = document.createElement("div");
   body.className = "viz-popup";
   // Layout: the orthogonal views take the whole left side; every control and
@@ -2671,6 +2700,19 @@ async function openVisualizer() {
     const GAP = 4;
     const availW = Math.max(120, rect.width - GAP);
     const availH = Math.max(120, rect.height - GAP);
+    // A 2D image (a plain SPA micrograph, see viz.py's _as_3d -- nz==1) has
+    // no Z axis to browse: the ZY/XZ side/bottom panels would just be a
+    // degenerate 1-pixel-deep sliver, so hide them and give the main panel
+    // the whole stage instead of a tri-view.
+    const flat = v.nz <= 1;
+    ortho.classList.toggle("viz-ortho-flat", flat);
+    if (flat) {
+      const s = Math.min(availW / v.nx, availH / v.ny);
+      ortho.style.gridTemplateColumns = `${Math.max(48, Math.round(v.nx * s))}px`;
+      ortho.style.gridTemplateRows = `${Math.max(48, Math.round(v.ny * s))}px`;
+      drawOverlays();
+      return;
+    }
     const s = Math.min(availW / (v.nx + v.nz), availH / (v.ny + v.nz));
     const leftW = Math.max(24, Math.round(v.nz * s));
     const mainW = Math.max(48, Math.round(v.nx * s));
@@ -3014,8 +3056,192 @@ async function openVisualizer() {
     state.showCrosshair = e.target.checked; drawOverlays();
   });
 
+  // ---- Picking mode (see pickingContext doc on the function signature) ---
+  if (pickingContext) {
+    const { runId, kind, sourcePath } = pickingContext;
+    let micList = [];        // SPA only -- every micrograph fn_in names
+    let micIndex = 0;
+    let currentKey = null;   // mic_path (spa) or tomo_name (tomo) -- what Save writes against
+
+    // The job supplies the source; free browsing would let a save target a
+    // file this job doesn't actually own.
+    const pathInput = q('[data-role="viz-path"]');
+    pathInput.value = sourcePath;
+    pathInput.disabled = true;
+    q('[data-role="viz-browse-main"]').style.display = "none";
+    q('[data-role="viz-particles"]').closest(".viz-field").style.display = "none";
+    q('[data-role="viz-load"]').style.display = "none";
+
+    const pickBar = document.createElement("div");
+    pickBar.className = "viz-side-group";
+    pickBar.innerHTML = `
+      <div class="viz-side-title">Picking</div>
+      ${kind === "spa" ? `
+      <div class="viz-inputs-row">
+        <button type="button" class="btn btn-sm" data-role="pk-prev">◂ Prev</button>
+        <span class="viz-hint" data-role="pk-mic-label">–</span>
+        <button type="button" class="btn btn-sm" data-role="pk-next">Next ▸</button>
+      </div>` : ""}
+      <div class="viz-hint">Double-click a view to add a pick there; right-click a pick to delete it.</div>
+      <div class="viz-inputs-row">
+        <button type="button" class="btn primary btn-sm" data-role="pk-save">💾 Save picks</button>
+        <span class="status-line" data-role="pk-status"></span>
+      </div>
+    `;
+    q('[data-role="viz-controls"]').insertAdjacentElement("beforebegin", pickBar);
+
+    async function loadPicksForCurrentKey() {
+      if (!currentKey) return;
+      try {
+        const resp = await api(
+          kind === "spa"
+            ? `/api/manual-pick/${runId}/spa/load?mic_path=${encodeURIComponent(currentKey)}`
+            : `/api/manual-pick/${runId}/tomo/load?tomo_name=${encodeURIComponent(currentKey)}`
+        );
+        state.picks = resp.picks || [];
+        drawOverlays();
+        updateMeta();
+      } catch (err) {
+        q('[data-role="pk-status"]').textContent = "Could not load existing picks: " + err.message;
+      }
+    }
+
+    q('[data-role="pk-save"]').addEventListener("click", async () => {
+      const statusRole = q('[data-role="pk-status"]');
+      if (!currentKey) return;
+      statusRole.textContent = "Saving…";
+      try {
+        if (kind === "spa") {
+          await api(`/api/manual-pick/${runId}/spa/save`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mic_path: currentKey,
+              picks: state.picks.map((p) => ({ x: p.x, y: p.y, class: p.class })),
+            }),
+          });
+        } else {
+          await api(`/api/manual-pick/${runId}/tomo/save`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tomo_name: currentKey,
+              picks: state.picks.map((p) => ({ x: p.x, y: p.y, z: p.z, class: p.class })),
+              tomograms_star_path: sourcePath,
+            }),
+          });
+        }
+        statusRole.textContent = `Saved ${state.picks.length} pick(s).`;
+      } catch (err) {
+        statusRole.textContent = "Error: " + err.message;
+      }
+    });
+
+    if (kind === "spa") {
+      async function loadMic(index) {
+        if (index < 0 || index >= micList.length) return;
+        micIndex = index;
+        currentKey = micList[micIndex];
+        q('[data-role="pk-mic-label"]').textContent =
+          `${micIndex + 1} / ${micList.length}: ${currentKey.split("/").pop()}`;
+        statusEl.textContent = "Loading…";
+        await loadVolume(currentKey);
+        await loadPicksForCurrentKey();
+        refreshAllPanels();
+        statusEl.textContent = "";
+      }
+      q('[data-role="pk-prev"]').addEventListener("click", () => loadMic(micIndex - 1));
+      q('[data-role="pk-next"]').addEventListener("click", () => loadMic(micIndex + 1));
+      (async () => {
+        statusEl.textContent = "Listing micrographs…";
+        try {
+          const resp = await api(
+            `/api/manual-pick/${runId}/spa/micrographs?fn_in=${encodeURIComponent(sourcePath)}`
+          );
+          micList = resp.micrographs || [];
+          if (micList.length) await loadMic(0);
+          else statusEl.textContent = "No micrographs found.";
+        } catch (err) {
+          statusEl.textContent = "Error: " + err.message;
+        }
+      })();
+    } else {
+      (async () => {
+        statusEl.textContent = "Inspecting…";
+        try {
+          const info = await api("/api/viz/inspect", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: sourcePath }),
+          });
+          const tomos = info.tomograms || [];
+          if (!tomos.length) { statusEl.textContent = "No tomograms found."; return; }
+          const sel = q('[data-role="viz-tomo"]');
+          const selectTomo = async (t) => {
+            state.tomo = t.name;
+            currentKey = t.name;
+            statusEl.textContent = "Loading…";
+            await loadVolume(t.mrc_path);
+            await loadPicksForCurrentKey();
+            refreshAllPanels();
+            statusEl.textContent = "";
+          };
+          if (tomos.length > 1) {
+            sel.innerHTML = tomos.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
+            sel.style.display = "";
+            sel.onchange = () => selectTomo(tomos[sel.value]);
+          }
+          await selectTomo(tomos[0]);
+        } catch (err) {
+          statusEl.textContent = "Error: " + err.message;
+        }
+      })();
+    }
+
+    // Double-click to add, right-click to delete the nearest pick -- see
+    // panelCoordsFromEvent above for the col/row mapping this reuses.
+    body.querySelectorAll(".viz-panel").forEach((panel) => {
+      const key = panel.dataset.panel;
+      panel.addEventListener("dblclick", (ev) => {
+        if (!state.vinfo || !currentKey) return;
+        const coords = panelCoordsFromEvent(key, ev);
+        if (!coords) return;
+        const pick = kind === "spa"
+          ? { x: state.x, y: state.y, ...coords, class: 1 }
+          : { x: state.x, y: state.y, z: state.z, ...coords, class: 1 };
+        state.picks.push(pick);
+        drawOverlays();
+        updateMeta();
+      });
+      panel.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        if (!state.vinfo || !currentKey || !state.picks.length) return;
+        const coords = panelCoordsFromEvent(key, ev);
+        if (!coords) return;
+        const p = PANELS[key];
+        // Nearest pick in this panel's two in-plane axes, gated to the same
+        // +/-radius the overlay itself draws with at the CURRENT crosshair
+        // depth on this panel's normal axis -- "visibly on this slice" and
+        // "deletable from this slice" have to agree, or a right-click could
+        // delete a pick the user can't actually see right now. (For a 2D
+        // micrograph there's no normal-axis coordinate on a pick at all --
+        // state[p.normal] - undefined is NaN, and NaN > r is always false,
+        // so the depth gate correctly never excludes anything there.)
+        const r = state.diameter / 2;
+        let best = -1, bestDist = Infinity;
+        state.picks.forEach((pk, i) => {
+          if (Math.abs(state[p.normal] - pk[p.normal]) > r) return;
+          const d = Math.hypot(coords[p.col] - pk[p.col], coords[p.row] - pk[p.row]);
+          if (d < bestDist) { bestDist = d; best = i; }
+        });
+        if (best >= 0 && bestDist <= r * 1.5) {
+          state.picks.splice(best, 1);
+          drawOverlays();
+          updateMeta();
+        }
+      });
+    });
+  }
+
   new WinBox({
-    title: "Tomogram Viewer",
+    title: pickingContext ? "Manual Picking" : "Tomogram Viewer",
     width: "1040px", height: "800px",
     x: "center", y: "center",
     mount: body,

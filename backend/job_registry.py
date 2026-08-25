@@ -48,6 +48,7 @@ from job_catalog import (
     CATEGORIES,
     CUSTOM_JOBS,
     JOB_CATALOG,
+    TOMO_VARIANT_OF,
     draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
@@ -262,7 +263,8 @@ def _evaluate_condition(
     recognized, safely-evaluable shapes: a boolean field's own value
     (optionally negated, as either `joboptions["x"].getBoolean()` or the
     bare local-variable form some jobs use instead -- see _BARE_IDENT_RE),
-    or the `is_continue`/`is_tomo` invariants (fixed constants in this app --
+    the `is_continue` invariant (a fixed constant in this app -- see below),
+    or `is_tomo`/`!is_tomo` (read from field_values["is_tomo"] when present,
     see below). Returns None the moment anything else shows up -- an `||`,
     an `else` branch marker, a numeric/string comparison, a call this
     function doesn't recognize -- so the caller falls back to marking the
@@ -292,15 +294,22 @@ def _evaluate_condition(
             # for the handful of job types -- Motioncorr/Ctffind/Inimodel/
             # Class3D/Autorefine/Postprocess -- that build a slightly
             # different option set and command per launch mode); it is NOT a
-            # JobOption and never appears in field_values. RELION-US has no
-            # equivalent concept -- it never launches RELION's own GUI at
-            # all, in either mode (see ARCHITECTURE.md's "SPA / Tomo / All"
-            # section: the sidebar's SPA/Tomo/All toggle is a display filter
-            # only) -- and RelionJob's own constructor default is `is_tomo =
-            # false` (src/pipeline_jobs.h). So this is a fixed, known
-            # constant in every draft this app builds, same category as
-            # `is_continue` above, just the opposite polarity/value.
-            value = clause.startswith("!")  # "!is_tomo" -> True, "is_tomo" -> False
+            # JobOption and never appears in a real job.star. Most of those
+            # job types are unaffected here: RELION-US never launches
+            # RELION's own tomo GUI, so for the Class3D/Autorefine/Inimodel
+            # family is_tomo is inferred elsewhere from real field content
+            # (see pipeline_bridge._is_tomo_job) and this draft-command path
+            # never needs to know it. Motioncorr/Ctffind are different --
+            # RELION-US has exactly ONE catalog entry for each, genuinely
+            # used for both SPA and real tomography tilt-series input (no
+            # separate tomo job type), so is_tomo is a real, user-set choice
+            # here: the frontend's SPA/Tomo toggle for those two job types
+            # sends it as field_values["is_tomo"]. Any job type that has no
+            # such toggle never has that key in field_values, so this
+            # defaults to False for it -- the same fixed answer as before.
+            value = bool(field_values.get("is_tomo", False))
+            if clause.startswith("!"):
+                value = not value
         else:
             negated = clause.startswith("!")
             body = clause[1:].strip() if negated else clause
@@ -354,8 +363,20 @@ def _build_draft_command(
     project-root-relative path. Omitted for exe-placeholder jobs
     (DynaMight/ModelAngelo/External), whose output conventions differ and
     which this app doesn't try to guess.
+
+    internal_name may be a job_catalog.TOMO_VARIANT_OF entry (TomoMotioncorr/
+    TomoCtffind) -- _resolve_tomo_variant maps it to the real RELION job
+    class (base_name) for every DRAFT_OVERRIDES/flags_used lookup below
+    (those facts are about the shared RelionJob class, not which menu entry
+    was clicked), and sets field_values["is_tomo"] from it directly, which
+    _evaluate_condition reads for the is_tomo/!is_tomo-gated fields (see its
+    own docstring). This overwrites any is_tomo already in field_values --
+    internal_name is the single source of truth now, not a caller-supplied
+    value.
     """
-    program = draft_program_override(internal_name) or raw_job.get("program_guess") or "<unknown_program>"
+    base_name, is_tomo_variant = _resolve_tomo_variant(internal_name)
+    field_values = {**field_values, "is_tomo": is_tomo_variant}
+    program = draft_program_override(base_name) or raw_job.get("program_guess") or "<unknown_program>"
     # A few jobs (DynaMight, ModelAngelo, External) don't hard-code a
     # binary — they run whatever executable path the user configured in a
     # JobOption (e.g. "Location of DynaMight executable:"). extract_job_
@@ -400,15 +421,15 @@ def _build_draft_command(
         # of a bare directory that would otherwise produce a wrong,
         # un-prefixed filename like "_it000_..."). See
         # job_catalog.JobDraftOverride.output_suffix.
-        suffix = draft_output_suffix(internal_name)
+        suffix = draft_output_suffix(base_name)
         if suffix:
             subdir_arg += suffix
-        parts.append(draft_output_flag(internal_name))
+        parts.append(draft_output_flag(base_name))
         parts.append(shlex.quote(subdir_arg))
         # A compulsory-but-computed extra argument some jobs need right
         # after the output flag/subdir (e.g. Import's --ofile) -- see
         # job_catalog.JobDraftOverride.extra_output_args.
-        parts.extend(draft_extra_output_args(internal_name, field_values))
+        parts.extend(draft_extra_output_args(base_name, field_values))
     unmapped = []
 
     for key, value in field_values.items():
@@ -417,14 +438,14 @@ def _build_draft_command(
             continue
         # Options belonging to a non-default branch are omitted from the
         # default draft entirely (and not counted as unmapped).
-        if draft_is_suppressed(internal_name, key):
+        if draft_is_suppressed(base_name, key):
             continue
         # Handled outside this loop, exactly as RELION handles them.
         if key in ("nr_mpi", "other_args"):
             continue
         # A verified per-job flag override wins and is always emitted; only
         # fall back to the generic `--<key>` rule when no override exists.
-        mapped = draft_flag_for(internal_name, key)
+        mapped = draft_flag_for(base_name, key)
         if mapped is not None:
             # A mapped flag is normally unconditional -- but the rare entry
             # that shares its flag with another mutually-exclusive option
@@ -432,7 +453,7 @@ def _build_draft_command(
             # checked the same way as an extracted option_flags condition
             # below, since neither field's own empty-value skip can tell
             # which branch is actually active.
-            mapped_condition = draft_flag_condition_for(internal_name, key)
+            mapped_condition = draft_flag_condition_for(base_name, key)
             if mapped_condition:
                 verdict = _evaluate_condition(
                     mapped_condition, field_values, options_by_key.keys()
@@ -500,7 +521,7 @@ def _build_draft_command(
         ft = option["field_type"]
         if ft == "boolean":
             emit = bool(value)
-            if mapped is not None and draft_flag_is_negated(internal_name, key):
+            if mapped is not None and draft_flag_is_negated(base_name, key):
                 # A handful of curated flags fire when the checkbox is
                 # UNCHECKED, not checked (RELION's own source guards them
                 # with `if (!joboptions["key"].getBoolean())`, e.g.
@@ -526,12 +547,12 @@ def _build_draft_command(
                 # -- so it's passed through rather than skipped, unlike
                 # every other text field.
                 value = ""
-            if has_draft_value_transform(internal_name, key):
+            if has_draft_value_transform(base_name, key):
                 # This field's value is a human-facing radio-button label
                 # (e.g. "No rotation (0)"), not what RELION's own program
                 # actually parses -- see job_catalog.DRAFT_OVERRIDES for why
                 # passing the label through crashes relion_run_motioncorr.
-                translated = draft_value_for(internal_name, key, str(value))
+                translated = draft_value_for(base_name, key, str(value))
                 if translated is None:
                     unmapped.append(key)
                     continue
@@ -549,15 +570,37 @@ def _build_draft_command(
     return " ".join(parts), unmapped
 
 
+def _resolve_tomo_variant(internal_name: str) -> tuple[str, bool]:
+    """(base_internal_name, is_tomo) for a job_catalog.TOMO_VARIANT_OF entry
+    (TomoMotioncorr/TomoCtffind -- see its docstring), or (internal_name,
+    False) unchanged for every other job type.
+
+    data/job_definitions_raw.json and job_catalog.DRAFT_OVERRIDES are both
+    keyed by the real RELION job CLASS (one entry each for Motioncorr/
+    Ctffind, since RELION itself has only the one RelionJob class for
+    either) -- callers use base_internal_name for those lookups, and
+    is_tomo for field_values["is_tomo"] (see _build_draft_command below and
+    job_runner._register_in_relion_pipeline), so which of the two menu
+    entries the user actually picked is threaded through by VALUE rather
+    than by giving the Tomo variant its own duplicate options table.
+    """
+    base = TOMO_VARIANT_OF.get(internal_name)
+    if base:
+        return base, True
+    return internal_name, False
+
+
 def raw_job(internal_name: str) -> dict:
     """The extracted RELION data for one job, as-is. Used by the Advanced
     section, which needs the job's program name and its already-exposed flags."""
-    return _load_raw()[internal_name]
+    base, _is_tomo = _resolve_tomo_variant(internal_name)
+    return _load_raw()[base]
 
 
 def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
-    raw = _load_raw()[internal_name]
-    meta = JOB_CATALOG[internal_name]  # (label_new, display_name, category, description)
+    base, _is_tomo = _resolve_tomo_variant(internal_name)
+    raw = _load_raw()[base]
+    meta = JOB_CATALOG[internal_name]  # (label_new, display_name, category, description) -- own entry, not base's
     label_new, display_name, category, description = meta
 
     standard_groups = _standard_groups(raw)

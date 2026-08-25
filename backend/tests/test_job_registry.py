@@ -398,6 +398,77 @@ def test_bare_is_continue_condition_is_treated_as_unconditional():
     assert "nr_classes" not in unmapped
 
 
+def test_resolve_tomo_variant():
+    assert job_registry._resolve_tomo_variant("TomoMotioncorr") == ("Motioncorr", True)
+    assert job_registry._resolve_tomo_variant("TomoCtffind") == ("Ctffind", True)
+    assert job_registry._resolve_tomo_variant("Motioncorr") == ("Motioncorr", False)
+    assert job_registry._resolve_tomo_variant("Class3D") == ("Class3D", False)
+
+
+def test_tomo_menu_entry_gates_ctffind_tomo_only_flags():
+    """localsearch_nominal_defocus/exp_factor_dose are real, always-visible
+    Ctffind fields (data/job_definitions_raw.json condition: "is_tomo") for
+    a tomo tilt-series CTF job -- real RELION has one RelionJob class for
+    Ctffind either way, so RELION-US gives it two menu entries
+    (job_catalog.TOMO_VARIANT_OF: Ctffind / TomoCtffind) rather than a
+    same-popup toggle, and _build_draft_command derives is_tomo from WHICH
+    of the two internal_name was actually picked. Without the right value
+    these were silently dropped from the executed command with no warning,
+    always falling back to CTFFIND's own hardcoded defaults regardless of
+    what the user set (confirmed against real RELION source,
+    src/pipeline_jobs.cpp's getCommandsCtffindJob)."""
+    raw = job_registry.raw_job("Ctffind")
+    fields = {
+        "input_star_mics": "tilt_series.star",
+        "localsearch_nominal_defocus": 5000,
+        "exp_factor_dose": 0,
+        "use_noDW": True,
+    }
+    spa_cmd, _ = job_registry._build_draft_command(raw, fields, "Ctffind", "")
+    tomo_cmd, _ = job_registry._build_draft_command(raw, fields, "TomoCtffind", "")
+    assert "--localsearch_nominal_defocus" not in spa_cmd
+    assert "--exp_factor_dose" not in spa_cmd
+    assert "--use_noDW" in spa_cmd
+    assert "--localsearch_nominal_defocus 5000" in tomo_cmd
+    assert "--exp_factor_dose 0" in tomo_cmd
+    assert "--use_noDW" not in tomo_cmd  # SPA-only in real RELION
+
+
+def test_tomo_menu_entry_gates_motioncorr_spa_only_and_tomo_only_flags():
+    """first_frame_sum/last_frame_sum/dose_per_frame/pre_exposure are
+    SPA-only (real RELION's initialiseMotioncorrJob only creates those
+    JobOptions `if (!is_tomo)`); do_even_odd_split is tomo-only (MotionCor2
+    denoising support). Same Motioncorr/TomoMotioncorr menu-entry-driven
+    is_tomo as Ctffind above gates both directions -- raw_job("TomoMotioncorr")
+    resolves to the SAME underlying options as raw_job("Motioncorr")."""
+    raw = job_registry.raw_job("Motioncorr")
+    assert job_registry.raw_job("TomoMotioncorr") is raw  # same underlying data, not a copy
+    fields = {
+        "input_star_mics": "movies.star",
+        "first_frame_sum": 1, "last_frame_sum": -1,
+        "dose_per_frame": 1.0, "pre_exposure": 0.0,
+        "do_even_odd_split": True,
+    }
+    spa_cmd, _ = job_registry._build_draft_command(raw, fields, "Motioncorr", "")
+    tomo_cmd, _ = job_registry._build_draft_command(raw, fields, "TomoMotioncorr", "")
+    assert "--first_frame_sum" in spa_cmd
+    assert "--dose_per_frame" in spa_cmd
+    assert "--even_odd_split" not in spa_cmd
+    assert "--first_frame_sum" not in tomo_cmd
+    assert "--dose_per_frame" not in tomo_cmd
+    assert "--even_odd_split" in tomo_cmd
+
+
+def test_tomo_menu_entry_ignores_a_caller_supplied_is_tomo():
+    """internal_name is the single source of truth now -- a stray
+    field_values["is_tomo"] (e.g. left over from persisted history written
+    before this menu split existed) must not override it."""
+    raw = job_registry.raw_job("Ctffind")
+    fields = {"input_star_mics": "x.star", "use_noDW": True, "is_tomo": True}
+    cmd, _ = job_registry._build_draft_command(raw, fields, "Ctffind", "")
+    assert "--use_noDW" in cmd  # still the SPA behavior, despite fields["is_tomo"]
+
+
 def test_is_continue_combined_with_another_term_stays_unmapped():
     """A condition merely containing "!is_continue" alongside something else
     (e.g. "!is_continue && else") must NOT be treated as unconditional --
