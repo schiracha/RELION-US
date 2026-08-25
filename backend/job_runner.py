@@ -57,8 +57,14 @@ STATUS_ABORTED = "aborted"
 # cb_mark_as_finished/cb_mark_as_failed) -- deliberately NOT the full status
 # set: you can't manually force a job back to "running"/"pending", and
 # "aborted" has its own dedicated action (abort_run) since it also has to
-# actually stop the process.
+# actually stop the process. resume_run() is the one deliberate, narrower
+# exception to "can't go back to running" -- restricted to the picking job
+# types (Manualpick/TomoManualPick), which have no real process to have
+# stopped in the first place; see its own docstring.
 MANUALLY_SETTABLE_STATUSES = {STATUS_COMPLETED, STATUS_FAILED}
+# Which statuses resume_run() will move back to "running" -- see its own
+# docstring (the toolbar's "Continue" action).
+RESUMABLE_STATUSES = {STATUS_COMPLETED, STATUS_FAILED}
 
 # Placeholder "command" recorded for custom (in-process converter) jobs, which
 # never spawn a subprocess. Kept as one constant so the marker and the check
@@ -236,6 +242,20 @@ class JobRun:
     # start_subprocess_job); this only means it won't show up in RELION's
     # own GUI, which is worth knowing rather than discovering later.
     pipeline_sync_error: Optional[str] = field(default=None, repr=False, compare=False)
+    # True once this run was actually registered with relion_pipeliner
+    # (register_job succeeded) -- as opposed to pipeline_sync_enabled()
+    # merely being on for the project, which register_job can still fail
+    # under (locked pipeline, unrecognised job type). Everything that
+    # writes directly into RELION's own pipeline afterward (marking
+    # Running when work starts, the exit-marker + --check_job_completion
+    # handshake when it ends -- see pipeline_bridge.set_process_status's
+    # own docstring for why that direct write exists at all) is gated on
+    # this, not on pipeline_sync_enabled() again: re-checking the project
+    # setting would try to talk to a process this app never actually told
+    # relion_pipeliner about. Persisted (to_summary()) so a "Done" click on
+    # a run from a previous backend session still knows whether to do the
+    # handshake.
+    pipeline_registered: bool = False
     # Set when Abort arrives before the subprocess handle exists (see
     # abort_run + _run_subprocess); the launcher honours it as soon as it
     # has a process to signal.
@@ -276,6 +296,7 @@ class JobRun:
             "field_values": self.field_values,
             "detected_inputs": self.detected_inputs,
             "abortable": self.status == STATUS_RUNNING and (self.proc is not None or self.task is not None),
+            "pipeline_registered": self.pipeline_registered,
         }
 
     async def broadcast(self, message: dict) -> None:
@@ -635,6 +656,31 @@ class JobRunManager:
             return False
         return pipeline_bridge.check_job_completion(pd)
 
+    @staticmethod
+    def _mark_pipeline_running(run: JobRun) -> None:
+        """The direct-write half of the fix for jobs sitting forever as
+        "Scheduled" in RELION's own GUI -- see pipeline_bridge.
+        set_process_status's own docstring for the full story
+        (--check_job_completion only ever promotes a process already marked
+        "Running", and relion_pipeliner's CLI has no other way to get one
+        there without actually re-executing its real command). Called once,
+        right when real work starts, for any run that was actually
+        registered (run.pipeline_registered) -- best-effort: a failure here
+        (lock contention, pipeline file vanished) must never block the real
+        work itself from starting, so it's swallowed, the same as _persist's
+        own history-write failures.
+        """
+        if not run.pipeline_registered:
+            return
+        try:
+            process_name = str(Path(run.cwd).relative_to(run.project_dir))
+        except ValueError:
+            return
+        try:
+            pipeline_bridge.set_process_status(Path(run.project_dir), process_name, "Running")
+        except pipeline_bridge.PipelineBridgeError:
+            pass
+
     def _next_job_number(self, project_dir: Path, internal_name: Optional[str] = None) -> int:
         """RELION's own job numbering is a single counter for the whole
         project, shared across every job type (see job_catalog.py's
@@ -684,7 +730,9 @@ class JobRunManager:
         n = self._next_job_number(pd, internal_name)
         return f"{job_catalog.job_dirname(internal_name)}/job{n:03d}"
 
-    def _resolve_overwrite_target(self, overwrite_run_id: str, project_dir: Path) -> dict:
+    def _resolve_overwrite_target(
+        self, overwrite_run_id: str, project_dir: Path, allow_running: bool = False
+    ) -> dict:
         """Looks up the run being overwritten, whether it's still live in
         self.runs (this session), only survives in persisted history (a
         previous session), or -- for the read-only callers, i.e. draft
@@ -694,7 +742,18 @@ class JobRunManager:
         of that job's job.star). Overwrite should work either way, the
         same as delete_run()/file operations above. Raises ValueError
         (caller turns this into a 409) if the run can't be found, is still
-        running, or belongs to a different/inactive project.
+        running (unless allow_running), or belongs to a different/inactive
+        project.
+
+        allow_running: a picker job (Manualpick/TomoManualPick) sits at
+        STATUS_RUNNING for the whole picking session (see start_custom_job's
+        stays_running) -- for it, "running" doesn't mean "compute in
+        progress," it means "picking session open," and Overwrite pressed
+        during that session is exactly the "refresh the job directory"
+        action the user asked for. Only start_custom_job passes True here,
+        and only for stays_running jobs; start_subprocess_job's real
+        compute jobs keep the default (a genuinely-running subprocess must
+        never be overwritten out from under itself).
 
         Resolving a RELION-native run here does NOT reopen the door on
         actually overwriting one: start_subprocess_job's overwrite_run_id
@@ -725,7 +784,7 @@ class JobRunManager:
                 "cwd": entry.get("cwd"), "job_number": entry.get("job_number", 0),
                 "alias": entry.get("alias", ""), "note": entry.get("note", ""),
             }
-        if info["status"] == STATUS_RUNNING:
+        if info["status"] == STATUS_RUNNING and not allow_running:
             raise ValueError("Cannot overwrite a job that is still running")
         if info["project_dir"] != str(project_dir):
             raise ValueError("Cannot overwrite a job from a different/inactive project")
@@ -807,6 +866,7 @@ class JobRunManager:
         project_dir = self.project_dir
         rewrite_note = None
         pipeline_sync_error = None
+        pipeline_registered = False
 
         if overwrite_run_id is not None:
             target = self._resolve_overwrite_target(overwrite_run_id, project_dir)
@@ -878,6 +938,7 @@ class JobRunManager:
                     )
                 if self.pipeline_sync_enabled(project_dir):
                     command = pipeline_bridge.pipeline_control_args(command, authoritative_subdir)
+                    pipeline_registered = True
         else:
             run_id = self.new_run_id()
             registered = None
@@ -921,6 +982,7 @@ class JobRunManager:
                 # "Running". Without the flag the job would sit as Running in
                 # RELION's GUI forever.
                 command = pipeline_bridge.pipeline_control_args(command, authoritative_subdir)
+                pipeline_registered = True
                 pipeline_note = (
                     f"[RELION-US] Registered in RELION's pipeline as "
                     f"{authoritative_subdir}/ — it will appear in RELION's own GUI."
@@ -948,6 +1010,7 @@ class JobRunManager:
             note=note,
             field_values=field_values,
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
+            pipeline_registered=pipeline_registered,
         )
         run.rewrite_note = rewrite_note
         run.pipeline_sync_error = pipeline_sync_error
@@ -966,6 +1029,9 @@ class JobRunManager:
         run.started_at = time.time()
         self._persist(run)
         await run.broadcast({"type": "status", "status": run.status})
+        # Off the event loop: this may wait on the pipeline lock -- see
+        # _mark_pipeline_running's own docstring.
+        await asyncio.to_thread(self._mark_pipeline_running, run)
 
         # If start_subprocess_job had to advance the output directory to
         # avoid a job-number collision, surface that one adjustment in the
@@ -1133,6 +1199,7 @@ class JobRunManager:
         runner_coro_factory,
         field_values: Optional[dict] = None,
         overwrite_run_id: Optional[str] = None,
+        stays_running: bool = False,
     ) -> JobRun:
         """
         runner_coro_factory: a callable taking the job's own output directory
@@ -1152,22 +1219,33 @@ class JobRunManager:
         ones. Same restrictions (must exist, not still running, same
         project) apply.
 
+        stays_running: the runner_coro_factory only VALIDATES its inputs and
+        returns immediately (the Manualpick/TomoManualPick picking jobs --
+        the real work is picking, done afterward through the Picker button
+        against this job's own directory, not by this coroutine). When True,
+        a successful return leaves the run at STATUS_RUNNING instead of
+        completing it -- see set_status(), which is what actually finishes
+        it (the "Done" button) once the user says so. A raised exception
+        still fails/aborts the run normally either way; only the success
+        path is affected.
+
         Registers in RELION's own pipeline the same way start_subprocess_job
         does (when two-way sync is on) -- a custom job is real work with real
         outputs, and a user who turned sync on wants to see ALL their jobs in
         RELION's own GUI, not just the ones that happen to shell out to a
         real relion_* binary. There is no real subprocess here for
-        `--pipeline_control` to instrument, so _run_custom writes the
-        RELION_JOB_EXIT_* marker file itself once the coroutine finishes --
-        the same file a real RELION program would have written, which is all
-        `relion_pipeliner --check_job_completion` (called from there, exactly
-        like _run_subprocess) actually looks for.
+        `--pipeline_control` to instrument, so _run_custom marks the process
+        "Running" itself the moment work starts, and (unless stays_running)
+        writes the RELION_JOB_EXIT_* marker file once the coroutine finishes
+        -- see pipeline_bridge.set_process_status's own docstring for why
+        both of those are needed, not just the latter.
         """
         project_dir = self.project_dir
         pipeline_sync_error = None
 
         if overwrite_run_id is not None:
-            target = self._resolve_overwrite_target(overwrite_run_id, project_dir)
+            target = self._resolve_overwrite_target(
+                overwrite_run_id, project_dir, allow_running=stays_running)
             run_id = overwrite_run_id
             cwd = Path(target["cwd"])
             job_number = target["job_number"]
@@ -1213,15 +1291,16 @@ class JobRunManager:
             field_values=field_values,
             pipeline_sync_error=pipeline_sync_error,
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
+            pipeline_registered=bool(registered),
         )
         self.runs[run_id] = run
         self._persist(run)
         run.task = asyncio.create_task(
-            self._run_custom(run, runner_coro_factory, cwd, registered=bool(registered)))
+            self._run_custom(run, runner_coro_factory, cwd, stays_running=stays_running))
         return run
 
     async def _run_custom(
-        self, run: JobRun, runner_coro_factory, job_dir: Path, registered: bool = False
+        self, run: JobRun, runner_coro_factory, job_dir: Path, stays_running: bool = False
     ) -> None:
         if run.abort_requested:
             return  # aborted before this task got scheduled; see _run_subprocess
@@ -1229,16 +1308,25 @@ class JobRunManager:
         run.started_at = time.time()
         self._persist(run)
         await run.broadcast({"type": "status", "status": run.status})
+        # Off the event loop: this may wait on the pipeline lock -- see
+        # _mark_pipeline_running's own docstring.
+        await asyncio.to_thread(self._mark_pipeline_running, run)
         if run.pipeline_sync_error:
             run.stderr_lines.append(run.pipeline_sync_error)
             await run.broadcast({"type": "stderr", "line": run.pipeline_sync_error})
+        stayed_running = False
         try:
             result = await runner_coro_factory(job_dir)
             for line in str(result).splitlines() or ["(no output)"]:
                 run.stdout_lines.append(line)
                 await run.broadcast({"type": "stdout", "line": line})
-            run.status = STATUS_COMPLETED
-            run.exit_code = 0
+            if stays_running:
+                # Validated, not finished -- see start_custom_job's own
+                # docstring. set_status() (the Done button) finishes it.
+                stayed_running = True
+            else:
+                run.status = STATUS_COMPLETED
+                run.exit_code = 0
         except asyncio.CancelledError:
             run.status = STATUS_ABORTED
             run.stderr_lines.append("Aborted by user.")
@@ -1250,29 +1338,49 @@ class JobRunManager:
             run.status = STATUS_FAILED
             run.exit_code = 1
         finally:
-            run.ended_at = time.time()
+            if not stayed_running:
+                run.ended_at = time.time()
             self._persist(run)
-            if registered:
-                marker = {
-                    STATUS_COMPLETED: "RELION_JOB_EXIT_SUCCESS",
-                    STATUS_FAILED: "RELION_JOB_EXIT_FAILURE",
-                    STATUS_ABORTED: "RELION_JOB_EXIT_ABORTED",
-                }.get(run.status)
-                if marker:
-                    try:
-                        (job_dir / marker).touch()
-                    except OSError:
-                        pass
-                synced = await asyncio.to_thread(
-                    self.sync_completion_to_relion, Path(run.project_dir))
-                if not synced:
-                    note = ("[RELION-US] Could not update RELION's pipeline with this "
-                            "job's final status. The job itself is unaffected; run "
-                            "`relion_pipeliner --check_job_completion` in the project, "
-                            "or open RELION's GUI, to refresh it.")
-                    run.stdout_lines.append(note)
-                    await run.broadcast({"type": "stdout", "line": note})
+            if run.pipeline_registered and not stayed_running:
+                await self._finish_pipeline_registration(run, job_dir)
             await run.broadcast({"type": "status", "status": run.status, "exit_code": run.exit_code})
+
+    async def _write_exit_marker_and_sync(self, status: str, project_dir: Path, job_dir: Path) -> bool:
+        """The exit-marker + --check_job_completion handshake for a
+        registered run reaching a terminal status -- writes the
+        RELION_JOB_EXIT_* file a real relion_* program would have written
+        (see pipeline_control.h) into job_dir, then calls relion_pipeliner
+        --check_job_completion off the event loop. Shared by every path
+        that finishes a registered run: _run_custom's own completion,
+        set_status()'s "Done"/"Mark as failed" (including a job that
+        deliberately stayed running until then -- see start_custom_job's
+        stays_running docstring), and the persisted-only fallback for a run
+        from a previous backend session. Returns whether the sync call
+        itself succeeded (the marker file is written either way)."""
+        marker = {
+            STATUS_COMPLETED: "RELION_JOB_EXIT_SUCCESS",
+            STATUS_FAILED: "RELION_JOB_EXIT_FAILURE",
+            STATUS_ABORTED: "RELION_JOB_EXIT_ABORTED",
+        }.get(status)
+        if marker:
+            try:
+                (job_dir / marker).touch()
+            except OSError:
+                pass
+        return await asyncio.to_thread(self.sync_completion_to_relion, project_dir)
+
+    async def _finish_pipeline_registration(self, run: JobRun, job_dir: Path) -> None:
+        """_write_exit_marker_and_sync for a LIVE run -- also surfaces a
+        sync failure into the run's own Errors tab, which the persisted
+        -only fallback (nothing subscribed to broadcast to) can't do."""
+        synced = await self._write_exit_marker_and_sync(run.status, Path(run.project_dir), job_dir)
+        if not synced:
+            note = ("[RELION-US] Could not update RELION's pipeline with this "
+                    "job's final status. The job itself is unaffected; run "
+                    "`relion_pipeliner --check_job_completion` in the project, "
+                    "or open RELION's GUI, to refresh it.")
+            run.stdout_lines.append(note)
+            await run.broadcast({"type": "stdout", "line": note})
 
     # --- Command Center job actions -----------------------------------
     # Real RELION job actions this mirrors (see gui_mainwindow.cpp's "Job
@@ -1531,7 +1639,7 @@ class JobRunManager:
         self._persist(run)
         return run.to_summary()
 
-    def set_status(self, run_id: str, status: str) -> Optional[dict]:
+    async def set_status(self, run_id: str, status: str) -> Optional[dict]:
         """Real RELION 'Mark as finished' / 'Mark as failed' job actions
         (gui_mainwindow.cpp's cb_mark_as_finished/cb_mark_as_failed) — a
         manual override for when a run's tracked status doesn't match what
@@ -1539,17 +1647,103 @@ class JobRunManager:
         process kept going/died outside this app's view). Restricted to
         MANUALLY_SETTABLE_STATUSES; raises ValueError otherwise so the API
         layer can turn that into a clean 400 rather than silently no-op'ing
-        or allowing a nonsensical manual "running"/"pending" override."""
+        or allowing a nonsensical manual "running"/"pending" override.
+
+        This is also the ONLY route to a terminal status for a run that
+        deliberately stays "running" until the user says otherwise (the
+        Manualpick/TomoManualPick picking jobs -- see start_custom_job's
+        stays_running parameter): its "Done" button calls this exactly like
+        "Mark as finished" does, which is what actually performs the
+        RELION-pipeline completion handshake (_write_exit_marker_and_sync)
+        for a registered run, not just a local status flip. Async now for
+        that reason -- the handshake calls out to relion_pipeliner.
+        """
         if status not in MANUALLY_SETTABLE_STATUSES:
             raise ValueError(f"status must be one of {sorted(MANUALLY_SETTABLE_STATUSES)}")
         run = self.get(run_id)
         if run is None:
-            return self._update_persisted_only(run_id, status=status)
+            history = project_manager.load_history(self.project_dir)
+            entry = next((h for h in history if h.get("run_id") == run_id), None)
+            if entry is None:
+                return None
+            if entry.get("pipeline_registered") and entry.get("project_dir") and entry.get("cwd"):
+                await self._write_exit_marker_and_sync(
+                    status, Path(entry["project_dir"]), Path(entry["cwd"]))
+            return self._update_persisted_only(run_id, status=status, ended_at=time.time())
         run.status = status
         if run.ended_at is None:
             run.ended_at = time.time()
         self._persist(run)
+        if run.pipeline_registered:
+            await self._finish_pipeline_registration(run, Path(run.cwd))
+        await run.broadcast({"type": "status", "status": run.status, "exit_code": run.exit_code})
         return run.to_summary()
+
+    async def resume_run(self, run_id: str) -> Optional[dict]:
+        """The picking jobs' "Continue" toolbar action -- the non
+        -destructive counterpart to Overwrite (which clears the job's
+        existing picks first, see custom_jobs.run_manual_pick's own
+        docstring): puts a finished run back to "running" WITHOUT touching
+        anything in its directory, so reopening the Picker shows exactly
+        the picks that were already there. Only meaningful for a run that
+        deliberately stays "running" until told otherwise (start_custom_
+        job's stays_running) rather than a real subprocess/compute job,
+        which genuinely finished and has nothing left to "resume" --
+        restricted to the picking job types at the API layer (main.py),
+        same as stays_running itself.
+
+        Raises ValueError if the run isn't in a resumable status.
+        Mirrors RelionJob's own re-run preamble
+        (pipeline_control_delete_exit_files, src/pipeline_control.cpp) --
+        clears any stale RELION_JOB_EXIT_*/ABORT_NOW files left over from
+        the previous session before marking it "Running" again, so a
+        --check_job_completion firing later (for this job or completely
+        unrelated ones sharing the same poll) can't immediately re-finish
+        it on a leftover marker nothing actually produced this time.
+        """
+        run = self.get(run_id)
+        if run is None:
+            history = project_manager.load_history(self.project_dir)
+            entry = next((h for h in history if h.get("run_id") == run_id), None)
+            if entry is None:
+                return None
+            if entry.get("status") not in RESUMABLE_STATUSES:
+                raise ValueError(f"status must be one of {sorted(RESUMABLE_STATUSES)} to resume")
+            if entry.get("cwd"):
+                self._delete_pipeline_control_files(Path(entry["cwd"]))
+            if entry.get("pipeline_registered") and entry.get("project_dir") and entry.get("cwd"):
+                try:
+                    process_name = str(Path(entry["cwd"]).relative_to(entry["project_dir"]))
+                    pipeline_bridge.set_process_status(
+                        Path(entry["project_dir"]), process_name, "Running")
+                except (ValueError, pipeline_bridge.PipelineBridgeError):
+                    pass
+            return self._update_persisted_only(
+                run_id, status=STATUS_RUNNING, ended_at=None, exit_code=None)
+        if run.status not in RESUMABLE_STATUSES:
+            raise ValueError(f"status must be one of {sorted(RESUMABLE_STATUSES)} to resume")
+        self._delete_pipeline_control_files(Path(run.cwd))
+        run.status = STATUS_RUNNING
+        run.ended_at = None
+        run.exit_code = None
+        self._persist(run)
+        await asyncio.to_thread(self._mark_pipeline_running, run)
+        await run.broadcast({"type": "status", "status": run.status, "exit_code": run.exit_code})
+        return run.to_summary()
+
+    @staticmethod
+    def _delete_pipeline_control_files(job_dir: Path) -> None:
+        """Same files pipeline_control_delete_exit_files() removes at the
+        start of a real RELION run -- see resume_run's own docstring for
+        why stale ones matter here."""
+        for name in (
+            "RELION_JOB_ABORT_NOW", "RELION_JOB_EXIT_SUCCESS",
+            "RELION_JOB_EXIT_FAILURE", "RELION_JOB_EXIT_ABORTED",
+        ):
+            try:
+                (job_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def delete_run(self, run_id: str, remove_files: bool) -> tuple[bool, str]:
         """Real RELION 'Delete' job action. Always removes the run from

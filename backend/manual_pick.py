@@ -220,6 +220,34 @@ def load_spa_picks(project_dir: Path, job_dir: Path, mic_path: str) -> list[dict
     ]
 
 
+def clear_spa_picks(job_dir: Path) -> int:
+    """Delete every pick this job has saved -- the job-level list
+    (manualpick.star) and every per-micrograph coordinate file it points
+    at. Called at the start of an Overwrite (see custom_jobs.run_manual_
+    pick): real RELION's own "Overwrite" job action re-runs into the SAME
+    directory (gui_mainwindow.cpp's cb_toggle_overwrite_continue), which
+    for a batch job means its outputs get regenerated from scratch anyway;
+    for a picking job, which has no batch step to regenerate anything, the
+    equivalent is clearing the slate explicitly. A fresh (never-run) job's
+    directory has nothing to clear, so this is a safe no-op there -- no
+    separate "is this actually an overwrite" flag needed. Returns how many
+    files were removed, for the run's own summary line.
+
+    "Continue" (job_runner.JobRunManager.resume_run) is the other, non
+    -destructive way back into a picking session -- it does NOT call this.
+    """
+    job_dir = Path(job_dir)
+    removed = 0
+    job_star = job_dir / SPA_JOB_STAR_NAME
+    if job_star.is_file():
+        job_star.unlink()
+        removed += 1
+    for coord_file in job_dir.glob(f"*{SPA_COORD_FILENAME_SUFFIX}"):
+        coord_file.unlink()
+        removed += 1
+    return removed
+
+
 # --------------------------------------------------------------------------
 # Tomography (3D tomograms)
 # --------------------------------------------------------------------------
@@ -361,3 +389,23 @@ def load_tomo_picks(project_dir: Path, job_dir: Path, tomo_name: str) -> list[di
          "z": float(row["rlnCoordinateZ"]), "class": 1}
         for _, row in df.iterrows()
     ]
+
+
+def clear_tomo_picks(job_dir: Path) -> int:
+    """Tomography counterpart of clear_spa_picks above -- every per-tomogram
+    annotation file plus the combined particles.star/optimisation_set.star.
+    Same "Overwrite means start clean" reasoning; see that function's own
+    docstring."""
+    job_dir = Path(job_dir)
+    removed = 0
+    for name in (TOMO_PARTICLES_STAR_NAME, TOMO_OPTSET_STAR_NAME):
+        p = job_dir / name
+        if p.is_file():
+            p.unlink()
+            removed += 1
+    ann_dir = job_dir / TOMO_ANNOTATIONS_DIRNAME
+    if ann_dir.is_dir():
+        for ann_file in ann_dir.glob("*_particles.star"):
+            ann_file.unlink()
+            removed += 1
+    return removed

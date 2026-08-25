@@ -229,3 +229,46 @@ def test_load_tomo_picks_round_trips(tmp_path):
         project, job_dir, "TS_01", [{"x": 9.0, "y": 8.0, "z": 7.0}], "tomograms.star")
     loaded = manual_pick.load_tomo_picks(project, job_dir, "TS_01")
     assert loaded == [{"x": 9.0, "y": 8.0, "z": 7.0, "class": 1}]
+
+
+# --------------------------------------------------------------------------
+# clear_spa_picks / clear_tomo_picks -- what Overwrite calls (via
+# custom_jobs.run_manual_pick/run_tomo_manual_pick) to genuinely start
+# clean, as opposed to Continue (job_runner.resume_run), which touches
+# nothing on disk.
+# --------------------------------------------------------------------------
+
+
+def test_clear_spa_picks_removes_job_star_and_coord_files(tmp_path):
+    project = _spa_project(tmp_path)
+    job_dir = project / "ManualPick" / "job005"
+    manual_pick.save_spa_picks(
+        project, job_dir, "MotionCorr/job002/020/mic001.mrc", [{"x": 1.0, "y": 1.0}])
+    manual_pick.save_spa_picks(
+        project, job_dir, "MotionCorr/job002/021/mic001.mrc", [{"x": 2.0, "y": 2.0}])
+    assert manual_pick.clear_spa_picks(job_dir) == 3  # job-level star + 2 coord files
+    assert not (job_dir / "manualpick.star").exists()
+    assert list(job_dir.glob("*_manualpick.star")) == []
+
+
+def test_clear_spa_picks_on_a_fresh_job_dir_is_a_noop(tmp_path):
+    job_dir = tmp_path / "ManualPick" / "job001"
+    job_dir.mkdir(parents=True)
+    assert manual_pick.clear_spa_picks(job_dir) == 0
+
+
+def test_clear_tomo_picks_removes_everything(tmp_path):
+    project = _tomo_project(tmp_path)
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(
+        project, job_dir, "TS_01", [{"x": 1.0, "y": 1.0, "z": 1.0}], "tomograms.star")
+    assert manual_pick.clear_tomo_picks(job_dir) == 3  # annotation + particles + optimisation_set
+    assert not (job_dir / "particles.star").exists()
+    assert not (job_dir / "optimisation_set.star").exists()
+    assert list((job_dir / "annotations").glob("*_particles.star")) == []
+
+
+def test_clear_tomo_picks_on_a_fresh_job_dir_is_a_noop(tmp_path):
+    job_dir = tmp_path / "Picks" / "job001"
+    job_dir.mkdir(parents=True)
+    assert manual_pick.clear_tomo_picks(job_dir) == 0
