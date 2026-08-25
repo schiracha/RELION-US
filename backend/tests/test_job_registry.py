@@ -675,6 +675,163 @@ def test_tomoalign_motion_sigma_fields_are_emitted_when_do_motion_is_on():
     assert not ({"sigma_vel", "sigma_div"} & set(unmapped))
 
 
+@pytest.mark.parametrize("internal_name", ["Class2D", "Class3D", "Autorefine", "Inimodel"])
+def test_do_ctf_correction_emits_ctf_flag(internal_name):
+    """pipeline_jobs.cpp wraps this in a nested `if (!is_continue) { if
+    (do_ctf_correction) ... }`, which the extractor's regex-based scan
+    missed for all four of these jobs (same shape as do_parallel_discio/
+    do_combine_thru_disc/do_preread_images above) -- the flag ("--ctf")
+    doesn't spell out as "--" + its key, so the generic rule missed it
+    too. do_ctf_correction defaults to Yes in real RELION, so every draft
+    from these four job types was silently missing --ctf regardless of
+    what the user had checked. See job_catalog.DRAFT_OVERRIDES."""
+    raw = job_registry.raw_job(internal_name)
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_ctf_correction": True}, internal_name, "")
+    assert "--ctf" in cmd
+    assert "do_ctf_correction" not in unmapped
+
+    cmd_off, unmapped_off = job_registry._build_draft_command(
+        raw, {"do_ctf_correction": False}, internal_name, "")
+    assert "--ctf" not in cmd_off
+    assert "do_ctf_correction" not in unmapped_off
+
+
+@pytest.mark.parametrize("internal_name", ["Class2D", "Class3D", "Autorefine", "Inimodel"])
+def test_ctf_intact_first_peak_requires_do_ctf_correction_too(internal_name):
+    """--ctf_intact_first_peak only appears inside the SAME nested `if
+    (do_ctf_correction)` block as --ctf -- checking "Ignore CTFs until
+    first peak?" alone, with CTF correction itself off, must not emit it."""
+    raw = job_registry.raw_job(internal_name)
+    fields_both_on = {"do_ctf_correction": True, "ctf_intact_first_peak": True}
+    cmd, unmapped = job_registry._build_draft_command(raw, fields_both_on, internal_name, "")
+    assert "--ctf_intact_first_peak" in cmd
+    assert not ({"do_ctf_correction", "ctf_intact_first_peak"} & set(unmapped))
+
+    fields_outer_off = {"do_ctf_correction": False, "ctf_intact_first_peak": True}
+    cmd_off, unmapped_off = job_registry._build_draft_command(raw, fields_outer_off, internal_name, "")
+    assert "--ctf_intact_first_peak" not in cmd_off
+    assert "ctf_intact_first_peak" not in unmapped_off
+
+
+# --------------------------------------------------------------------------
+# The broader DRAFT_OVERRIDES audit: every field previously missing an
+# option_flags entry entirely (the extractor found no `command +=` beside a
+# `joboptions["key"]` reference at all -- usually because the real source
+# reads the value into a local variable first, or the flag name simply
+# doesn't spell out as "--" + key) that turned out to be a simple,
+# self-contained, source-verified fix. Each row: (internal_name, "on"
+# field_values that should make the flag appear (including the target key
+# itself), a substring expected in the resulting command, and an optional
+# (field_to_flip, new_value) that should make it disappear again). See
+# job_catalog.DRAFT_OVERRIDES for the exact pipeline_jobs.cpp line refs.
+_UNMAPPED_FIELD_FIXES = [
+    ("Autopick", {"do_log": True, "log_invert": True}, "--Log_invert", ("do_log", False)),
+    ("Autopick", {"do_refs": True, "do_invert_refs": True}, "--invert", ("do_refs", False)),
+    ("Autopick", {"do_refs": True, "do_ctf_autopick": True}, "--ctf", ("do_refs", False)),
+    ("Autopick",
+     {"do_refs": True, "do_ctf_autopick": True, "do_ignore_first_ctfpeak_autopick": True},
+     "--ctf_intact_first_peak", ("do_ctf_autopick", False)),
+    ("Autopick", {"do_refs": True, "do_pick_helical_segments": True}, "--helix", ("do_refs", False)),
+    ("Autopick",
+     {"do_refs": True, "do_pick_helical_segments": True, "do_amyloid": True},
+     "--amyloid", ("do_pick_helical_segments", False)),
+    ("Autorefine", {"ref_correct_greyscale": False}, "--firstiter_cc", ("ref_correct_greyscale", True)),
+    ("Autorefine", {"do_zero_mask": True}, "--zero_mask", None),
+    ("Autorefine", {"fn_mask": "m.mrc", "do_solvent_fsc": True}, "--solvent_correct_fsc", ("fn_mask", "")),
+    ("Autorefine", {"do_blush": True}, "--blush", None),
+    ("Autorefine", {"auto_faster": True}, "--auto_ignore_angles", None),
+    ("Autorefine", {"do_pad1": True}, "--pad 1", None),
+    ("Class2D", {"do_zero_mask": True}, "--zero_mask", None),
+    ("Class2D", {"do_center": True}, "--center_classes", None),
+    ("Class2D", {"dont_skip_align": False}, "--skip_align", ("dont_skip_align", True)),
+    ("Class2D",
+     {"dont_skip_align": True, "allow_coarser": True}, "--allow_coarser_sampling", ("dont_skip_align", False)),
+    ("Class2D",
+     {"do_helix": True, "dont_skip_align": True, "do_bimodal_psi": True},
+     "--bimodal_psi", ("do_helix", False)),
+    ("Class3D", {"ref_correct_greyscale": False}, "--firstiter_cc", ("ref_correct_greyscale", True)),
+    ("Class3D", {"do_fast_subsets": True}, "--fast_subsets", None),
+    ("Class3D", {"do_zero_mask": True}, "--zero_mask", None),
+    ("Class3D", {"do_blush": True}, "--blush", None),
+    ("Class3D", {"dont_skip_align": False}, "--skip_align", ("dont_skip_align", True)),
+    ("Class3D",
+     {"dont_skip_align": True, "allow_coarser": True}, "--allow_coarser_sampling", ("dont_skip_align", False)),
+    ("Class3D", {"do_pad1": True}, "--pad 1", None),
+    ("Ctffind", {"slow_search": False}, "--fast_search", ("slow_search", True)),
+    ("TomoCtffind", {"slow_search": False}, "--fast_search", ("slow_search", True)),
+    ("Ctfrefine", {"do_tilt": True, "do_trefoil": True}, "--odd_aberr_max_n 3", ("do_tilt", False)),
+    ("Ctfrefine", {"do_aniso_mag": False, "do_4thorder": True}, "--fit_aberr", ("do_aniso_mag", True)),
+    ("Extract", {"do_reextract": True, "do_reset_offsets": True}, "--reset_offsets", ("do_reextract", False)),
+    ("Extract", {"do_reextract": True, "do_recenter": True}, "--recenter", ("do_reextract", False)),
+    ("Extract", {"do_invert": True}, "--invert_contrast", None),
+    ("Extract", {"do_float16": True}, "--float16", None),
+    ("Inimodel", {"do_run_C1": True}, "--sym C1", None),
+    ("Inimodel", {"do_solvent": True}, "--flatten_solvent", None),
+    ("Motioncorr",
+     {"is_tomo": False, "do_dose_weighting": True, "do_save_noDW": True},
+     "--save_noDW", ("do_dose_weighting", False)),
+    ("Motionrefine", {"do_float16": True}, "--float16", None),
+    ("MultiBody", {"do_blush": True}, "--blush", None),
+    ("MultiBody", {"do_subtracted_bodies": True}, "--reconstruct_subtracted_bodies", None),
+    ("MultiBody", {"do_pad1": True}, "--pad 1", None),
+    ("Postprocess", {"fn_in": "half1.mrc"}, "--i half1.mrc", None),
+    ("Postprocess", {"do_skip_fsc_weighting": True}, "--skip_fsc_weighting", None),
+    ("Select", {"do_split": True, "do_random": True}, "--random_order", ("do_split", False)),
+    ("Subtract", {"do_fliplabel": False, "fn_opt": "opt.star"}, "--i opt.star", ("do_fliplabel", True)),
+    ("Subtract",
+     {"do_fliplabel": False, "do_data": True, "fn_data": "d.star"}, "--data d.star", ("do_data", False)),
+    ("Subtract", {"do_fliplabel": False, "do_float16": True}, "--float16", ("do_fliplabel", True)),
+    ("Subtract", {"do_fliplabel": False, "do_center_mask": True}, "--recenter_on_mask", ("do_fliplabel", True)),
+    ("TomoAlign", {"do_shift_align": True}, "--shift_only", None),
+    ("TomoAlign", {"do_motion": True}, "--motion", None),
+    ("TomoAlign", {"do_motion": True, "do_sq_exp_ker": True}, "--sq_exp_ker", ("do_motion", False)),
+    ("TomoAlignTiltSeries", {"do_imod_fiducials": True}, "--imod_fiducials", None),
+    ("TomoAlignTiltSeries", {"do_imod_patchtrack": True}, "--imod_patchtrack", None),
+    ("TomoAlignTiltSeries", {"do_aretomo2": True}, "--aretomo2", None),
+    ("TomoAlignTiltSeries",
+     {"do_aretomo2": True, "do_aretomo_tiltcorrect": True}, "--aretomo_tiltcorrect", ("do_aretomo2", False)),
+    ("TomoAlignTiltSeries",
+     {"do_aretomo2": True, "do_aretomo_ctf": True}, "--aretomo_ctf", ("do_aretomo2", False)),
+    ("TomoAlignTiltSeries",
+     {"do_aretomo2": True, "do_aretomo_ctf": True, "do_aretomo_phaseshift": True},
+     "--aretomo_phaseshift", ("do_aretomo_ctf", False)),
+    ("TomoCtfRefine", {"do_reg_def": True}, "--do_reg_defocus", None),
+    ("TomoCtfRefine", {"do_reg_def": True, "lambda": "0.5"}, "--lambda 0.5", ("do_reg_def", False)),
+    ("TomoCtfRefine", {"do_frame_scale": True}, "--per_frame_scale", None),
+    ("TomoCtfRefine", {"do_tomo_scale": True}, "--per_tomo_scale", None),
+    ("TomoReconstructTomograms", {"do_fourier": True}, "--fourier", None),
+    ("TomoSubtomo", {"do_float16": True}, "--float16", None),
+    ("TomoSubtomo", {"do_stack2d": True}, "--stack2d", None),
+]
+
+
+def test_do_save_nodw_is_never_emitted_for_the_tomo_variant():
+    """do_save_noDW's condition is "!is_tomo && do_dose_weighting" -- unlike
+    a plain field, is_tomo can only be set by which menu entry launched the
+    draft (TomoMotioncorr vs Motioncorr), not by a caller-supplied
+    field_values entry (_build_draft_command overwrites it from
+    internal_name every time -- see its own docstring)."""
+    raw = job_registry.raw_job("TomoMotioncorr")  # resolves to base "Motioncorr" internally
+    fields = {"is_tomo": False, "do_dose_weighting": True, "do_save_noDW": True}
+    cmd, _ = job_registry._build_draft_command(raw, fields, "TomoMotioncorr", "")
+    assert "--save_noDW" not in cmd
+
+
+@pytest.mark.parametrize("internal_name,on_fields,expect_substr,off_flip", _UNMAPPED_FIELD_FIXES)
+def test_unmapped_field_fix_emits_its_flag(internal_name, on_fields, expect_substr, off_flip):
+    raw = job_registry.raw_job(internal_name)
+    cmd, unmapped = job_registry._build_draft_command(raw, on_fields, internal_name, "")
+    assert expect_substr in cmd, f"{internal_name}: expected {expect_substr!r} in {cmd!r}"
+    if off_flip is not None:
+        field, new_value = off_flip
+        off_fields = {**on_fields, field: new_value}
+        cmd_off, _ = job_registry._build_draft_command(raw, off_fields, internal_name, "")
+        assert expect_substr not in cmd_off, (
+            f"{internal_name}: {expect_substr!r} should disappear when {field}={new_value!r}, got {cmd_off!r}"
+        )
+
+
 def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
     """Most jobs take a plain directory for --o -- e.g. Import, whose
     DRAFT_OVERRIDES entry doesn't set output_suffix -- and must NOT gain an
