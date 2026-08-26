@@ -326,6 +326,26 @@ function renderField(key, option, value) {
 
   switch (option.field_type) {
     case "boolean": {
+      // A handful of booleans (job_catalog.BOOLEAN_SELECT_LABELS, e.g.
+      // TomoImport's "Is dose rate per movie frame?") are easy to misread
+      // as a plain Yes/No checkbox when the two states aren't obviously
+      // opposite of each other -- those carry boolean_labels from the
+      // backend and get an explicit two-way dropdown instead. The value is
+      // still a plain bool either way; only the widget differs.
+      if (option.boolean_labels) {
+        const select = document.createElement("select");
+        [["false", option.boolean_labels.false], ["true", option.boolean_labels.true]].forEach(
+          ([v, label]) => {
+            const o = document.createElement("option");
+            o.value = v;
+            o.textContent = label;
+            if ((v === "true") === !!value) o.selected = true;
+            select.appendChild(o);
+          }
+        );
+        wrap.appendChild(select);
+        break;
+      }
       const input = document.createElement("input");
       input.type = "checkbox";
       input.checked = !!value;
@@ -411,7 +431,11 @@ function renderField(key, option, value) {
 
 function getFieldValue(fieldWrap, option) {
   const el = fieldWrap.querySelector("input, select, textarea");
-  if (option.field_type === "boolean") return el.checked;
+  if (option.field_type === "boolean") {
+    // boolean_labels fields render as <select>, not <input type=checkbox>
+    // (see renderField) -- el.checked is undefined on a <select>.
+    return option.boolean_labels ? el.value === "true" : el.checked;
+  }
   if (option.field_type === "slider") return parseFloat(el.value);
   return el.value;
 }
