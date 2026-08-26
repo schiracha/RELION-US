@@ -490,6 +490,14 @@ class FlagOverride:
     # in this table fires on checked, matching RELION's overwhelmingly more
     # common convention, so this defaults to False.
     negated: bool = False
+    # For the rarer case still: the SAME option's value needs to go out
+    # under a DIFFERENT flag when `condition` is false, rather than being
+    # omitted entirely -- e.g. TomoImport's dose_rate, which RELION emits as
+    # either `--dose-per-movie-frame <value>` or `--dose-per-tilt-image
+    # <value>` depending on a sibling checkbox (see its own entry below).
+    # Only meaningful when `condition` is set; `flag` above is used when the
+    # condition holds, this one when it doesn't.
+    flag_if_condition_false: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -589,10 +597,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "Cs": FlagOverride("--spherical-aberration"),
             "Q0": FlagOverride("--amplitude-contrast"),
             "optics_group_name": FlagOverride("--optics-group-name"),
-            # Default is per-tilt-image dose; toggling "Is dose rate per
-            # movie frame?" switches RELION to --dose-per-movie-frame (a
-            # branch a static map can't express -- noted in the field help).
-            "dose_rate": FlagOverride("--dose-per-tilt-image"),
+            # `if (dose_is_per_movie_frame) command += " --dose-per-movie-
+            # frame " + dose_rate; else command += " --dose-per-tilt-image "
+            # + dose_rate;` (~6506) -- the SAME dose_rate value goes out
+            # under one of two flag names depending on the sibling checkbox.
+            # Previously hardcoded to always emit --dose-per-tilt-image
+            # regardless of dose_is_per_movie_frame -- confirmed as a real
+            # bug (checking the box had no effect on the generated command)
+            # while auditing this for
+            # https://github.com/schiracha/RELION-US/issues/16.
+            "dose_rate": FlagOverride(
+                "--dose-per-tilt-image", condition="!dose_is_per_movie_frame",
+                flag_if_condition_false="--dose-per-movie-frame",
+            ),
             "prefix": FlagOverride("--prefix"),
             "mtf_file": FlagOverride("--mtf-file"),
             "flip_tiltseries_hand": FlagOverride("--invert-defocus-handedness"),
@@ -1246,6 +1263,18 @@ def draft_flag_is_negated(internal_name: str, option_key: str) -> bool:
     return bool(entry is not None and entry.negated)
 
 
+def draft_flag_if_condition_false_for(internal_name: str, option_key: str) -> Optional[str]:
+    """The alternate flag to use for this option's OWN value when its
+    `condition` evaluates False, instead of omitting the field -- or None if
+    there isn't one (the common case: condition false just means "don't
+    emit this flag at all"). See FlagOverride.flag_if_condition_false."""
+    override = _override(internal_name)
+    if override is None:
+        return None
+    entry = override.flags.get(option_key)
+    return entry.flag_if_condition_false if entry is not None else None
+
+
 def draft_program_override(internal_name: str) -> Optional[str]:
     """Verified program string for jobs whose extracted program_guess is
     wrong for the default configuration, else None. See
@@ -1298,3 +1327,28 @@ def draft_extra_output_args(internal_name: str, field_values: dict) -> list:
     if override is None or override.extra_output_args is None:
         return []
     return override.extra_output_args(field_values)
+
+
+# --------------------------------------------------------------------------
+# Form-presentation overrides -- separate from DRAFT_OVERRIDES above (which
+# only affects the generated command), these change how a field is offered
+# in the popup itself. Real RELION renders every entry below as a plain
+# Yes/No checkbox too; this isn't correcting real RELION, it's RELION-US
+# choosing a clearer widget for a field whose two states are easy to miss on
+# an unlabeled checkbox (unlike "Use parallel disc I/O?", where Yes/No reads
+# naturally, "Is dose rate per movie frame?" doesn't hint at what the OTHER
+# state means without reading the help text). The underlying value is still
+# a plain bool sent as field_values[key] -- job_registry/DRAFT_OVERRIDES
+# above need no changes to consume it; only frontend/app.js's renderField/
+# getFieldValue read this to pick a <select> over a checkbox.
+BOOLEAN_SELECT_LABELS: dict[tuple[str, str], tuple[str, str]] = {
+    # (internal_name, key): (label when False, label when True)
+    ("TomoImport", "dose_is_per_movie_frame"): ("Dose per tilt image", "Dose per movie frame"),
+}
+
+
+def boolean_select_labels(internal_name: str, option_key: str) -> Optional[tuple[str, str]]:
+    """(label_for_false, label_for_true) if this boolean field should be
+    offered as an explicit two-way dropdown instead of a checkbox, else
+    None (the common case -- a plain checkbox)."""
+    return BOOLEAN_SELECT_LABELS.get((internal_name, option_key))

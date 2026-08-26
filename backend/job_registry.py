@@ -49,9 +49,11 @@ from job_catalog import (
     CUSTOM_JOBS,
     JOB_CATALOG,
     TOMO_VARIANT_OF,
+    boolean_select_labels,
     draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
+    draft_flag_if_condition_false_for,
     draft_flag_is_negated,
     draft_value_for,
     has_draft_value_transform,
@@ -459,7 +461,14 @@ def _build_draft_command(
                     mapped_condition, field_values, options_by_key.keys()
                 )
                 if verdict is False:
-                    continue
+                    # Usually "don't emit this flag at all" -- but the rare
+                    # entry whose value needs a DIFFERENT flag on the false
+                    # branch (rather than being omitted), e.g. TomoImport's
+                    # dose_rate, names one via flag_if_condition_false.
+                    alt_flag = draft_flag_if_condition_false_for(base_name, key)
+                    if alt_flag is None:
+                        continue
+                    mapped = alt_flag
                 elif verdict is None:
                     unmapped.append(key)
                     continue
@@ -609,6 +618,16 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
     draft_command, unmapped = _build_draft_command(
         raw, default_values, internal_name, output_subdir
     )
+    # Copy (never mutate raw["options"] in place -- _load_raw() caches and
+    # shares it across every request) any option this specific menu entry
+    # wants offered as an explicit two-way dropdown instead of a checkbox --
+    # see job_catalog.boolean_select_labels's own docstring.
+    options = []
+    for opt in raw.get("options", []):
+        labels = boolean_select_labels(internal_name, opt["key"])
+        if labels:
+            opt = {**opt, "boolean_labels": {"false": labels[0], "true": labels[1]}}
+        options.append(opt)
 
     return {
         "internal_name": internal_name,
@@ -616,7 +635,7 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
         "display_name": display_name,
         "category": category,
         "description": description,
-        "options": raw.get("options", []),
+        "options": options,
         "standard_groups": standard_groups,
         "default_values": default_values,
         "program_guess": raw.get("program_guess"),

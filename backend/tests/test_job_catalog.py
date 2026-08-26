@@ -22,6 +22,7 @@ from job_catalog import (
     draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
+    draft_flag_if_condition_false_for,
     draft_flag_is_negated,
     draft_is_suppressed,
     draft_output_flag,
@@ -43,6 +44,7 @@ def test_unlisted_job_gets_every_accessors_default():
     assert draft_flag_for("Localres", "anything") is None
     assert draft_flag_condition_for("Localres", "anything") is None
     assert draft_flag_is_negated("Localres", "anything") is False
+    assert draft_flag_if_condition_false_for("Localres", "anything") is None
     assert draft_program_override("Localres") is None
     assert draft_is_suppressed("Localres", "anything") is False
     assert draft_output_flag("Localres") == "--o"
@@ -98,6 +100,18 @@ def test_conditioned_flag_override_exposes_its_condition():
 def test_negated_flag_override():
     assert draft_flag_for("Class2D", "do_parallel_discio") == "--no_parallel_disc_io"
     assert draft_flag_is_negated("Class2D", "do_parallel_discio") is True
+
+
+def test_flag_override_with_an_alternate_false_branch_flag():
+    # dose_rate goes out under one of two real flags depending on a sibling
+    # checkbox, rather than being simply present/absent -- see job_catalog's
+    # TomoImport entry and https://github.com/schiracha/RELION-US/issues/16.
+    assert draft_flag_for("TomoImport", "dose_rate") == "--dose-per-tilt-image"
+    assert draft_flag_condition_for("TomoImport", "dose_rate") == "!dose_is_per_movie_frame"
+    assert draft_flag_if_condition_false_for("TomoImport", "dose_rate") == "--dose-per-movie-frame"
+    # A field with only the common (no alternate) shape still answers None,
+    # not a KeyError or an empty string.
+    assert draft_flag_if_condition_false_for("Ctffind", "use_noDW") is None
     # A non-negated flag on the SAME job must not be affected.
     assert draft_flag_is_negated("Class2D", "do_preread_images") is False
 

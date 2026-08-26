@@ -166,6 +166,24 @@ def test_tomo_import_default_draft_suppresses_coordinate_branch_fields():
         assert suppressed not in d["unmapped_fields"], suppressed
 
 
+def test_tomo_import_dose_is_per_movie_frame_gets_dropdown_labels():
+    """job_catalog.BOOLEAN_SELECT_LABELS attaches boolean_labels onto a COPY
+    of this option (the frontend renders a two-way <select> instead of a
+    checkbox for it) without mutating the shared raw options list other
+    jobs/requests read from."""
+    d = job_registry.build_job_definition("TomoImport")
+    opts = {o["key"]: o for o in d["options"]}
+    assert opts["dose_is_per_movie_frame"]["boolean_labels"] == {
+        "false": "Dose per tilt image", "true": "Dose per movie frame",
+    }
+    # A field with no override still round-trips normally, and the raw data
+    # backing every OTHER job's build_job_definition call wasn't mutated.
+    assert "boolean_labels" not in opts["angpix"]
+    raw = job_registry.raw_job("TomoImport")
+    raw_opt = next(o for o in raw["options"] if o["key"] == "dose_is_per_movie_frame")
+    assert "boolean_labels" not in raw_opt
+
+
 def test_tomo_exclude_tilt_images_maps_its_hyphenated_flags():
     d = job_registry.build_job_definition("TomoExcludeTiltImages")
     draft = d["draft_command"]
@@ -816,6 +834,28 @@ def test_do_save_nodw_is_never_emitted_for_the_tomo_variant():
     fields = {"is_tomo": False, "do_dose_weighting": True, "do_save_noDW": True}
     cmd, _ = job_registry._build_draft_command(raw, fields, "TomoMotioncorr", "")
     assert "--save_noDW" not in cmd
+
+
+def test_tomoimport_dose_rate_switches_flag_with_dose_is_per_movie_frame():
+    """dose_rate previously always emitted --dose-per-tilt-image regardless
+    of dose_is_per_movie_frame -- confirmed as a real bug (checking "Is dose
+    rate per movie frame?" had no effect on the generated command) while
+    auditing issue #16. FlagOverride.flag_if_condition_false fixes it: the
+    SAME field's value now goes out under whichever of the two real flags
+    matches the checkbox, never both and never neither."""
+    raw = job_registry.raw_job("TomoImport")
+
+    cmd_tilt, unmapped_tilt = job_registry._build_draft_command(
+        raw, {"dose_is_per_movie_frame": False, "dose_rate": 3.5}, "TomoImport", "")
+    assert "--dose-per-tilt-image 3.5" in cmd_tilt
+    assert "--dose-per-movie-frame" not in cmd_tilt
+    assert "dose_rate" not in unmapped_tilt
+
+    cmd_movie, unmapped_movie = job_registry._build_draft_command(
+        raw, {"dose_is_per_movie_frame": True, "dose_rate": 1.2}, "TomoImport", "")
+    assert "--dose-per-movie-frame 1.2" in cmd_movie
+    assert "--dose-per-tilt-image" not in cmd_movie
+    assert "dose_rate" not in unmapped_movie
 
 
 @pytest.mark.parametrize("internal_name,on_fields,expect_substr,off_flip", _UNMAPPED_FIELD_FIXES)
