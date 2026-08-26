@@ -27,8 +27,10 @@ from job_catalog import (
     draft_is_suppressed,
     draft_output_flag,
     draft_output_suffix,
+    draft_numeric_value_for,
     draft_program_override,
     draft_value_for,
+    has_draft_numeric_transform,
     has_draft_value_transform,
 )
 
@@ -52,6 +54,8 @@ def test_unlisted_job_gets_every_accessors_default():
     assert draft_extra_output_args("Localres", {}) == []
     assert has_draft_value_transform("Localres", "anything") is False
     assert draft_value_for("Localres", "anything", "x") is None
+    assert has_draft_numeric_transform("Localres", "anything") is False
+    assert draft_numeric_value_for("Localres", "anything", 1.0) is None
 
 
 # --------------------------------------------------------------------------
@@ -203,6 +207,7 @@ def test_job_draft_override_defaults_are_all_falsy_empty():
     assert override.flags == {}
     assert override.suppress == frozenset()
     assert override.value_transforms == {}
+    assert override.numeric_transforms == {}
     assert override.extra_output_args is None
 
 
@@ -226,3 +231,21 @@ def test_every_draft_overrides_entry_is_a_job_draft_override():
         assert isinstance(override, JobDraftOverride), name
         for key, flag_override in override.flags.items():
             assert isinstance(flag_override, FlagOverride), f"{name}.{key}"
+
+
+# --------------------------------------------------------------------------
+# numeric_transforms
+# --------------------------------------------------------------------------
+
+
+def test_numeric_transform_clamp_then_divide():
+    assert has_draft_numeric_transform("Class3D", "range_tilt") is True
+    assert draft_numeric_value_for("Class3D", "range_tilt", 120.0) == 30.0  # clamped to 90, /3
+    assert draft_numeric_value_for("Class3D", "range_rot", -10.0) == 0.0    # clamped to 0, /3
+
+
+def test_numeric_transform_positivity_gate_returns_none():
+    assert has_draft_numeric_transform("Class3D", "helical_range_distance") is True
+    assert draft_numeric_value_for("Class3D", "helical_range_distance", -5.0) is None
+    assert draft_numeric_value_for("Class3D", "helical_range_distance", 9.0) == 3.0
+    assert has_draft_numeric_transform("Class3D", "some_other_field") is False

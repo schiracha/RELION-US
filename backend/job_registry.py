@@ -55,7 +55,9 @@ from job_catalog import (
     draft_flag_for,
     draft_flag_if_condition_false_for,
     draft_flag_is_negated,
+    draft_numeric_value_for,
     draft_value_for,
+    has_draft_numeric_transform,
     has_draft_value_transform,
     draft_is_suppressed,
     draft_output_flag,
@@ -566,6 +568,23 @@ def _build_draft_command(
                     unmapped.append(key)
                     continue
                 value = translated
+            elif has_draft_numeric_transform(base_name, key):
+                # This field's raw value needs a RELION-side computation
+                # (clamp, divide, positivity gate) before it's what the
+                # program actually parses -- see
+                # job_catalog.JobDraftOverride.numeric_transforms.
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    unmapped.append(key)  # can't confidently resolve
+                    continue
+                transformed = draft_numeric_value_for(base_name, key, numeric_value)
+                if transformed is None:
+                    # RELION's own guard on the COMPUTED value (e.g.
+                    # helical_range_distance <= 0) -- correctly omit this
+                    # flag, not "can't resolve" (not unmapped).
+                    continue
+                value = transformed
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
 
