@@ -2763,8 +2763,8 @@ async function openVisualizer(pickingContext = null) {
           <label class="viz-check"><input type="checkbox" data-role="viz-crosshair" checked /> Show crosshair</label>
           <div class="viz-ctrl-row">
             <span class="viz-ctrl-key">Ø vox</span>
-            <input type="range" data-role="viz-diam" min="2" max="80" value="16" />
-            <span class="viz-ctrl-val" data-role="viz-diam-val">16</span>
+            <input type="range" data-role="viz-diam" min="2" max="400" value="16" />
+            <input type="number" class="viz-ctrl-val-input" data-role="viz-diam-val" min="2" max="2000" value="16" />
           </div>
           <div class="viz-ctrl-row">
             <span class="viz-ctrl-key">Line</span>
@@ -3157,10 +3157,26 @@ async function openVisualizer(pickingContext = null) {
   q('[data-role="viz-lo"]').addEventListener("input", contrastFromSliders);
   q('[data-role="viz-hi"]').addEventListener("input", contrastFromSliders);
 
-  q('[data-role="viz-diam"]').addEventListener("input", (e) => {
-    state.diameter = parseInt(e.target.value, 10);
-    q('[data-role="viz-diam-val"]').textContent = String(state.diameter);
+  const vizDiamSlider = q('[data-role="viz-diam"]');
+  const vizDiamInput = q('[data-role="viz-diam-val"]');
+  const diamMin = parseInt(vizDiamSlider.min, 10);
+  const diamSliderMax = parseInt(vizDiamSlider.max, 10);
+  // The slider's own max (400) is a practical drag range, not a hard cap --
+  // some box sizes run up to 600+, so the number input accepts anything up
+  // to DIAM_HARD_MAX and just pins the slider thumb at its end once a
+  // typed value passes 400, rather than rejecting it.
+  const DIAM_HARD_MAX = 2000;
+  function setDiameter(value) {
+    const clamped = Math.min(DIAM_HARD_MAX, Math.max(diamMin, value));
+    state.diameter = clamped;
+    vizDiamSlider.value = String(Math.min(clamped, diamSliderMax));
+    vizDiamInput.value = String(clamped);
     drawOverlays();
+  }
+  vizDiamSlider.addEventListener("input", (e) => setDiameter(parseInt(e.target.value, 10)));
+  vizDiamInput.addEventListener("input", (e) => {
+    const n = parseInt(e.target.value, 10);
+    if (!Number.isNaN(n)) setDiameter(n);
   });
   q('[data-role="viz-width"]').addEventListener("input", (e) => {
     state.width = parseInt(e.target.value, 10);

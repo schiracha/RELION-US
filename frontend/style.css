@@ -896,6 +896,12 @@ html, body {
 .viz-ctrl-row input[type="range"] { flex: 1; min-width: 0; }
 .viz-ctrl-key { color: var(--text-dim); width: 34px; flex-shrink: 0; }
 .viz-ctrl-val { color: var(--text-dim); width: 26px; text-align: right; flex-shrink: 0; }
+.viz-ctrl-val-input {
+  width: 42px; flex-shrink: 0; text-align: right;
+  background: var(--panel-alt); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 4px; border-radius: 3px;
+  font-family: inherit; font-size: 11px;
+}
 .viz-check { display: flex; align-items: center; gap: 5px; font-size: 11px; }
 
 /* ---- Job Progress tab (live charts + class thumbnails) ---- */
