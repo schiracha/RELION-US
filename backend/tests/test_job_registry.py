@@ -836,6 +836,36 @@ def test_do_save_nodw_is_never_emitted_for_the_tomo_variant():
     assert "--save_noDW" not in cmd
 
 
+def test_motionrefine_sigma_fields_already_work_via_generic_extractor():
+    """GitHub issue #22 assumed sigma_vel/sigma_div/sigma_acc needed a new
+    DRAFT_OVERRIDES entry. Verified false: all three already have a
+    correctly-extracted option_flags entry (flag + a two-clause `&&`
+    condition, both joboptions["x"].getBoolean()-shaped) that
+    _evaluate_condition already handles with no override at all. At
+    Motionrefine's real defaults (do_polish=True, do_own_params=False)
+    the condition correctly evaluates False -- because it's
+    do_own_params, not do_polish, that's off by default -- and the
+    fields are silently omitted, not unmapped, which is why nobody
+    noticed they already worked. This pins that behavior directly
+    instead of adding an unnecessary DRAFT_OVERRIDES entry."""
+    raw = job_registry.raw_job("Motionrefine")
+    fields_on = {
+        "do_polish": True, "do_own_params": True,
+        "sigma_vel": 1.5, "sigma_div": 2500, "sigma_acc": 3,
+    }
+    cmd_on, unmapped_on = job_registry._build_draft_command(raw, fields_on, "Motionrefine", "")
+    assert "--s_vel 1.5" in cmd_on
+    assert "--s_div 2500" in cmd_on
+    assert "--s_acc 3" in cmd_on
+    assert not any(k in unmapped_on for k in ("sigma_vel", "sigma_div", "sigma_acc"))
+
+    fields_off = {**fields_on, "do_own_params": False}
+    cmd_off, unmapped_off = job_registry._build_draft_command(raw, fields_off, "Motionrefine", "")
+    for flag in ("--s_vel", "--s_div", "--s_acc"):
+        assert flag not in cmd_off, cmd_off
+    assert not any(k in unmapped_off for k in ("sigma_vel", "sigma_div", "sigma_acc"))
+
+
 def test_tomoimport_dose_rate_switches_flag_with_dose_is_per_movie_frame():
     """dose_rate previously always emitted --dose-per-tilt-image regardless
     of dose_is_per_movie_frame -- confirmed as a real bug (checking "Is dose
