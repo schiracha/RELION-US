@@ -220,7 +220,15 @@ def _split_top_level_and(condition: str) -> list[str] | None:
     (defer to the caller's existing "unmapped" fallback) the moment the
     condition contains an `||` or the literal token `else` anywhere -- both
     mean real branch logic this app deliberately doesn't try to interpret
-    (see the module docstring)."""
+    (see the module docstring).
+
+    Known, deliberate remaining limitation: a `||` nested inside parens,
+    e.g. `(a || b) && c`, is invisible to this function's own naive
+    `"||" in condition` check just as much as it is to
+    _split_top_level_or's depth-tracking splitter (added alongside this
+    note) -- neither looks inside parens for it. This is fine: the failure
+    mode is always "returns None -> unmapped", never a wrong guess, and no
+    current job in job_catalog.DRAFT_OVERRIDES needs it fixed."""
     if "||" in condition or re.search(r"\belse\b", condition):
         return None
     clauses: list[str] = []
@@ -246,35 +254,74 @@ def _split_top_level_and(condition: str) -> list[str] | None:
     return [c.strip() for c in clauses if c.strip()]
 
 
-def _evaluate_condition(
+def _split_top_level_or(condition: str) -> list[str] | None:
+    """Split `condition` on `||` that sits outside any parentheses -- same
+    depth-tracking shape as _split_top_level_and, but for the operator
+    that binds LOOSEST in C, so splitting on it first (before any `&&`
+    splitting happens per branch) is the correct grammar decomposition:
+    each resulting branch is itself an AND-clause (or a single term),
+    evaluated independently by _evaluate_and_clauses. None (defer to the
+    caller's "unmapped" fallback) the moment the condition contains the
+    literal token `else` anywhere -- same reasoning as
+    _split_top_level_and. A condition with no top-level `||` at all (the
+    common case) still returns a single-element list holding the whole
+    condition unchanged.
+    """
+    if re.search(r"\belse\b", condition):
+        return None
+    clauses: list[str] = []
+    current: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(condition):
+        ch = condition[i]
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif depth == 0 and condition[i : i + 2] == "||":
+            clauses.append("".join(current))
+            current = []
+            i += 1  # skip the second '|'
+        else:
+            current.append(ch)
+        i += 1
+    clauses.append("".join(current))
+    return [c.strip() for c in clauses if c.strip()]
+
+
+def _evaluate_and_clauses(
     condition: str, field_values: dict[str, Any], known_keys: set[str] | None = None
 ) -> bool | None:
-    """Best-effort evaluation of a RELION `if (...)` condition against the
-    CURRENT field values -- not a guess, but replaying the exact same
+    """Best-effort evaluation of ONE `&&`-joined OR-branch (or a whole
+    condition with no top-level `||` at all) against the CURRENT field
+    values -- not a guess, but replaying the exact same
     `joboptions["X"].getBoolean()` check RELION's own getCommands*Job()
-    would make, using the identical field data the user submitted (e.g.
-    "only pass --helical_nr_asu when the Helical processing checkbox is
-    actually on").
+    would make. This is _evaluate_condition's original single-branch body,
+    kept intact and given its own name so _evaluate_condition can dispatch
+    across OR-branches (see its own docstring) before delegating each one
+    here.
 
     known_keys: this job's real option keys (from `options_by_key`), used
     only to decide whether a bare identifier clause (see _BARE_IDENT_RE) is
     safe to resolve -- an identifier that isn't one of this job's own
     options is left unresolved rather than guessed at.
 
-    Returns True/False when every top-level `&&`-joined clause is one of the
-    recognized, safely-evaluable shapes: a boolean field's own value
-    (optionally negated, as either `joboptions["x"].getBoolean()` or the
-    bare local-variable form some jobs use instead -- see _BARE_IDENT_RE),
-    the `is_continue` invariant (a fixed constant in this app -- see below),
-    or `is_tomo`/`!is_tomo` (read from field_values["is_tomo"] when present,
-    see below). Returns None the moment anything else shows up -- an `||`,
-    an `else` branch marker, a numeric/string comparison, a call this
+    Returns True/False when every top-level `&&`-joined clause in THIS
+    branch is one of the recognized, safely-evaluable shapes: a boolean
+    field's own value (optionally negated, as either
+    `joboptions["x"].getBoolean()` or the bare local-variable form some
+    jobs use instead -- see _BARE_IDENT_RE), the `is_continue` invariant
+    (a fixed constant in this app -- see below), or `is_tomo`/`!is_tomo`
+    (read from field_values["is_tomo"] when present, see below). Returns
+    None the moment anything else shows up within this branch -- an
+    `else` branch marker, a numeric/string comparison, a call this
     function doesn't recognize -- so the caller falls back to marking the
-    field "unmapped" exactly as it did before this evaluator existed, rather
-    than risk a wrong guess.
+    field "unmapped" exactly as it did before this evaluator existed,
+    rather than risk a wrong guess.
     """
-    if not condition:
-        return True
     clauses = _split_top_level_and(condition)
     if clauses is None:
         return None
@@ -338,6 +385,47 @@ def _evaluate_condition(
             # being false settles the whole clause).
             return False
     return result
+
+
+def _evaluate_condition(
+    condition: str, field_values: dict[str, Any], known_keys: set[str] | None = None
+) -> bool | None:
+    """Best-effort evaluation of a RELION `if (...)` condition against the
+    CURRENT field values. Splits the WHOLE condition into top-level `||`
+    branches first (correct C precedence: `||` binds loosest), then
+    evaluates each branch as its own `&&`-joined clause list via
+    _evaluate_and_clauses (see its docstring for the recognized clause
+    shapes). Short-circuits like real `||`: True the moment any branch is
+    True (doesn't need every branch to be evaluable); if no branch is True
+    but at least one couldn't be evaluated, the overall verdict is None
+    (can't be sure); False only once every branch cleanly evaluates to
+    False. A condition with no top-level `||` at all degenerates to
+    exactly one branch, so this also covers what used to be
+    _evaluate_condition's entire body for every plain-AND condition
+    already in this app.
+
+    known_keys: passed through unchanged to _evaluate_and_clauses.
+
+    Returns None the moment anything unrecognized shows up anywhere -- an
+    `else` branch marker, a numeric/string comparison, a call this
+    function doesn't recognize, or an `||` whose branches straddle a
+    paren boundary this app's splitting doesn't look inside (see
+    _split_top_level_and's docstring) -- so the caller falls back to
+    marking the field "unmapped" rather than risk a wrong guess.
+    """
+    if not condition:
+        return True
+    or_clauses = _split_top_level_or(condition)
+    if or_clauses is None:
+        return None
+    saw_none = False
+    for clause in or_clauses:
+        verdict = _evaluate_and_clauses(clause, field_values, known_keys)
+        if verdict is True:
+            return True
+        if verdict is None:
+            saw_none = True
+    return None if saw_none else False
 
 
 def _build_draft_command(
@@ -495,6 +583,29 @@ def _build_draft_command(
                 condition = pair.get("condition", "")
                 if _self_guarded(condition, key):
                     flag = pair["flag"]
+                elif "||" in condition:
+                    # The extractor builds this condition string by
+                    # concatenating RELION's own nested `if` blocks with
+                    # `&&`, which silently drops the parens around an OUTER
+                    # condition that itself contains a top-level `||`
+                    # (confirmed for real: MultiBody's gpu_ids/nr_pool/
+                    # nr_threads/scratch_dir and DynaMight's fn_star and
+                    # friends are actually `if (OUTER_WITH_OR) { ... if
+                    # (INNER) ... } }`, extracted as the flattened, wrongly-
+                    # associating text "OUTER_WITH_OR && INNER" -- see
+                    # pipeline_jobs.cpp's getCommandsMultiBodyJob ~111-196).
+                    # _evaluate_condition's OR support (issue #15) assumes
+                    # its input is a faithful transcription of one real `if`
+                    # condition -- true for job_catalog.DRAFT_OVERRIDES'
+                    # hand-verified mapped_condition (checked above, at the
+                    # "not None" branch of `mapped`), NOT reliably true for
+                    # this extracted, auto-flattened text. Stay deferred to
+                    # "unmapped" for any extracted condition containing
+                    # `||`, exactly as before OR support existed, rather
+                    # than risk replaying a condition whose grouping isn't
+                    # actually what RELION's source means.
+                    unmapped.append(key)
+                    continue
                 else:
                     # Not self-guarded doesn't have to mean "give up": this
                     # app has the SAME field_values RELION's own

@@ -754,6 +754,10 @@ _UNMAPPED_FIELD_FIXES = [
     ("Autopick",
      {"do_refs": True, "do_pick_helical_segments": True, "do_amyloid": True},
      "--amyloid", ("do_pick_helical_segments", False)),
+    ("Autopick", {"do_refs": True, "do_write_fom_maps": True}, "--write_fom_maps", ("do_refs", False)),
+    ("Autopick", {"do_log": True, "do_write_fom_maps": True}, "--write_fom_maps", ("do_log", False)),
+    ("Autopick", {"do_refs": True, "do_read_fom_maps": True}, "--read_fom_maps", ("do_refs", False)),
+    ("Autopick", {"do_log": True, "do_read_fom_maps": True}, "--read_fom_maps", ("do_log", False)),
     ("Autorefine", {"ref_correct_greyscale": False}, "--firstiter_cc", ("ref_correct_greyscale", True)),
     ("Autorefine", {"do_zero_mask": True}, "--zero_mask", None),
     ("Autorefine", {"fn_mask": "m.mrc", "do_solvent_fsc": True}, "--solvent_correct_fsc", ("fn_mask", "")),
@@ -920,7 +924,17 @@ def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
         True,
     ),
     # Unevaluable shapes defer to the caller's existing "unmapped" fallback.
-    ('joboptions["a"].getBoolean() || joboptions["b"].getBoolean()', {"a": True}, None),
+    # || support (issue #15): True the moment either branch is True --
+    # matches real short-circuit OR, doesn't need the other branch
+    # evaluable. Expected value flips from None (pre-#15, when
+    # _evaluate_condition had no OR support at all) to True now that
+    # _split_top_level_or handles top-level `||`.
+    ('joboptions["a"].getBoolean() || joboptions["b"].getBoolean()', {"a": True}, True),
+    ('joboptions["a"].getBoolean() || joboptions["b"].getBoolean()', {"a": False, "b": False}, False),
+    # One branch cleanly False, the other unevaluable -- still None, since
+    # we can't be sure the true branch wouldn't have made it True.
+    ('joboptions["a"].getBoolean() || joboptions["nr_split"].getNumber(error_message) > 0',
+     {"a": False}, None),
     ('else && joboptions["do_topaz"].getBoolean()', {"do_topaz": True}, None),
     ('joboptions["nr_split"].getNumber(error_message) > 0', {"nr_split": 5}, None),
 ])
@@ -951,9 +965,38 @@ def test_evaluate_condition(condition, field_values, expected):
     # opposite polarity, and doesn't need to be in known_keys since it's a
     # RelionJob state flag, not a real JobOption.
     ("is_continue", {}, set(), False),
+    # Bare-identifier OR (issue #15's concrete Autopick shape: `do_refs ||
+    # do_log`, pipeline_jobs.cpp ~2398).
+    ("do_refs || do_log", {"do_refs": False, "do_log": True}, {"do_refs", "do_log"}, True),
+    ("do_refs || do_log", {"do_refs": False, "do_log": False}, {"do_refs", "do_log"}, False),
 ])
 def test_evaluate_condition_bare_identifier(condition, field_values, known_keys, expected):
     assert job_registry._evaluate_condition(condition, field_values, known_keys) is expected
+
+
+def test_extracted_or_condition_stays_unmapped_not_wrongly_evaluated():
+    """_evaluate_condition's new || support (issue #15) is safe for
+    job_catalog.DRAFT_OVERRIDES' hand-verified mapped_condition strings (the
+    Autopick do_write_fom_maps/do_read_fom_maps fix), but NOT safe to turn
+    loose on the auto-extracted option_flags condition text: the extractor
+    flattens RELION's nested `if` blocks into one `&&`-joined string,
+    silently dropping the parens around an outer condition that itself
+    contains a top-level `||`. Confirmed for real against
+    getCommandsMultiBodyJob (pipeline_jobs.cpp ~111-196): the true structure
+    is `if (!is_continue || (is_continue && fn_cont != "")) { ... if
+    (use_gpu) { --gpu } }`, extracted as the flattened text
+    `!is_continue || (is_continue && fn_cont != "") && use_gpu` -- naively
+    OR-splitting THAT string (top-level `||` binds loosest) makes
+    `!is_continue` alone satisfy the whole condition, since is_continue is
+    always false in this app, so --gpu would be emitted unconditionally
+    regardless of the "Use GPU acceleration?" checkbox. gpu_ids must stay
+    unmapped instead, exactly as it did before OR support existed."""
+    raw = job_registry.raw_job("MultiBody")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"use_gpu": False, "gpu_ids": ""}, "MultiBody", ""
+    )
+    assert "--gpu" not in cmd, cmd
+    assert "gpu_ids" in unmapped
 
 
 def test_helical_fields_are_omitted_when_the_checkbox_is_unchecked():
