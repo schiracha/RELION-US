@@ -669,6 +669,24 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # flag appears when the box is OFF) never had any effect on the draft
     # regardless of what the user checked, on every classification/
     # refinement job in the app.
+    #
+    # Same missed-by-the-extractor shape, same four jobs, one more spot:
+    #   if (!is_continue) {
+    #     if (joboptions["do_ctf_correction"].getBoolean()) {
+    #       command += " --ctf ";
+    #       if (joboptions["ctf_intact_first_peak"].getBoolean())
+    #         command += " --ctf_intact_first_peak ";
+    #     }
+    #   }
+    # (Inimodel ~3428, Class2D ~3149, Class3D ~3828, Autorefine ~4315 in
+    # pipeline_jobs.cpp -- identical body in all four). do_ctf_correction is
+    # self-guarded but its flag ("--ctf") doesn't spell out as "--" + its
+    # key, so the generic rule missed it too; the field defaults to Yes in
+    # real RELION, so every draft from these four job types was silently
+    # missing --ctf regardless of what the user had checked.
+    # ctf_intact_first_peak needs BOTH conditions (its own checkbox AND
+    # do_ctf_correction) -- FlagOverride.condition supplies the outer one,
+    # the normal boolean-field emit logic supplies the inner one.
     "Inimodel": JobDraftOverride(
         output_suffix="run",
         flags={
@@ -678,6 +696,15 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
             "do_preread_images": FlagOverride("--preread_images"),
+            "do_ctf_correction": FlagOverride("--ctf"),
+            "ctf_intact_first_peak": FlagOverride("--ctf_intact_first_peak", condition="do_ctf_correction"),
+            # `if (do_run_C1) command += " --sym C1 "; else command += " --sym
+            # " + fn_sym;` -- always emits one or the other (~3520-3527).
+            # Mapping only the checked branch is safe: unchecked already
+            # falls through to sym_name's own (separately handled) value.
+            "do_run_C1": FlagOverride("--sym C1"),
+            # `if (do_solvent) command += " --flatten_solvent ";` (~3529).
+            "do_solvent": FlagOverride("--flatten_solvent"),
         },
         suppress=frozenset({"use_direct_entries", "use_gpu"}),
     ),
@@ -690,6 +717,25 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
             "do_preread_images": FlagOverride("--preread_images"),
+            "do_ctf_correction": FlagOverride("--ctf"),
+            "ctf_intact_first_peak": FlagOverride("--ctf_intact_first_peak", condition="do_ctf_correction"),
+            # `if (!ref_correct_greyscale) command += " --firstiter_cc";`
+            # (~3916) -- self-guarded but negated, missed by the generic rule
+            # for the same reason as do_parallel_discio/do_combine_thru_disc
+            # above (name doesn't spell "--" + key either way).
+            "ref_correct_greyscale": FlagOverride("--firstiter_cc", negated=True),
+            "do_fast_subsets": FlagOverride("--fast_subsets"),  # ~3961
+            "do_zero_mask": FlagOverride("--zero_mask"),  # ~3967, unconditional (is_continue always false here)
+            "do_blush": FlagOverride("--blush"),  # ~3974
+            # `if (!dont_skip_align) command += " --skip_align ";` (~3985) --
+            # negated: checking "Perform image alignment?" (Yes by default)
+            # is what SKIPS emitting --skip_align.
+            "dont_skip_align": FlagOverride("--skip_align", negated=True),
+            # `if (dont_skip_align) { ... if (allow_coarser) command += "
+            # --allow_coarser_sampling"; }` (~4018) -- only reachable at all
+            # when alignment is on.
+            "allow_coarser": FlagOverride("--allow_coarser_sampling", condition="dont_skip_align"),
+            "do_pad1": FlagOverride("--pad 1"),  # ~3939, "--pad 2" is relion_refine's own default when omitted
         },
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
@@ -705,6 +751,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
             "do_preread_images": FlagOverride("--preread_images"),
+            "do_ctf_correction": FlagOverride("--ctf"),
+            "ctf_intact_first_peak": FlagOverride("--ctf_intact_first_peak", condition="do_ctf_correction"),
+            "ref_correct_greyscale": FlagOverride("--firstiter_cc", negated=True),  # ~4406, same shape as Class3D
+            "do_zero_mask": FlagOverride("--zero_mask"),  # ~4462
+            # `if (fn_mask.length() > 0) { ... if (do_solvent_fsc) command +=
+            # " --solvent_correct_fsc "; }` (~4469) -- fn_mask is a plain
+            # string field, so its own truthiness (empty vs filled) is the
+            # condition; bool(field_values["fn_mask"]) reads the same as
+            # RELION's own .length() > 0 check.
+            "do_solvent_fsc": FlagOverride("--solvent_correct_fsc", condition="fn_mask"),
+            "do_blush": FlagOverride("--blush"),  # ~4421
+            "auto_faster": FlagOverride("--auto_ignore_angles --auto_resol_angles"),  # ~4440
+            "do_pad1": FlagOverride("--pad 1"),  # ~4436
         },
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
@@ -715,6 +774,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         flags={
             "in_optimisation": FlagOverride("--i"), "in_particles": FlagOverride("--p"),
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
+            "do_float16": FlagOverride("--float16"),  # ~7112
+            "do_stack2d": FlagOverride("--stack2d"),  # ~7117
         },
         suppress=frozenset({"use_direct_entries"}),
     ),
@@ -722,6 +783,18 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         flags={
             "in_optimisation": FlagOverride("--i"), "in_particles": FlagOverride("--p"),
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
+            # `if (do_reg_def) command += " --do_reg_defocus --lambda " +
+            # lambda;` (~7243) -- do_reg_def's own flag doesn't spell out as
+            # "--" + key, so (like do_ctf_correction elsewhere) it was
+            # missed entirely; lambda's flag DOES equal "--" + its key, so
+            # the generic rule found and emitted it UNCONDITIONALLY --
+            # confirmed for real, a default-settings draft carried --lambda
+            # regardless of do_reg_def. Splitting the compound literal here
+            # and adding lambda's own condition fixes both at once.
+            "do_reg_def": FlagOverride("--do_reg_defocus"),
+            "lambda": FlagOverride("--lambda", condition="do_reg_def"),
+            "do_frame_scale": FlagOverride("--per_frame_scale"),  # ~7255
+            "do_tomo_scale": FlagOverride("--per_tomo_scale"),  # ~7256
         },
         suppress=frozenset({"use_direct_entries"}),
     ),
@@ -729,6 +802,14 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         flags={
             "in_optimisation": FlagOverride("--i"), "in_particles": FlagOverride("--p"),
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
+            # `bool do_shift_align = joboptions["do_shift_align"]
+            # .getBoolean(); ... if (do_shift_align) command += "
+            # --shift_only ";` (~7383/7396) -- read into a local copy first,
+            # so _self_guarded's joboptions[...] scan never sees it guarding
+            # its own flag (same reason do_motion below was missed).
+            "do_shift_align": FlagOverride("--shift_only"),
+            "do_motion": FlagOverride("--motion"),  # ~7384/7403, same local-copy shape
+            "do_sq_exp_ker": FlagOverride("--sq_exp_ker", condition="do_motion"),  # ~7408
         },
         suppress=frozenset({"use_direct_entries"}),
     ),
@@ -739,12 +820,44 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         },
         suppress=frozenset({"use_direct_entries", "do_helix"}),
     ),
+    "TomoReconstructTomograms": JobDraftOverride(
+        flags={
+            # `if (do_fourier) { command += " --fourier "; ... }` (~6746),
+            # not nested inside anything else -- generate_split_tomograms's
+            # mutual-exclusivity check with do_fourier is enforced as an
+            # ERROR when both are true, not a gate on this emission.
+            "do_fourier": FlagOverride("--fourier"),
+        },
+    ),
+    "TomoAlignTiltSeries": JobDraftOverride(
+        flags={
+            # Three mutually-exclusive alignment methods (~6581-6583,
+            # enforced by an i!=1 ERROR check, not by nesting) -- each
+            # method's own toggle flag is simple; picking more than one is
+            # caught by real RELION itself when the draft is actually run.
+            "do_imod_fiducials": FlagOverride("--imod_fiducials"),  # ~6609
+            "do_imod_patchtrack": FlagOverride("--imod_patchtrack"),  # ~6615
+            "do_aretomo2": FlagOverride("--aretomo2"),  # ~6622
+            "do_aretomo_tiltcorrect": FlagOverride("--aretomo_tiltcorrect", condition="do_aretomo2"),  # ~6627
+            "do_aretomo_ctf": FlagOverride("--aretomo_ctf", condition="do_aretomo2"),  # ~6633
+            "do_aretomo_phaseshift": FlagOverride(
+                "--aretomo_phaseshift", condition="do_aretomo2 && do_aretomo_ctf"),  # ~6636
+        },
+    ),
     "Class2D": JobDraftOverride(
         output_suffix="run",
         flags={
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
             "do_preread_images": FlagOverride("--preread_images"),
+            "do_ctf_correction": FlagOverride("--ctf"),
+            "ctf_intact_first_peak": FlagOverride("--ctf_intact_first_peak", condition="do_ctf_correction"),
+            "do_zero_mask": FlagOverride("--zero_mask"),  # ~3268, unconditional (is_continue always false here)
+            "do_center": FlagOverride("--center_classes"),  # ~3277
+            # `if (!dont_skip_align) command += " --skip_align ";` (~3285)
+            "dont_skip_align": FlagOverride("--skip_align", negated=True),
+            "allow_coarser": FlagOverride("--allow_coarser_sampling", condition="dont_skip_align"),  # ~3301
+            "do_bimodal_psi": FlagOverride("--bimodal_psi", condition="do_helix && dont_skip_align"),  # ~3317
         },
         # use_gpu -- gates --gpu (built from gpu_ids' value), never a flag
         # on its own (pipeline_jobs.cpp, all 6 jobs across this table using
@@ -760,6 +873,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
             "do_preread_images": FlagOverride("--preread_images"),
+            # All three below sit inside `if (!is_continue || (is_continue &&
+            # fn_cont != "")) { ... }` (~4713) -- since is_continue is always
+            # false in this app, that whole condition is always true here,
+            # same reasoning as do_ctf_correction's "!is_continue" elsewhere.
+            "do_blush": FlagOverride("--blush"),  # ~4772
+            "do_subtracted_bodies": FlagOverride("--reconstruct_subtracted_bodies"),  # ~4775
+            "do_pad1": FlagOverride("--pad 1"),  # ~4788
         },
         suppress=frozenset({"use_gpu"}),
     ),
@@ -818,6 +938,11 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_dose_weighting": FlagOverride("--dose_weighting"),
             "do_own_motioncor": FlagOverride("--use_own"),
             "do_even_odd_split": FlagOverride("--even_odd_split", condition="is_tomo"),
+            # `if (!is_tomo && do_dose_weighting) { command += "
+            # --dose_weighting "; if (do_save_noDW) command += "
+            # --save_noDW "; } }` (~1642-1647) -- same !is_tomo shape as
+            # do_dose_weighting above, plus its own name mismatch.
+            "do_save_noDW": FlagOverride("--save_noDW", condition="!is_tomo && do_dose_weighting"),
         },
         value_transforms={
             "gain_rot": {
@@ -846,7 +971,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # as a real branch and job_registry._evaluate_condition now resolves
         # against the toggle like any other is_tomo-gated field.
         #   command += " --use_noDW ";
-        flags={"use_noDW": FlagOverride("--use_noDW", condition="!is_tomo")},
+        # slow_search (~1827, `if (!slow_search) command += " --fast_search
+        # ";`) -- negated, applies in both SPA and Tomo mode (not nested
+        # inside the is_tomo split above).
+        flags={
+            "use_noDW": FlagOverride("--use_noDW", condition="!is_tomo"),
+            "slow_search": FlagOverride("--fast_search", negated=True),
+        },
     ),
     # getCommandsImportJob (src/pipeline_jobs.cpp:1439-1441, found by
     # actually running an Import job against RELION 5.0.1 -- the draft
@@ -882,7 +1013,34 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         },
         extra_output_args=_import_ofile_args,
     ),
-    "Autopick": JobDraftOverride(suppress=frozenset({"use_gpu"})),
+    "Autopick": JobDraftOverride(
+        flags={
+            # All within the `else if (do_refs)` branch (~2295-2379) unless
+            # noted -- one of Autopick's three mutually-exclusive picking
+            # modes (LoG/references/topaz, enforced by an else-if chain, not
+            # by nesting these under do_refs itself in the source, but the
+            # effect is the same: none of these apply unless do_refs is on).
+            "log_invert": FlagOverride("--Log_invert", condition="do_log"),  # ~2292, LoG mode
+            "do_invert_refs": FlagOverride("--invert", condition="do_refs"),  # ~2338
+            # `if (do_ctf_autopick) { command += " --ctf "; if (do_ignore_
+            # first_ctfpeak_autopick) command += " --ctf_intact_first_peak
+            # "; }` (~2341) -- same nested-self-guard shape as
+            # do_ctf_correction elsewhere in this table.
+            "do_ctf_autopick": FlagOverride("--ctf", condition="do_refs"),
+            "do_ignore_first_ctfpeak_autopick": FlagOverride(
+                "--ctf_intact_first_peak", condition="do_refs && do_ctf_autopick"),
+            # `if (do_pick_helical_segments) { command += " --helix"; if
+            # (do_amyloid) command += " --amyloid"; ... }` (~2367) -- only
+            # the flags themselves; the --min_distance/--helical_tube_* VALUE
+            # fields right after need a computed value (nr_asu * rise, or are
+            # gated by a `!= comparison` this table can't express) and stay
+            # unmapped for hand-editing, same as Class3D/Autorefine's
+            # do_helix-gated range_rot/range_tilt/range_psi.
+            "do_pick_helical_segments": FlagOverride("--helix", condition="do_refs"),
+            "do_amyloid": FlagOverride("--amyloid", condition="do_refs && do_pick_helical_segments"),
+        },
+        suppress=frozenset({"use_gpu"}),
+    ),
     "Maskcreate": JobDraftOverride(
         output_suffix="mask.mrc",
         # do_helix -- gates the helical_* fields here too (Class3D/
@@ -892,7 +1050,79 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # Fixed, unconditional literal suffix (verified by reading the function
     # in full -- no branch controls this line): src/pipeline_jobs.cpp ~5340
     # (command += " --o " + outputname + "postprocess";).
-    "Postprocess": JobDraftOverride(output_suffix="postprocess"),
+    "Postprocess": JobDraftOverride(
+        output_suffix="postprocess",
+        flags={
+            # `FileName fn_half1 = joboptions["fn_in"].getString(); ...
+            # command += " --i " + fn_half1;` (~5317/5334) -- read into a
+            # local variable first, so the extractor's per-option scan
+            # (which looks for `joboptions["key"]` directly beside a
+            # `command +=`) never sees it. fn_in is Postprocess's REQUIRED
+            # primary input (one of the two half-maps) -- every draft from
+            # this job was silently missing its main --i argument.
+            "fn_in": FlagOverride("--i"),
+            "do_skip_fsc_weighting": FlagOverride("--skip_fsc_weighting"),  # ~5370
+        },
+    ),
+    "Extract": JobDraftOverride(
+        flags={
+            # `if (do_reextract) { ... if (do_reset_offsets) command += "
+            # --reset_offsets"; else if (do_recenter) { command += "
+            # --recenter"; command += " --recenter_x " + ...; ... } }`
+            # (~2501-2519) -- only the two booleans' own flags; recenter_x/
+            # y/z are separately, already-correctly mapped (their flag
+            # equals "--" + their own key).
+            "do_reset_offsets": FlagOverride("--reset_offsets", condition="do_reextract"),
+            "do_recenter": FlagOverride("--recenter", condition="do_reextract"),
+            "do_invert": FlagOverride("--invert_contrast"),  # ~2605
+            "do_float16": FlagOverride("--float16"),  # ~2577
+        },
+    ),
+    "Select": JobDraftOverride(
+        flags={
+            # `else if (do_split) { command += " --split "; if (do_random)
+            # command += " --random_order "; ... }` (~2861-2870).
+            "do_random": FlagOverride("--random_order", condition="do_split"),
+        },
+    ),
+    "Subtract": JobDraftOverride(
+        flags={
+            # Everything below sits inside `if (do_fliplabel) {
+            # ...different command entirely... } else { ...normal
+            # subtraction... }` (~5180) -- do_fliplabel itself switches to a
+            # wholly different command shape (`--revert <file> --o <dir>`,
+            # no --i/--data/etc.) that a flag override can't express, so it
+            # stays unmapped for hand-editing; everything else here only
+            # applies in the (default) non-revert branch.
+            "fn_opt": FlagOverride("--i", condition="!do_fliplabel"),  # ~5212, required primary input
+            # `if (do_data) { ... command += " --data " + fn_data; }`
+            # (~5223/5229) -- fn_data's own flag ("--data") differs from the
+            # generic "--fn_data" rule too, so (unlike Extract's do_recenter
+            # above) it needed its own entry alongside its gate.
+            "fn_data": FlagOverride("--data", condition="!do_fliplabel && do_data"),
+            "do_float16": FlagOverride("--float16", condition="!do_fliplabel"),  # ~5250
+            "do_center_mask": FlagOverride("--recenter_on_mask", condition="!do_fliplabel"),  # ~5239
+        },
+    ),
+    "Motionrefine": JobDraftOverride(
+        flags={"do_float16": FlagOverride("--float16")},  # ~5902
+    ),
+    "Ctfrefine": JobDraftOverride(
+        flags={
+            # `if (do_tilt) { ... if (do_trefoil) command += "
+            # --odd_aberr_max_n 3"; }` (~6142) -- only the self-contained
+            # inner flag; do_tilt/do_ctf themselves each also unconditionally
+            # append a companion VALUE (--kmin_tilt/--kmin_defocus + minres,
+            # a field shared across three differently-named flags depending
+            # on which branch is active) that this table has no way to
+            # express, so they stay unmapped for hand-editing.
+            "do_trefoil": FlagOverride("--odd_aberr_max_n 3", condition="do_tilt"),
+            # `if (!do_aniso_mag) { ... if (do_4thorder) command += "
+            # --fit_aberr"; }` (~6148, inside the else of the do_aniso_mag
+            # branch at ~6100).
+            "do_4thorder": FlagOverride("--fit_aberr", condition="!do_aniso_mag"),
+        },
+    ),
 }
 # Deliberately NOT included above (mode-branched or otherwise not safely
 # reducible to a single default override -- left for hand-editing rather
@@ -916,6 +1146,44 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #   - Select's class_ranker branch appends bare `outputname` (no suffix)
 #     plus two EXTRA fixed flags, not a suffix change
 #     (src/pipeline_jobs.cpp ~2926).
+#
+# From the broader unmapped-field audit (every field with no option_flags
+# entry at all, across every job type, cross-checked against real source --
+# see test_job_registry.py's _UNMAPPED_FIELD_FIXES for the ones that WERE
+# safe to fix). Left unmapped rather than guessed:
+#   - Autopick.do_write_fom_maps/do_read_fom_maps: condition is `do_refs ||
+#     do_log` (~2398) -- _evaluate_condition only supports `&&`, not `||`.
+#   - Autopick.do_topaz_filaments/topaz-internal fields, Motionrefine.
+#     do_own_params, Select.do_recenter (needs a `fnt.contains("Class2D/")`
+#     string check, ~2988), TomoDenoiseTomograms.do_cryocare_train/predict,
+#     Subtract.do_fliplabel: each switches to a genuinely different
+#     multi-flag/multi-value shape (or, for do_fliplabel, an entirely
+#     different command), not a single flag toggle.
+#   - Class3D/Autorefine.do_local_ang_searches/sigma_angles,
+#     Class3D/Autorefine's do_helix-gated range_rot/range_tilt/range_psi/
+#     helical_range_distance/keep_tilt_prior_fixed, Autopick's do_pick_
+#     helical_segments-gated --min_distance (helical_nr_asu * helical_rise):
+#     each needs either a runtime numeric comparison between two option
+#     values (e.g. `sampling != auto_local_sampling`) or a computed
+#     (multiplied/divided) value, neither of which this table can express.
+#   - Ctfrefine.do_ctf/do_tilt/do_aniso_mag: each unconditionally appends a
+#     companion VALUE right after its own flag (--kmin_defocus/--kmin_tilt/
+#     --kmin_mag, all built from the SAME "minres" field under a different
+#     flag name per branch) -- only their self-contained inner children
+#     (do_trefoil, do_4thorder) were safe to add on their own.
+#   - Extract.do_norm/bg_diameter/do_extract_helix family: bg_radius is
+#     computed (diameter->radius, extract_size- and do_rescale-dependent,
+#     ~2584-2600); the helix branch hardcodes "--helical_nr_asu 1
+#     --helical_rise 1" in its else (~2629), not read from any field.
+#   - TomoAlign/TomoCtfRefine.in_halfmaps: only half of the pair
+#     (`--ref1 <in_halfmaps>`) is a plain passthrough -- `--ref2` is derived
+#     by string substitution (getTheOtherHalf, "half1"->"half2" in the
+#     filename), not any option's own value. Mapping just --ref1 would make
+#     an incomplete command look complete; left fully unmapped instead.
+#   - TomoImport.dose_is_per_movie_frame: the SAME "dose_rate" field needs a
+#     DIFFERENT flag (--dose-per-movie-frame vs --dose-per-tilt-image)
+#     depending on this boolean (~6506) -- one option key, two possible
+#     flags; FlagOverride only supports one flag per key.
 
 
 def _override(internal_name: str) -> Optional[JobDraftOverride]:

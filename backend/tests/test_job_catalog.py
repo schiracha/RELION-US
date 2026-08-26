@@ -39,17 +39,17 @@ from job_catalog import (
 
 
 def test_unlisted_job_gets_every_accessors_default():
-    assert "Select" not in DRAFT_OVERRIDES  # not one of the 19 overridden jobs
-    assert draft_flag_for("Select", "anything") is None
-    assert draft_flag_condition_for("Select", "anything") is None
-    assert draft_flag_is_negated("Select", "anything") is False
-    assert draft_program_override("Select") is None
-    assert draft_is_suppressed("Select", "anything") is False
-    assert draft_output_flag("Select") == "--o"
-    assert draft_output_suffix("Select") is None
-    assert draft_extra_output_args("Select", {}) == []
-    assert has_draft_value_transform("Select", "anything") is False
-    assert draft_value_for("Select", "anything", "x") is None
+    assert "Localres" not in DRAFT_OVERRIDES  # not one of the overridden jobs
+    assert draft_flag_for("Localres", "anything") is None
+    assert draft_flag_condition_for("Localres", "anything") is None
+    assert draft_flag_is_negated("Localres", "anything") is False
+    assert draft_program_override("Localres") is None
+    assert draft_is_suppressed("Localres", "anything") is False
+    assert draft_output_flag("Localres") == "--o"
+    assert draft_output_suffix("Localres") is None
+    assert draft_extra_output_args("Localres", {}) == []
+    assert has_draft_value_transform("Localres", "anything") is False
+    assert draft_value_for("Localres", "anything", "x") is None
 
 
 # --------------------------------------------------------------------------
