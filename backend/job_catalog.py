@@ -1055,6 +1055,16 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # do_helix-gated range_rot/range_tilt/range_psi.
             "do_pick_helical_segments": FlagOverride("--helix", condition="do_refs"),
             "do_amyloid": FlagOverride("--amyloid", condition="do_refs && do_pick_helical_segments"),
+            # `if (joboptions["do_refs"].getBoolean() || joboptions["do_log"]
+            # .getBoolean()) { if (do_write_fom_maps) command += "
+            # --write_fom_maps "; if (do_read_fom_maps) command += "
+            # --read_fom_maps "; }` (~2398-2410) -- both self-guarded
+            # booleans, but nested under a top-level `||` between Autopick's
+            # two picking-with-a-reference modes (LoG vs. references), which
+            # job_registry._evaluate_condition can now evaluate (see its
+            # OR-support, added for exactly this case -- issue #15).
+            "do_write_fom_maps": FlagOverride("--write_fom_maps", condition="do_refs || do_log"),
+            "do_read_fom_maps": FlagOverride("--read_fom_maps", condition="do_refs || do_log"),
         },
         suppress=frozenset({"use_gpu"}),
     ),
@@ -1168,8 +1178,6 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 # entry at all, across every job type, cross-checked against real source --
 # see test_job_registry.py's _UNMAPPED_FIELD_FIXES for the ones that WERE
 # safe to fix). Left unmapped rather than guessed:
-#   - Autopick.do_write_fom_maps/do_read_fom_maps: condition is `do_refs ||
-#     do_log` (~2398) -- _evaluate_condition only supports `&&`, not `||`.
 #   - Autopick.do_topaz_filaments/topaz-internal fields, Motionrefine.
 #     do_own_params, Select.do_recenter (needs a `fnt.contains("Class2D/")`
 #     string check, ~2988), TomoDenoiseTomograms.do_cryocare_train/predict,
