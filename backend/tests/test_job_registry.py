@@ -808,6 +808,22 @@ _UNMAPPED_FIELD_FIXES = [
     ("Extract", {"do_reextract": True, "do_recenter": True}, "--recenter", ("do_reextract", False)),
     ("Extract", {"do_invert": True}, "--invert_contrast", None),
     ("Extract", {"do_float16": True}, "--float16", None),
+    ("Extract", {"do_extract_helix": True}, "--helix", ("do_extract_helix", False)),
+    ("Extract",
+     {"do_extract_helix": True, "helical_bimodal_angular_priors": True},
+     "--helical_bimodal_angular_priors", ("do_extract_helix", False)),
+    ("Extract",
+     {"do_extract_helix": True, "do_extract_helical_tubes": True},
+     "--helical_tubes", ("do_extract_helix", False)),
+    ("Extract",
+     {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": True},
+     "--helical_cut_into_segments", ("do_extract_helical_tubes", False)),
+    ("Extract", {"do_norm": True}, "--norm", ("do_norm", False)),
+    ("Extract", {"do_norm": True, "extract_size": 128, "bg_diameter": -1}, "--bg_radius 48",
+     ("do_norm", False)),
+    ("Extract",
+     {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": False},
+     "--helical_nr_asu 1 --helical_rise 1", ("do_cut_into_segments", True)),
     ("Inimodel", {"do_run_C1": True}, "--sym C1", None),
     ("Inimodel", {"do_solvent": True}, "--flatten_solvent", None),
     ("Motioncorr",
@@ -1106,6 +1122,90 @@ def test_helical_range_distance_omitted_when_not_positive():
         cmd, unmapped = job_registry._build_draft_command(raw, fields, internal_name, "")
         assert "--helical_sigma_distance" not in cmd, cmd
         assert "helical_range_distance" not in unmapped
+
+
+def test_extract_bg_radius_falls_back_to_75_percent_of_box_size():
+    """A negative bg_diameter (RELION's own JobOption default, -1) means
+    "use 75% of the box size instead" (pipeline_jobs.cpp ~2584-2586), not
+    "pass -1 through raw" -- confirmed via the exact default draft: box
+    size 128 -> 0.75*128 = 96, halved to a 48px radius."""
+    raw = job_registry.raw_job("Extract")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_norm": True, "bg_diameter": -1, "extract_size": 128}, "Extract", "")
+    assert "--norm" in cmd and "--bg_radius 48" in cmd, cmd
+    assert not any(k in unmapped for k in ("do_norm", "bg_diameter"))
+
+
+def test_extract_bg_radius_uses_explicit_diameter_when_given():
+    raw = job_registry.raw_job("Extract")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_norm": True, "bg_diameter": 60, "extract_size": 128}, "Extract", "")
+    assert "--bg_radius 30" in cmd, cmd  # 60 / 2, extract_size unused once diameter >= 0
+
+
+def test_extract_bg_radius_is_rescaled_and_truncated_to_int_when_do_rescale_is_on():
+    """pipeline_jobs.cpp ~2588-2593: bg_radius *= rescale, then /=
+    extract_size, THEN truncated to an int (not rounded) -- confirmed with
+    a fractional intermediate (48 * 100 / 128 = 37.5) that must truncate to
+    37, not round to 38."""
+    raw = job_registry.raw_job("Extract")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {"do_norm": True, "bg_diameter": -1, "extract_size": 128, "do_rescale": True, "rescale": 100},
+        "Extract", "",
+    )
+    assert "--norm" in cmd and "--bg_radius 37" in cmd, cmd
+    assert "--scale 100" in cmd  # the OTHER, already-mapped effect of do_rescale, still present
+
+
+def test_extract_bg_radius_omitted_when_do_norm_is_off():
+    raw = job_registry.raw_job("Extract")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_norm": False, "bg_diameter": -1, "extract_size": 128}, "Extract", "")
+    assert "--norm" not in cmd
+    assert "--bg_radius" not in cmd
+
+
+def test_extract_norm_flag_survives_even_when_bg_radius_cant_be_computed():
+    """"--norm" is its own plain FlagOverride, deliberately NOT folded into
+    the --bg_radius computation -- so a momentarily-unparseable
+    extract_size (a real, reachable state: a draft recompute fires on
+    every keystroke, so a mid-edit blank/invalid box size reaches here as
+    an empty string before the user finishes typing) only drops
+    --bg_radius, never silently drops --norm too, and do_norm is never
+    marked unmapped either way (it's a real, always-correct mapping)."""
+    raw = job_registry.raw_job("Extract")
+    for bad_extract_size in ("", None, "not-a-number", -5):
+        cmd, unmapped = job_registry._build_draft_command(
+            raw, {"do_norm": True, "extract_size": bad_extract_size}, "Extract", "")
+        assert "--norm" in cmd, (bad_extract_size, cmd)
+        assert "--bg_radius" not in cmd, (bad_extract_size, cmd)
+        assert "do_norm" not in unmapped
+    assert not any(k in unmapped for k in ("do_norm", "bg_diameter"))
+
+
+def test_extract_helical_nr_asu_rise_fallback_is_mutually_exclusive_with_the_real_values():
+    """RELION emits EITHER the hardcoded `--helical_nr_asu 1 --helical_rise
+    1` fallback (do_cut_into_segments off) OR the real field values (on) --
+    never both, never neither, once tube extraction is active
+    (pipeline_jobs.cpp ~2620-2630)."""
+    raw = job_registry.raw_job("Extract")
+    base = {"do_extract_helix": True, "do_extract_helical_tubes": True}
+
+    cmd_fallback, unmapped_fallback = job_registry._build_draft_command(
+        raw, {**base, "do_cut_into_segments": False}, "Extract", "")
+    assert "--helical_nr_asu 1 --helical_rise 1" in cmd_fallback, cmd_fallback
+
+    cmd_real, unmapped_real = job_registry._build_draft_command(
+        raw, {**base, "do_cut_into_segments": True, "helical_nr_asu": 7, "helical_rise": 4.5}, "Extract", "")
+    assert "--helical_nr_asu 1 --helical_rise 1" not in cmd_real, cmd_real
+    assert "--helical_nr_asu 7" in cmd_real
+    assert "--helical_rise 4.5" in cmd_real
+
+    # Tube extraction not even active: neither branch applies.
+    cmd_off, unmapped_off = job_registry._build_draft_command(
+        raw, {"do_extract_helix": True, "do_extract_helical_tubes": False}, "Extract", "")
+    assert "--helical_nr_asu" not in cmd_off, cmd_off
 
 
 def test_helical_fields_are_included_when_the_checkbox_is_checked():

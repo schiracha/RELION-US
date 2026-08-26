@@ -19,6 +19,7 @@ from job_catalog import (
     DRAFT_OVERRIDES,
     FlagOverride,
     JobDraftOverride,
+    draft_extra_flags,
     draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
@@ -52,6 +53,7 @@ def test_unlisted_job_gets_every_accessors_default():
     assert draft_output_flag("Localres") == "--o"
     assert draft_output_suffix("Localres") is None
     assert draft_extra_output_args("Localres", {}) == []
+    assert draft_extra_flags("Localres", {}) == []
     assert has_draft_value_transform("Localres", "anything") is False
     assert draft_value_for("Localres", "anything", "x") is None
     assert has_draft_numeric_transform("Localres", "anything") is False
@@ -195,6 +197,43 @@ def test_extra_output_args_default_job_returns_nothing():
 
 
 # --------------------------------------------------------------------------
+# extra_flags (Extract's --bg_radius and --helical_nr_asu/--helical_rise
+# fallback -- a value/branch computed from MULTIPLE fields, not just one
+# option's own value or a single flag's presence/absence; issues #17/#18)
+# --------------------------------------------------------------------------
+
+
+def test_extra_flags_extract_bg_radius():
+    # "--norm" itself is a separate, plain FlagOverride (Extract's own
+    # entry) -- not part of extra_flags' output, so it still appears even
+    # if this computation bails out (see _extract_bg_radius_flags).
+    assert draft_extra_flags("Extract", {"do_norm": True, "bg_diameter": -1, "extract_size": 128}) == \
+        ["--bg_radius", "48"]
+
+
+def test_extra_flags_extract_bg_radius_omitted_when_do_norm_off():
+    assert draft_extra_flags("Extract", {"do_norm": False, "bg_diameter": -1, "extract_size": 128}) == []
+
+
+def test_extra_flags_extract_helical_fallback():
+    assert draft_extra_flags(
+        "Extract",
+        {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": False},
+    ) == ["--helical_nr_asu", "1", "--helical_rise", "1"]
+
+
+def test_extra_flags_extract_helical_fallback_absent_once_cutting_into_segments():
+    assert draft_extra_flags(
+        "Extract",
+        {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": True},
+    ) == []
+
+
+def test_extra_flags_default_job_returns_nothing():
+    assert draft_extra_flags("Motioncorr", {}) == []
+
+
+# --------------------------------------------------------------------------
 # The dataclasses themselves: frozen (immutable, hashable) and defaulted
 # --------------------------------------------------------------------------
 
@@ -209,6 +248,7 @@ def test_job_draft_override_defaults_are_all_falsy_empty():
     assert override.value_transforms == {}
     assert override.numeric_transforms == {}
     assert override.extra_output_args is None
+    assert override.extra_flags is None
 
 
 def test_flag_override_and_job_draft_override_are_frozen():

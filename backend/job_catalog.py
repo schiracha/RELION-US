@@ -549,13 +549,42 @@ class JobDraftOverride:
     # reading directly off one JobOption (e.g. Import's --ofile, picked
     # from is_multiframe's own two-way branch; see _import_ofile_args
     # below). Returns [] for "nothing to add" (e.g. the branch this
-    # computation covers isn't the one currently active). This is the one
-    # slot in this table that runs code instead of holding data --
-    # reserved for exactly this "compulsory value, computed from a couple
-    # of already-known fields, not itself a JobOption" shape; anything
-    # bigger belongs in the editable command box by hand instead, per this
-    # project's policy against reconstructing real per-job branching.
+    # computation covers isn't the one currently active). One of two slots
+    # in this table that run code instead of holding data (see
+    # extra_flags below for the other) -- reserved for exactly this
+    # "compulsory value, computed from a couple of already-known fields,
+    # not itself a JobOption" shape; anything bigger belongs in the
+    # editable command box by hand instead, per this project's policy
+    # against reconstructing real per-job branching. The two are kept
+    # separate rather than merged into one hook because their POSITION in
+    # the command differs and matters for readability (this one is
+    # anchored right after the output flag/subdir; extra_flags has no
+    # fixed position) -- not because they need different underlying
+    # mechanics; both take the full field_values dict and return a flat
+    # token list.
     extra_output_args: Optional[Callable[[dict], list]] = None
+    # Extra command-line tokens computed from the FULL field_values dict
+    # (not just one option's own value) and appended once per job, near the
+    # end of the draft command -- for a value RELION computes from MULTIPLE
+    # other fields with real conditional/branch logic that neither
+    # FlagOverride (one option -> one flag) nor numeric_transforms (one
+    # option's OWN value -> a computed value) can express, e.g. Extract's
+    # --bg_radius (computed from bg_diameter, extract_size, and
+    # conditionally rescale -- see _extract_bg_radius_flags below) or a
+    # branch whose ELSE case is a hardcoded literal rather than any field's
+    # value (Extract's --helical_nr_asu/--helical_rise fallback -- see
+    # _extract_helical_nr_asu_rise_fallback_flags below). Returns [] for
+    # "nothing to add right now" (the relevant branch isn't active).
+    # Distinct from extra_output_args (see its own comment for why they're
+    # separate hooks rather than one). Deliberately keyed per-JOB, not
+    # per-option like flags/value_transforms/numeric_transforms: a value
+    # computed from several fields at once (bg_radius has no single
+    # "owning" option -- not bg_diameter alone, not do_norm alone) has no
+    # natural single key to live under, so forcing one would be arbitrary;
+    # a job needing several genuinely-independent computed-token groups
+    # (as Extract does here, for #17 and #18 together) combines them in
+    # its own small composed function instead (see _extract_extra_flags).
+    extra_flags: Optional[Callable[[dict], list]] = None
 
 
 def _import_ofile_args(field_values: dict) -> list:
@@ -605,6 +634,83 @@ def _third_if_positive(value: float) -> Optional[float]:
     joboptions condition) -- returns None to mean "correctly omit", which
     _build_draft_command's caller must NOT count as unmapped."""
     return _div_by_3(value) if value > 0.0 else None
+
+
+def _safe_float(value, default: float) -> Optional[float]:
+    """Best-effort float parse for a slider/number field's current raw
+    value, or `default` when the value itself is empty/None (the ordinary
+    "field left blank" case, same convention as the empty-value skip
+    elsewhere in this module) -- None (not an exception) when it's some
+    other unparseable value, so callers can treat that as "can't
+    confidently resolve" without a try/except of their own."""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_bg_radius_flags(field_values: dict) -> list:
+    """Extract's --bg_radius (pipeline_jobs.cpp ~2584-2600): not a
+    passthrough of any single field -- RELION computes it from bg_diameter
+    (falling back to 75% of extract_size when negative, its own JobOption
+    default), halves it to a radius, and -- only when do_rescale is on --
+    rescales it by rescale/extract_size, finally truncating to an int.
+    do_norm's own "--norm" flag is a separate, plain FlagOverride (see the
+    Extract entry below) -- kept OUT of this computation on purpose so it
+    still appears even in the (rare, mid-edit) case this function bails
+    out below; only the flags nothing else expresses live here.
+    white_dust/black_dust are separate, already-correctly-mapped fields
+    (their own option_flags entry has the right do_norm condition) and
+    --scale (from do_rescale/rescale) is likewise already mapped
+    elsewhere. Returns [] when do_norm is off, or when extract_size can't
+    be read as a real positive number (the whole computation is
+    meaningless without a box size -- a real, if narrow, reachable state:
+    extract_size is compulsory but a draft recompute fires on every
+    keystroke, so a momentarily-cleared field mid-edit reaches here as an
+    empty string/None before the user finishes typing a new value)."""
+    if not field_values.get("do_norm"):
+        return []
+    extract_size = _safe_float(field_values.get("extract_size"), 0.0)
+    bg_diameter = _safe_float(field_values.get("bg_diameter"), -1.0)
+    if extract_size is None or bg_diameter is None or extract_size <= 0:
+        return []
+    bg_radius = (0.75 * extract_size if bg_diameter < 0 else bg_diameter) / 2.0
+    if field_values.get("do_rescale"):
+        rescale = _safe_float(field_values.get("rescale"), 0.0)
+        if rescale is None:
+            return []
+        bg_radius = bg_radius * rescale / extract_size
+    return ["--bg_radius", str(int(bg_radius))]
+
+
+def _extract_helical_nr_asu_rise_fallback_flags(field_values: dict) -> list:
+    """Extract's helical-tube-extraction else-branch (pipeline_jobs.cpp
+    ~2620-2629): when tubes ARE cut into segments (do_cut_into_segments),
+    --helical_nr_asu/--helical_rise take their real field values -- already
+    correctly mapped via this table's ordinary FlagOverride entries for
+    those two keys (condition do_extract_helix && do_extract_helical_tubes
+    && do_cut_into_segments). When NOT cutting into segments, RELION
+    hardcodes the literal `--helical_nr_asu 1 --helical_rise 1` instead,
+    ignoring the fields entirely (issue #18) -- mutually exclusive with the
+    condition above (exactly one of the two can hold at a time), so this
+    never double-emits alongside the already-mapped true-branch flags."""
+    if (
+        field_values.get("do_extract_helix")
+        and field_values.get("do_extract_helical_tubes")
+        and not field_values.get("do_cut_into_segments")
+    ):
+        return ["--helical_nr_asu", "1", "--helical_rise", "1"]
+    return []
+
+
+def _extract_extra_flags(field_values: dict) -> list:
+    """Extract's DRAFT_OVERRIDES.extra_flags: combines the two
+    multi-field/branch-dependent groups the generic per-option rule and
+    the other transform mechanisms can't express (issues #17 and #18) --
+    see the two builders above for each one's own reasoning."""
+    return _extract_bg_radius_flags(field_values) + _extract_helical_nr_asu_rise_fallback_flags(field_values)
 
 
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
@@ -1193,7 +1299,57 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_recenter": FlagOverride("--recenter", condition="do_reextract"),
             "do_invert": FlagOverride("--invert_contrast"),  # ~2605
             "do_float16": FlagOverride("--float16"),  # ~2577
+            # `if (do_extract_helix) { command += " --helix"; command += "
+            # --helical_outer_diameter " + ...; if (helical_bimodal_
+            # angular_priors) command += " --helical_bimodal_angular_
+            # priors"; if (do_extract_helical_tubes) { command += "
+            # --helical_tubes"; if (do_cut_into_segments) { command += "
+            # --helical_cut_into_segments"; ... } else command += "
+            # --helical_nr_asu 1 --helical_rise 1"; } }` (~2609-2630,
+            # issue #18). helical_tube_outer_diameter/helical_nr_asu/
+            # helical_rise already have correctly-extracted conditions of
+            # their own; the true-branch (do_cut_into_segments) --
+            # helical_nr_asu/--helical_rise values are covered by THEIR OWN
+            # entries elsewhere in this raw data, not here -- the else
+            # branch's hardcoded "1"/"1" literal fallback (not read from any
+            # field) is handled by extra_flags below instead, since a
+            # FlagOverride can only pass a field's own value through, never
+            # substitute a different literal on the opposite branch.
+            #
+            # helical_bimodal_angular_priors (~2618-2619) had NO
+            # option_flags entry at all -- its flag equals "--" + key, so
+            # the generic fallback rule was emitting it UNCONDITIONALLY
+            # regardless of do_extract_helix, confirmed for real while
+            # fixing this issue (a genuine latent bug, same shape as the
+            # "72 fields" class documented in job_registry._build_draft_
+            # command's own comment).
+            "do_extract_helix": FlagOverride("--helix"),
+            "helical_bimodal_angular_priors": FlagOverride(
+                "--helical_bimodal_angular_priors", condition="do_extract_helix"),
+            "do_extract_helical_tubes": FlagOverride("--helical_tubes", condition="do_extract_helix"),
+            "do_cut_into_segments": FlagOverride(
+                "--helical_cut_into_segments", condition="do_extract_helix && do_extract_helical_tubes"),
+            # `if (do_norm) { ... command += " --norm --bg_radius " + ...;
+            # ... }` (~2597-2603, issue #17) -- kept as its own plain,
+            # unconditional-on-itself flag (rather than folded into
+            # extra_flags' --bg_radius computation below) specifically so
+            # it still appears even in the rare case that computation
+            # bails out (extract_size unreadable mid-edit) -- see
+            # _extract_bg_radius_flags's own docstring.
+            "do_norm": FlagOverride("--norm"),
         },
+        # bg_diameter/do_rescale are pure gates once their real effects are
+        # accounted for elsewhere: bg_diameter's contribution is folded
+        # into extra_flags' computed --bg_radius (issue #17) below;
+        # do_rescale's "--scale" flag is already separately, correctly
+        # mapped via its own (differently-named) "rescale" field's
+        # option_flags entry, and do_rescale's OTHER effect (scaling
+        # bg_radius itself) is also read directly by extra_flags. Neither
+        # has anything left to hand-edit, so they're suppressed rather
+        # than shown as still needing a fix. do_norm is NOT suppressed --
+        # it's a plain FlagOverride above, not folded into extra_flags.
+        suppress=frozenset({"bg_diameter", "do_rescale"}),
+        extra_flags=_extract_extra_flags,
     ),
     "Select": JobDraftOverride(
         flags={
@@ -1449,6 +1605,18 @@ def draft_extra_output_args(internal_name: str, field_values: dict) -> list:
     if override is None or override.extra_output_args is None:
         return []
     return override.extra_output_args(field_values)
+
+
+def draft_extra_flags(internal_name: str, field_values: dict) -> list:
+    """Extra command-line tokens computed from the full field_values dict,
+    appended once per job near the end of the draft command -- for a value
+    built from MULTIPLE fields with real conditional/computed logic (e.g.
+    Extract's --bg_radius). [] if this job has none. See
+    JobDraftOverride.extra_flags."""
+    override = _override(internal_name)
+    if override is None or override.extra_flags is None:
+        return []
+    return override.extra_flags(field_values)
 
 
 # --------------------------------------------------------------------------

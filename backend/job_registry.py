@@ -50,6 +50,7 @@ from job_catalog import (
     JOB_CATALOG,
     TOMO_VARIANT_OF,
     boolean_select_labels,
+    draft_extra_flags,
     draft_extra_output_args,
     draft_flag_condition_for,
     draft_flag_for,
@@ -698,6 +699,14 @@ def _build_draft_command(
                 value = transformed
             parts.append(flag)
             parts.append(shlex.quote(str(value)))
+
+    # A job-level hook for values built from MULTIPLE fields with
+    # computed/branch-dependent logic no single FlagOverride/value_
+    # transform/numeric_transform can express -- e.g. Extract's
+    # --bg_radius, computed from bg_diameter/extract_size and (when
+    # do_rescale is on) rescale together. See
+    # job_catalog.JobDraftOverride.extra_flags.
+    parts.extend(draft_extra_flags(base_name, field_values))
 
     # RELION appends this verbatim at the end of the command
     # (`command += " " + joboptions["other_args"].getString();`) -- deliberately
