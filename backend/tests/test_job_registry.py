@@ -764,6 +764,10 @@ _UNMAPPED_FIELD_FIXES = [
     ("Autorefine", {"do_blush": True}, "--blush", None),
     ("Autorefine", {"auto_faster": True}, "--auto_ignore_angles", None),
     ("Autorefine", {"do_pad1": True}, "--pad 1", None),
+    ("Autorefine",
+     {"do_helix": True, "helical_range_distance": 9}, "--helical_sigma_distance 3.0", ("do_helix", False)),
+    ("Autorefine", {"do_helix": True, "keep_tilt_prior_fixed": True}, "--helical_keep_tilt_prior_fixed",
+     ("do_helix", False)),
     ("Class2D", {"do_zero_mask": True}, "--zero_mask", None),
     ("Class2D", {"do_center": True}, "--center_classes", None),
     ("Class2D", {"dont_skip_align": False}, "--skip_align", ("dont_skip_align", True)),
@@ -780,6 +784,22 @@ _UNMAPPED_FIELD_FIXES = [
     ("Class3D",
      {"dont_skip_align": True, "allow_coarser": True}, "--allow_coarser_sampling", ("dont_skip_align", False)),
     ("Class3D", {"do_pad1": True}, "--pad 1", None),
+    ("Class3D", {"dont_skip_align": True, "do_local_ang_searches": True, "sigma_angles": 9}, "--sigma_ang 3.0",
+     ("do_local_ang_searches", False)),
+    ("Class3D",
+     {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False, "range_tilt": 9},
+     "--sigma_tilt 3.0", ("do_helix", False)),
+    ("Class3D",
+     {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False, "range_psi": 9},
+     "--sigma_psi 3.0", ("do_helix", False)),
+    ("Class3D",
+     {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False, "range_rot": 9},
+     "--sigma_rot 3.0", ("do_helix", False)),
+    ("Class3D",
+     {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False, "helical_range_distance": 9},
+     "--helical_sigma_distance 3.0", ("do_helix", False)),
+    ("Class3D", {"do_helix": True, "keep_tilt_prior_fixed": True}, "--helical_keep_tilt_prior_fixed",
+     ("do_helix", False)),
     ("Ctffind", {"slow_search": False}, "--fast_search", ("slow_search", True)),
     ("TomoCtffind", {"slow_search": False}, "--fast_search", ("slow_search", True)),
     ("Ctfrefine", {"do_tilt": True, "do_trefoil": True}, "--odd_aberr_max_n 3", ("do_tilt", False)),
@@ -1053,6 +1073,39 @@ def test_helical_fields_are_omitted_when_the_checkbox_is_unchecked():
     # Nothing here is broken or needs manual attention -- do_helix being
     # false means RELION itself wouldn't emit these either.
     assert not unmapped, unmapped
+
+
+def test_class3d_range_fields_are_clamped_to_0_90_before_dividing_by_3():
+    """RELION clamps range_tilt/psi/rot to [0, 90] degrees before dividing
+    by 3 to get the sigma passed to relion_refine (pipeline_jobs.cpp
+    ~4077-4098) -- a value above 90 (or negative) must not pass through raw."""
+    raw = job_registry.raw_job("Class3D")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False,
+         "range_tilt": 120, "range_rot": -10},
+        "Class3D", "",
+    )
+    assert "--sigma_tilt 30.0" in cmd   # clamped 120 -> 90, then /3
+    assert "--sigma_rot 0.0" in cmd     # clamped -10 -> 0, then /3
+    assert not any(k in unmapped for k in ("range_tilt", "range_rot"))
+
+
+def test_helical_range_distance_omitted_when_not_positive():
+    """RELION only emits --helical_sigma_distance when the raw value is > 0
+    (an `if (val > 0.)` guard on the computed value itself) -- a
+    non-positive value must be silently omitted, not passed through as a
+    negative sigma, and must NOT be marked unmapped either."""
+    for internal_name, fields in (
+        ("Class3D",
+         {"do_helix": True, "dont_skip_align": True, "do_local_ang_searches": False,
+          "helical_range_distance": -5}),
+        ("Autorefine", {"do_helix": True, "helical_range_distance": -5}),
+    ):
+        raw = job_registry.raw_job(internal_name)
+        cmd, unmapped = job_registry._build_draft_command(raw, fields, internal_name, "")
+        assert "--helical_sigma_distance" not in cmd, cmd
+        assert "helical_range_distance" not in unmapped
 
 
 def test_helical_fields_are_included_when_the_checkbox_is_checked():

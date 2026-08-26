@@ -534,6 +534,15 @@ class JobDraftOverride:
     # RELION version change that renames a label can't silently emit the
     # wrong value.
     value_transforms: dict[str, dict[str, str]] = field(default_factory=dict)
+    # option_key -> a callable computing the real CLI value from this
+    # field's OWN raw numeric value (already known non-empty/non-None by
+    # the time this runs -- the ordinary empty-value skip happens first),
+    # returning None to mean "correctly omit this flag" (RELION's own
+    # guard on the COMPUTED value itself, e.g. helical_range_distance <=
+    # 0) rather than "can't resolve". Distinct from value_transforms (a
+    # label->string LOOKUP for radio fields) -- this is a numeric
+    # COMPUTATION (clamp/divide) for slider/number fields.
+    numeric_transforms: dict[str, Callable[[float], Optional[float]]] = field(default_factory=dict)
     # Extra command-line tokens to append right after the output
     # flag/subdir, computed from the CURRENT field values -- for a
     # compulsory argument RELION derives from OTHER fields rather than
@@ -567,6 +576,35 @@ def _import_ofile_args(field_values: dict) -> list:
         return []
     ofile = "movies.star" if field_values.get("is_multiframe") else "micrographs.star"
     return ["--ofile", ofile]
+
+
+def _div_by_3(value: float) -> float:
+    """RELION's own conversion from a JobOption's raw 'degrees' UI value to
+    the sigma it actually passes to relion_refine (e.g. Class3D's
+    sigma_angles -> --sigma_ang, pipeline_jobs.cpp ~4003-4005:
+    `floatToString(sigma_angles / 3.)`) -- no clamp, no positivity gate on
+    its own; _clamp_0_90_then_third and _third_if_positive below both
+    build on this."""
+    return value / 3.0
+
+
+def _clamp_0_90_then_third(value: float) -> float:
+    """Class3D/Autorefine's range_tilt/range_psi/range_rot ->
+    --sigma_tilt/--sigma_psi/--sigma_rot (pipeline_jobs.cpp ~4077-4098,
+    Class3D): clamped to [0, 90] degrees, THEN divided by 3. Always
+    emitted once the field's own FlagOverride.condition holds -- no
+    positivity gate of its own, unlike helical_range_distance below."""
+    return _div_by_3(min(max(value, 0.0), 90.0))
+
+
+def _third_if_positive(value: float) -> Optional[float]:
+    """Class3D/Autorefine's helical_range_distance -> --helical_sigma_
+    distance (pipeline_jobs.cpp ~4099-4100, Class3D; ~4580-4583,
+    Autorefine): RELION only emits this flag when the raw value is > 0
+    (`if (val > 0.)`, a guard on the COMPUTED value itself, not a
+    joboptions condition) -- returns None to mean "correctly omit", which
+    _build_draft_command's caller must NOT count as unmapped."""
+    return _div_by_3(value) if value > 0.0 else None
 
 
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
@@ -753,10 +791,50 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # when alignment is on.
             "allow_coarser": FlagOverride("--allow_coarser_sampling", condition="dont_skip_align"),
             "do_pad1": FlagOverride("--pad 1"),  # ~3939, "--pad 2" is relion_refine's own default when omitted
+            # `if (dont_skip_align) { ... if (do_local_ang_searches)
+            # command += " --sigma_ang " + floatToString(sigma_angles /
+            # 3.); ... }` (~3989-4010) -- nested inside the `else` of `if
+            # (!dont_skip_align) { --skip_align } else { ... }`, so BOTH
+            # dont_skip_align and do_local_ang_searches gate this, not
+            # do_local_ang_searches alone; the flag name and the /3.
+            # computation both need an override too (issue #21).
+            "sigma_angles": FlagOverride("--sigma_ang", condition="dont_skip_align && do_local_ang_searches"),
+            # `if (do_helix) { ... if (dont_skip_align &&
+            # !do_local_ang_searches) { ... } }` (~4031-4101) -- all four
+            # share this one gate, itself nested inside the outer do_helix
+            # block; each value is clamped to [0, 90] then /3, except
+            # helical_range_distance, which is only emitted when positive
+            # (see _third_if_positive).
+            "range_tilt": FlagOverride(
+                "--sigma_tilt", condition="do_helix && dont_skip_align && !do_local_ang_searches"),
+            "range_psi": FlagOverride(
+                "--sigma_psi", condition="do_helix && dont_skip_align && !do_local_ang_searches"),
+            "range_rot": FlagOverride(
+                "--sigma_rot", condition="do_helix && dont_skip_align && !do_local_ang_searches"),
+            "helical_range_distance": FlagOverride(
+                "--helical_sigma_distance",
+                condition="do_helix && dont_skip_align && !do_local_ang_searches"),
+            # `if (keep_tilt_prior_fixed) command += "
+            # --helical_keep_tilt_prior_fixed";` (~4075-4076) -- plain
+            # self-guarded boolean, only ever reached inside do_helix's
+            # branch (is_continue is always false in this app).
+            "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+        },
+        numeric_transforms={
+            "sigma_angles": _div_by_3,
+            "range_tilt": _clamp_0_90_then_third,
+            "range_psi": _clamp_0_90_then_third,
+            "range_rot": _clamp_0_90_then_third,
+            "helical_range_distance": _third_if_positive,
         },
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
             "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",
+            # do_local_ang_searches is a pure gate for sigma_angles above --
+            # like do_helix, it has no CLI flag of its own in real RELION,
+            # so it's suppressed rather than left to show up in
+            # unmapped_fields implying a fix is needed when there isn't one.
+            "do_local_ang_searches",
         }),
     ),
     "Autorefine": JobDraftOverride(
@@ -781,6 +859,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_blush": FlagOverride("--blush"),  # ~4421
             "auto_faster": FlagOverride("--auto_ignore_angles --auto_resol_angles"),  # ~4440
             "do_pad1": FlagOverride("--pad 1"),  # ~4436
+            # Same shape as Class3D's (issue #21), but Autorefine's
+            # range_tilt/range_psi/range_rot are gated by `sampling !=
+            # auto_local_sampling` -- a numeric comparison between two
+            # SELECT fields via a healpix-order lookup table, not a
+            # boolean -- so those three deliberately stay unmapped (see
+            # the "Deliberately NOT included" footer below); only
+            # helical_range_distance and keep_tilt_prior_fixed have a
+            # plain do_helix boolean gate here (~4580-4586).
+            "helical_range_distance": FlagOverride("--helical_sigma_distance", condition="do_helix"),
+            "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+        },
+        numeric_transforms={
+            "helical_range_distance": _third_if_positive,
         },
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
@@ -1048,11 +1139,10 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
                 "--ctf_intact_first_peak", condition="do_refs && do_ctf_autopick"),
             # `if (do_pick_helical_segments) { command += " --helix"; if
             # (do_amyloid) command += " --amyloid"; ... }` (~2367) -- only
-            # the flags themselves; the --min_distance/--helical_tube_* VALUE
-            # fields right after need a computed value (nr_asu * rise, or are
-            # gated by a `!= comparison` this table can't express) and stay
-            # unmapped for hand-editing, same as Class3D/Autorefine's
-            # do_helix-gated range_rot/range_tilt/range_psi.
+            # the flags themselves; the --min_distance/--helical_tube_*
+            # VALUE fields right after need a computed value (nr_asu *
+            # rise) this table can't express and stay unmapped for
+            # hand-editing.
             "do_pick_helical_segments": FlagOverride("--helix", condition="do_refs"),
             "do_amyloid": FlagOverride("--amyloid", condition="do_refs && do_pick_helical_segments"),
             # `if (joboptions["do_refs"].getBoolean() || joboptions["do_log"]
@@ -1184,13 +1274,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #     Subtract.do_fliplabel: each switches to a genuinely different
 #     multi-flag/multi-value shape (or, for do_fliplabel, an entirely
 #     different command), not a single flag toggle.
-#   - Class3D/Autorefine.do_local_ang_searches/sigma_angles,
-#     Class3D/Autorefine's do_helix-gated range_rot/range_tilt/range_psi/
-#     helical_range_distance/keep_tilt_prior_fixed, Autopick's do_pick_
-#     helical_segments-gated --min_distance (helical_nr_asu * helical_rise):
-#     each needs either a runtime numeric comparison between two option
-#     values (e.g. `sampling != auto_local_sampling`) or a computed
-#     (multiplied/divided) value, neither of which this table can express.
+#   - Autorefine's do_helix-gated range_rot/range_tilt/range_psi (gated by
+#     `sampling != auto_local_sampling`, a numeric comparison between two
+#     SELECT fields via a healpix-order lookup table -- not boolean-
+#     expressible, unlike Class3D's identically-named fields above, which
+#     use a plain boolean gate instead and ARE fixed), and Autopick's
+#     do_pick_helical_segments-gated --min_distance (helical_nr_asu *
+#     helical_rise, a genuine multiply this table can't express).
 #   - Ctfrefine.do_ctf/do_tilt/do_aniso_mag: each unconditionally appends a
 #     companion VALUE right after its own flag (--kmin_defocus/--kmin_tilt/
 #     --kmin_mag, all built from the SAME "minres" field under a different
@@ -1234,6 +1324,30 @@ def draft_value_for(internal_name: str, option_key: str, raw_value: str) -> Opti
     if override is None:
         return None
     return override.value_transforms.get(option_key, {}).get(raw_value)
+
+
+def has_draft_numeric_transform(internal_name: str, option_key: str) -> bool:
+    """True if this option's raw numeric value needs a computed conversion
+    (clamp/divide/positivity-gate) before it's what RELION's own program
+    actually parses -- see JobDraftOverride.numeric_transforms. Distinct
+    from has_draft_value_transform, which is a label->string LOOKUP for
+    radio fields; this is a numeric COMPUTATION for slider/number fields."""
+    override = _override(internal_name)
+    return bool(override and option_key in override.numeric_transforms)
+
+
+def draft_numeric_value_for(internal_name: str, option_key: str, raw_value: float) -> Optional[float]:
+    """The real CLI value for this option's current raw numeric value, or
+    None to mean RELION's OWN guard on the COMPUTED value itself (e.g.
+    helical_range_distance <= 0) says "correctly omit this flag" -- not
+    "can't resolve" (the caller must not mark the field unmapped in that
+    case). Only call this after has_draft_numeric_transform confirms this
+    (job, key) is tracked at all."""
+    override = _override(internal_name)
+    if override is None:
+        return None
+    fn = override.numeric_transforms.get(option_key)
+    return fn(raw_value) if fn is not None else None
 
 
 def draft_flag_for(internal_name: str, option_key: str) -> Optional[str]:
