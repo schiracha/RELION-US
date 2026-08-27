@@ -103,6 +103,11 @@ def test_conditioned_flag_override_exposes_its_condition():
     assert draft_flag_condition_for("Import", "fn_in_other") == "do_other"
 
 
+def test_select_do_recenter_condition_uses_contains_clause():
+    assert draft_flag_for("Select", "do_recenter") == "--recenter"
+    assert draft_flag_condition_for("Select", "do_recenter") == 'fn_model.contains("Class2D/")'
+
+
 def test_negated_flag_override():
     assert draft_flag_for("Class2D", "do_parallel_discio") == "--no_parallel_disc_io"
     assert draft_flag_is_negated("Class2D", "do_parallel_discio") is True
@@ -244,6 +249,29 @@ def test_extra_flags_tomoalign_ref1_ref2():
 def test_extra_flags_tomoalign_ref1_ref2_empty_input_returns_nothing():
     assert draft_extra_flags("TomoAlign", {"in_halfmaps": ""}) == []
     assert draft_extra_flags("TomoCtfRefine", {}) == []
+
+
+def test_extra_flags_ctfrefine_aniso_mag_kmin():
+    assert draft_extra_flags("Ctfrefine", {"do_aniso_mag": True, "minres": 25.0}) == \
+        ["--kmin_mag", "25.0"]
+
+
+def test_extra_flags_ctfrefine_do_ctf_kmin_and_fit_mode():
+    assert draft_extra_flags("Ctfrefine", {
+        "do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+        "do_phase": "No", "do_defocus": "Per-particle", "do_astig": "No", "do_bfactor": "No",
+    }) == ["--kmin_defocus", "25.0", "--fit_mode", "fpfff"]
+
+
+def test_extra_flags_ctfrefine_unknown_fit_label_omits_fit_mode_not_crash():
+    assert draft_extra_flags("Ctfrefine", {
+        "do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+        "do_phase": "some future label", "do_defocus": "No", "do_astig": "No", "do_bfactor": "No",
+    }) == ["--kmin_defocus", "25.0"]
+
+
+def test_extra_flags_ctfrefine_all_off_returns_nothing():
+    assert draft_extra_flags("Ctfrefine", {"do_aniso_mag": False, "do_ctf": False, "do_tilt": False}) == []
 
 
 def test_extra_flags_default_job_returns_nothing():
