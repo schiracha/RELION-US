@@ -196,6 +196,18 @@ _BOOL_CLAUSE_RE = re.compile(
 # rather than risk resolving the wrong thing.
 _BARE_IDENT_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)$')
 
+# Some jobs guard a command append not on a boolean field's own value but on
+# a plain substring test of a STRING field, via RELION's `FileName::contains`
+# (filename.cpp ~141-148, a bare `rfind(str) > -1` check -- true if the
+# literal appears anywhere in the string). Confirmed for real: Select's
+# `FileName fnt = joboptions["fn_model"].getString(); if
+# (fnt.contains("Class2D/")) { ... if (do_recenter) command += " --recenter
+# "; }` (pipeline_jobs.cpp ~2980-2991) -- do_recenter's flag is only ever
+# emitted when fn_model's value contains "Class2D/" (issue #23).
+_CONTAINS_CLAUSE_RE = re.compile(
+    r'^([A-Za-z_][A-Za-z0-9_]*)\.contains\("([^"]*)"\)$'
+)
+
 
 def _strip_matched_outer_parens(clause: str) -> str:
     """Strip one or more layers of parens that wrap the WHOLE clause (not
@@ -317,9 +329,11 @@ def _evaluate_and_clauses(
     branch is one of the recognized, safely-evaluable shapes: a boolean
     field's own value (optionally negated, as either
     `joboptions["x"].getBoolean()` or the bare local-variable form some
-    jobs use instead -- see _BARE_IDENT_RE), the `is_continue` invariant
-    (a fixed constant in this app -- see below), or `is_tomo`/`!is_tomo`
-    (read from field_values["is_tomo"] when present, see below). Returns
+    jobs use instead -- see _BARE_IDENT_RE), a string field's substring
+    test (optionally negated, as `x.contains("literal")` -- see
+    _CONTAINS_CLAUSE_RE), the `is_continue` invariant (a fixed constant in
+    this app -- see below), or `is_tomo`/`!is_tomo` (read from
+    field_values["is_tomo"] when present, see below). Returns
     None the moment anything else shows up within this branch -- an
     `else` branch marker, a numeric/string comparison, a call this
     function doesn't recognize -- so the caller falls back to marking the
@@ -368,14 +382,21 @@ def _evaluate_and_clauses(
             body = clause[1:].strip() if negated else clause
             m = _BOOL_CLAUSE_RE.match(body)
             if m:
-                ident = m.group(1)
+                value = bool(field_values.get(m.group(1)))
             else:
-                bare = _BARE_IDENT_RE.match(body)
-                if bare and known_keys is not None and bare.group(1) in known_keys:
-                    ident = bare.group(1)
+                contains_m = _CONTAINS_CLAUSE_RE.match(body)
+                if contains_m:
+                    field_name, literal = contains_m.group(1), contains_m.group(2)
+                    if known_keys is not None and field_name in known_keys:
+                        value = literal in str(field_values.get(field_name) or "")
+                    else:
+                        return None
                 else:
-                    return None
-            value = bool(field_values.get(ident))
+                    bare = _BARE_IDENT_RE.match(body)
+                    if bare and known_keys is not None and bare.group(1) in known_keys:
+                        value = bool(field_values.get(bare.group(1)))
+                    else:
+                        return None
             if negated:
                 value = not value
         result = result and value

@@ -780,6 +780,59 @@ def _tomo_denoise_ntiles_flags(field_values: dict) -> list:
     return ["--n-tiles", shlex.quote(str(x)), shlex.quote(str(y)), shlex.quote(str(z))]
 
 
+_CTF_FIT_LETTER = {"No": "f", "Per-micrograph": "m", "Per-particle": "p"}
+# JobOption::getCtfFitString (src/pipeline_jobs.cpp ~243-249): the exact
+# label->single-character mapping RELION's own getCommandsCtfrefineJob
+# uses to build --fit_mode. An unrecognized label (a future RELION version
+# renaming a choice) resolves to None below, not a wrong guess.
+
+
+def _ctfrefine_kmin_and_fit_mode_flags(field_values: dict) -> list:
+    """Ctfrefine's do_aniso_mag/do_ctf/do_tilt branch (getCommandsCtfrefineJob
+    ~6116-6151, confirmed current): each toggle's own self-contained flag
+    is a plain FlagOverride (see the Ctfrefine DRAFT_OVERRIDES entry
+    below) -- this covers the companion VALUE each one unconditionally
+    appends, all three built from the SAME "minres" field under a
+    different flag name, plus do_ctf's --fit_mode (four radio fields
+    concatenated via JobOption::getCtfFitString, in the exact order
+    phase/defocus/astig/"f" (Cs, fixed off)/bfactor -- getting this order
+    wrong silently produces a wrong-but-plausible 5-character mode
+    string). do_ctf and do_tilt are independent siblings inside the
+    !do_aniso_mag else-branch (NOT else-if) -- both can fire at once, each
+    appending its own kmin_* value. minres/do_phase/do_defocus/do_astig/
+    do_bfactor are suppressed (see the DRAFT_OVERRIDES entry) -- fully
+    expressed here instead, since none of them has one single owning
+    flag. minres is parsed with _safe_float rather than passed through
+    raw: extra_flags' output is appended to the draft command unquoted
+    (job_registry._build_draft_command extends parts directly, unlike the
+    shlex.quote'd generic per-option path), so a raw pass-through of an
+    un-vetted field value could smuggle extra whitespace-separated tokens
+    into the command; a clean float formats back to a plain numeral with
+    no such risk."""
+    minres = _safe_float(field_values.get("minres"), None)
+    has_minres = minres is not None
+    out: list = []
+    if field_values.get("do_aniso_mag"):
+        if has_minres:
+            out += ["--kmin_mag", str(minres)]
+        return out
+    if field_values.get("do_ctf"):
+        if has_minres:
+            out += ["--kmin_defocus", str(minres)]
+        letters = [
+            _CTF_FIT_LETTER.get(field_values.get("do_phase")),
+            _CTF_FIT_LETTER.get(field_values.get("do_defocus")),
+            _CTF_FIT_LETTER.get(field_values.get("do_astig")),
+            "f",
+            _CTF_FIT_LETTER.get(field_values.get("do_bfactor")),
+        ]
+        if all(letter is not None for letter in letters):
+            out += ["--fit_mode", "".join(letters)]
+    if field_values.get("do_tilt") and has_minres:
+        out += ["--kmin_tilt", str(minres)]
+    return out
+
+
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # getCommandsTomoImportJob, DEFAULT branch (do_coords == false):
     #   command = "relion_python_tomo_import SerialEM ..."
@@ -1481,6 +1534,14 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # `else if (do_split) { command += " --split "; if (do_random)
             # command += " --random_order "; ... }` (~2861-2870).
             "do_random": FlagOverride("--random_order", condition="do_split"),
+            # `FileName fnt = joboptions["fn_model"].getString(); if
+            # (fnt.contains("Class2D/")) { ... if (do_recenter) command +=
+            # " --recenter "; }` (~2977-2990) -- do_recenter's OWN boolean
+            # check happens automatically afterward via the normal
+            # boolean-field emit logic (same as every other FlagOverride);
+            # this condition only needs to encode the ADDITIONAL fn_model
+            # substring check (issue #23).
+            "do_recenter": FlagOverride("--recenter", condition='fn_model.contains("Class2D/")'),
         },
     ),
     "Subtract": JobDraftOverride(
@@ -1507,19 +1568,22 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     ),
     "Ctfrefine": JobDraftOverride(
         flags={
-            # `if (do_tilt) { ... if (do_trefoil) command += "
-            # --odd_aberr_max_n 3"; }` (~6142) -- only the self-contained
-            # inner flag; do_tilt/do_ctf themselves each also unconditionally
-            # append a companion VALUE (--kmin_tilt/--kmin_defocus + minres,
-            # a field shared across three differently-named flags depending
-            # on which branch is active) that this table has no way to
-            # express, so they stay unmapped for hand-editing.
+            # `if (do_aniso_mag) { --fit_aniso; --kmin_mag <minres>; } else
+            # { if (do_ctf) {...} if (do_tilt) {...} }` (~6116-6151) --
+            # each toggle's own self-contained flag; the companion
+            # --kmin_*/--fit_mode VALUES built from minres/do_phase/
+            # do_defocus/do_astig/do_bfactor need real branch logic none
+            # of FlagOverride/value_transforms/numeric_transforms can
+            # express alone -- see _ctfrefine_kmin_and_fit_mode_flags
+            # above (issue #20).
+            "do_aniso_mag": FlagOverride("--fit_aniso"),
+            "do_ctf": FlagOverride("--fit_defocus", condition="!do_aniso_mag"),
+            "do_tilt": FlagOverride("--fit_beamtilt", condition="!do_aniso_mag"),
             "do_trefoil": FlagOverride("--odd_aberr_max_n 3", condition="do_tilt"),
-            # `if (!do_aniso_mag) { ... if (do_4thorder) command += "
-            # --fit_aberr"; }` (~6148, inside the else of the do_aniso_mag
-            # branch at ~6100).
             "do_4thorder": FlagOverride("--fit_aberr", condition="!do_aniso_mag"),
         },
+        suppress=frozenset({"minres", "do_phase", "do_defocus", "do_astig", "do_bfactor"}),
+        extra_flags=_ctfrefine_kmin_and_fit_mode_flags,
     ),
 }
 # Deliberately NOT included above (mode-branched or otherwise not safely
@@ -1532,10 +1596,6 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #     pipeline_jobs.cpp ~3993-4000, ~4482-4499, ~4754-4763, ~2314-2321) --
 #     a real value TRANSFORM, not just a lookup, so a wrong guess risks a
 #     subtly incorrect run rather than a loud crash.
-#   - Ctfrefine.do_defocus/do_astig/do_bfactor/do_phase ("No"/"Per-
-#     micrograph"/"Per-particle" -> single-letter codes concatenated into one
-#     --fit_defocus-style flag via JobOption::getCtfFitString,
-#     pipeline_jobs.cpp ~243-249).
 #   - Joinstar's output suffix depends on which of fn_part/fn_mic/fn_mov is
 #     filled in (src/pipeline_jobs.cpp ~5069/5103/5137).
 #   - Localres only appends "relion" in the do_relion_locres branch; the
@@ -1550,11 +1610,9 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 # see test_job_registry.py's _UNMAPPED_FIELD_FIXES for the ones that WERE
 # safe to fix). Left unmapped rather than guessed:
 #   - Autopick.do_topaz_filaments/topaz-internal fields, Motionrefine.
-#     do_own_params, Select.do_recenter (needs a `fnt.contains("Class2D/")`
-#     string check, ~2988), Subtract.do_fliplabel: each switches to a
-#     genuinely different multi-flag/multi-value shape (or, for
-#     do_fliplabel, an entirely different command), not a single flag
-#     toggle.
+#     do_own_params, Subtract.do_fliplabel: each switches to a genuinely
+#     different multi-flag/multi-value shape (or, for do_fliplabel, an
+#     entirely different command), not a single flag toggle.
 #   - Autorefine's do_helix-gated range_rot/range_tilt/range_psi (gated by
 #     `sampling != auto_local_sampling`, a numeric comparison between two
 #     SELECT fields via a healpix-order lookup table -- not boolean-
@@ -1562,11 +1620,6 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #     use a plain boolean gate instead and ARE fixed), and Autopick's
 #     do_pick_helical_segments-gated --min_distance (helical_nr_asu *
 #     helical_rise, a genuine multiply this table can't express).
-#   - Ctfrefine.do_ctf/do_tilt/do_aniso_mag: each unconditionally appends a
-#     companion VALUE right after its own flag (--kmin_defocus/--kmin_tilt/
-#     --kmin_mag, all built from the SAME "minres" field under a different
-#     flag name per branch) -- only their self-contained inner children
-#     (do_trefoil, do_4thorder) were safe to add on their own.
 #   - Extract.do_norm/bg_diameter/do_extract_helix family: bg_radius is
 #     computed (diameter->radius, extract_size- and do_rescale-dependent,
 #     ~2584-2600); the helix branch hardcodes "--helical_nr_asu 1
