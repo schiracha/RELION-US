@@ -2340,8 +2340,7 @@ function maybeWarnAboutOpenRelionGuis() {
     "Close any native RELION GUI you have open on this project folder before " +
     "continuing — a GUI that's already open keeps its own copy of the pipeline " +
     "and won't see these updates, which risks corrupting the project if both " +
-    "write to it. Once closed, use RELION-US as the only interface to this " +
-    "project."
+    "write to it. Use one UI at a time or risk corrupting the project files."
   );
 }
 
