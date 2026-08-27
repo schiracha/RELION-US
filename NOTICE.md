@@ -49,6 +49,33 @@ Apache-2.0 material may be included in a GPL-2.0-**or-later** work under the
 "or later" option (Apache-2.0 is compatible with GPLv3, not with GPLv2
 alone); the combined work is distributed under GPL-3.0 terms in that case.
 
+## Analyze popup, design and technique (CNIO_Relion_Tools, GPL-3.0)
+
+The Analyze popup (Menu ▸ Tools ▸ Analyze) reproduces the tab layout and
+several data-processing techniques from `relion_analyse.py`, part of
+
+    CNIO_Relion_Tools
+    cryoEM-CNIO organization
+    https://github.com/cryoEM-CNIO/CNIO_Relion_Tools
+    Licensed under the GNU General Public License, version 3.0
+
+No source from that project is copied into this repository. It is built on
+Dash, Plotly, and dash_cytoscape, none of which this project depends on (see
+"Bundled WinBox.js" above and `frontend/app.js`'s own charting-code comments
+on staying dependency-free for offline/HPC use) — every chart and graph in
+the Analyze popup is this app's own hand-rolled SVG/canvas rendering.
+
+What was ported is the *shape* of the analysis: which views to offer
+(pipeline graph, micrograph/particle scatter with export, 2D/3D
+classification convergence, per-class FSC, angular-distribution heatmaps,
+3D refinement), which RELION output files back each one, and — for the
+STAR-file merge and export features specifically — the column-join and
+file-write technique. See the in-code comments in `backend/analyze.py` and
+`frontend/app.js` at each ported function for the specific correspondence.
+
+RELION-US is not produced, endorsed, or supported by CNIO or the authors of
+CNIO_Relion_Tools.
+
 ## Third-party file formats
 
 The import bridges read and write file formats belonging to other packages —
