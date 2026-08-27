@@ -88,9 +88,21 @@ def main():
         check(f"Revisiting /login.html while already logged in redirects to the app ({page.url})",
               not page.url.rstrip("/").endswith("/login.html"))
 
-        # ---- the topbar shows Log out, and it actually logs out ----
-        logout_btn = page.locator("#logoutBtn")
-        check("Log out button is visible once logged in", logout_btn.is_visible())
+        # ---- the topbar Menu shows Log out, and it actually logs out ----
+        menu_btn = page.locator("#menuBtn")
+        menu_panel = page.locator("#menuPanel")
+        check("Menu panel starts closed", not menu_panel.is_visible())
+        menu_btn.click()
+        check("Menu panel opens on click", menu_panel.is_visible())
+        page.keyboard.press("Escape")
+        check("Menu panel closes on Escape", not menu_panel.is_visible())
+        menu_btn.click()
+        page.locator("#appTitle").click()  # anywhere outside #menuWrap
+        check("Menu panel closes on outside click", not menu_panel.is_visible())
+
+        menu_btn.click()
+        logout_btn = page.locator("#menuLogoutBtn")
+        check("Log out menu item is visible once logged in", logout_btn.is_visible())
         logout_btn.click()
         page.wait_for_timeout(500)
         check(f"Clicking Log out lands back on the login page ({page.url})",

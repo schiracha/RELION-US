@@ -155,9 +155,10 @@ without a second copy of every rule.
 **No page-scale control.** No in-app zoom/scale slider: the CSS `zoom`
 property doesn't compose with a touch browser's native pinch-to-zoom (the
 two nest instead of one replacing the other), so the browser's own zoom is
-used directly instead. `#logoutBtn` (the password-protection "Log out"
-button — see "Password protection" below) owns `margin-left: auto`, pinning
-trailing top bar controls to the right edge.
+used directly instead. `#menuWrap` (the top bar's Menu button and dropdown —
+Settings, Tools ▸ Analyze, and the password-protection "Log out" item, see
+"Password protection" below) owns `margin-left: auto`, pinning trailing top
+bar controls to the right edge.
 
 ### Where a job's options live
 

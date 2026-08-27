@@ -259,7 +259,7 @@ fetch("/api/auth/status")
   .then((r) => r.json())
   .then((data) => {
     if (!data.enabled) return;
-    const btn = document.getElementById("logoutBtn");
+    const btn = document.getElementById("menuLogoutBtn");
     btn.classList.remove("hidden");
     btn.addEventListener("click", async () => {
       await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
@@ -267,6 +267,56 @@ fetch("/api/auth/status")
     });
   })
   .catch(() => { /* status check is best-effort; no button if it fails */ });
+
+// --- Top bar Menu (Settings / Tools / Log out) ------------------------------
+// The first dropdown in the app -- every other topbar control is a flat
+// sibling button. Dismiss idioms are borrowed from the file/folder picker
+// overlay (click-outside via containment check since a dropdown has no
+// full-screen backdrop to click, and an Escape listener added on open /
+// removed on close, app.js ~3564-3570) rather than invented fresh.
+{
+  const menuWrap = document.getElementById("menuWrap");
+  const menuBtn = document.getElementById("menuBtn");
+  const menuPanel = document.getElementById("menuPanel");
+  const menuToolsBtn = document.getElementById("menuToolsBtn");
+  const menuToolsSubmenu = document.getElementById("menuToolsSubmenu");
+  const menuSettingsBtn = document.getElementById("menuSettingsBtn");
+  const menuAnalyzeBtn = document.getElementById("menuAnalyzeBtn");
+
+  let closeMenuListeners = null;
+
+  function closeMenu() {
+    menuPanel.classList.add("hidden");
+    menuToolsSubmenu.classList.add("hidden");
+    if (closeMenuListeners) { closeMenuListeners(); closeMenuListeners = null; }
+  }
+
+  function openMenu() {
+    menuPanel.classList.remove("hidden");
+    const onDocClick = (e) => { if (!menuWrap.contains(e.target)) closeMenu(); };
+    const onEsc = (e) => { if (e.key === "Escape") closeMenu(); };
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    closeMenuListeners = () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }
+
+  menuBtn.addEventListener("click", (e) => {
+    // Without this, the same click that opens the menu also reaches the
+    // document listener openMenu() is about to attach, closing it again
+    // in the same tick.
+    e.stopPropagation();
+    menuPanel.classList.contains("hidden") ? openMenu() : closeMenu();
+  });
+  menuToolsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menuToolsSubmenu.classList.toggle("hidden");
+  });
+  menuSettingsBtn.addEventListener("click", () => { closeMenu(); openSettingsPopup(); });
+  menuAnalyzeBtn.addEventListener("click", () => { closeMenu(); openAnalyzePopup(); });
+}
 
 // --- Field rendering -------------------------------------------------------
 
@@ -2688,6 +2738,18 @@ function choiceDialog(message, choices) {
     box.appendChild(msg); box.appendChild(actions); overlay.appendChild(box);
     document.body.appendChild(overlay);
   });
+}
+
+// TODO(settings-popup): placeholder until the Settings popup (stored
+// defaults for job-run/app-behavior globals) lands.
+function openSettingsPopup() {
+  alert("Settings is coming soon.");
+}
+
+// TODO(analyze-popup): placeholder until the Analyze popup (pipeline graph,
+// classification convergence/FSC, micrograph/particle scatter) lands.
+function openAnalyzePopup() {
+  alert("Analyze is coming soon.");
 }
 
 // pickingContext (optional): {runId, kind: "spa"|"tomo", sourcePath} -- set

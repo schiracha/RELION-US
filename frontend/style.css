@@ -90,7 +90,7 @@ html, body {
 }
 #toggleSidebarBtn:hover { background: var(--accent-dim); }
 #appTitle { font-weight: 600; letter-spacing: .02em; color: var(--text); }
-#changeProjectBtn, #visualizeBtn, #themeBtn, #pipelineSyncBtn, #logoutBtn {
+#changeProjectBtn, #visualizeBtn, #themeBtn, #pipelineSyncBtn, #menuBtn {
   background: var(--panel-alt);
   color: var(--text);
   border: 1px solid var(--border);
@@ -99,17 +99,42 @@ html, body {
   cursor: pointer;
   font-size: 12px;
 }
-#changeProjectBtn:hover, #visualizeBtn:hover, #themeBtn:hover, #pipelineSyncBtn:hover, #logoutBtn:hover { background: var(--accent-dim); }
+#changeProjectBtn:hover, #visualizeBtn:hover, #themeBtn:hover, #pipelineSyncBtn:hover, #menuBtn:hover { background: var(--accent-dim); }
 /* Hidden outright when relion_pipeliner isn't installed -- a control that
    cannot do anything is worse than no control. */
 #pipelineSyncBtn.hidden { display: none; }
 #pipelineSyncBtn.active { border-color: var(--ok); color: var(--ok); }
 #projectDirLabel { color: var(--text-dim); font-size: 12px; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
-/* Password protection is opt-in (backend/auth.py) -- hidden by default,
-   shown only once app.js confirms it's actually turned on. Also owns
-   margin-left:auto, pinning trailing topbar controls to the right. */
-#logoutBtn.hidden { display: none; }
-#logoutBtn { margin-left: auto; }
+/* Pins the Menu button (and its dropdown) to the right of the topbar --
+   Log out used to own this margin directly; now it's one menu item among
+   several, so the wrapper owns the layout instead. */
+#menuWrap { margin-left: auto; position: relative; }
+.menu-panel {
+  position: absolute; top: 100%; right: 0; margin-top: 4px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; min-width: 180px; padding: 4px;
+  /* Above .modal-overlay's z-index:10000 -- the menu should never end up
+     trapped under a modal backdrop, even though in practice it's always
+     closed before a modal opens. */
+  z-index: 10001;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3);
+}
+.menu-panel.hidden { display: none; }
+.menu-item {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  color: var(--text); padding: 8px 10px; border-radius: 4px; cursor: pointer;
+  font-size: 13px;
+}
+.menu-item:hover { background: var(--panel-alt); }
+.menu-item.hidden { display: none; }
+.menu-divider { height: 1px; background: var(--border); margin: 4px 2px; }
+.menu-submenu { position: relative; }
+.menu-submenu-panel {
+  position: absolute; left: 100%; top: 0; margin-left: 4px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; min-width: 160px; padding: 4px; z-index: 10002;
+}
+.menu-submenu-panel.hidden { display: none; }
 
 #layout { display: flex; height: calc(100% - 44px); }
 

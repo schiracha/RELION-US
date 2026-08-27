@@ -16,7 +16,20 @@
     <button id="themeBtn" title="Switch between the dark and light theme" aria-label="Switch theme">🌙 Dark</button>
     <button id="pipelineSyncBtn" class="hidden" title="Share this project's job history with RELION's own default_pipeline.star">⇄ RELION sync</button>
     <span id="projectDirLabel"></span>
-    <button id="logoutBtn" class="hidden" title="Log out of this password-protected instance">🔒 Log out</button>
+    <div id="menuWrap" class="menu-wrap">
+      <button id="menuBtn" title="Settings, tools, and account">☰ Menu</button>
+      <div id="menuPanel" class="menu-panel hidden" role="menu">
+        <button id="menuSettingsBtn" class="menu-item" role="menuitem">⚙ Settings</button>
+        <div class="menu-submenu">
+          <button id="menuToolsBtn" class="menu-item menu-item-submenu" role="menuitem" aria-haspopup="true">🛠 Tools ▸</button>
+          <div id="menuToolsSubmenu" class="menu-submenu-panel hidden">
+            <button id="menuAnalyzeBtn" class="menu-item" role="menuitem">📊 Analyze</button>
+          </div>
+        </div>
+        <div class="menu-divider"></div>
+        <button id="menuLogoutBtn" class="menu-item hidden" role="menuitem" title="Log out of this password-protected instance">🔒 Log out</button>
+      </div>
+    </div>
   </div>
 
   <div id="layout">
