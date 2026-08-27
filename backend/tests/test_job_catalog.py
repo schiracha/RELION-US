@@ -229,6 +229,23 @@ def test_extra_flags_extract_helical_fallback_absent_once_cutting_into_segments(
     ) == []
 
 
+def test_extra_flags_tomo_other_half_swap_both_directions():
+    assert job_catalog._tomo_other_half("job001/half1_class001.mrc") == "job001/half2_class001.mrc"
+    assert job_catalog._tomo_other_half("job001/half2_class001.mrc") == "job001/half1_class001.mrc"
+    assert job_catalog._tomo_other_half("job001/reference.mrc") is None
+    assert job_catalog._tomo_other_half("half1_only.mrc") == "half2_only.mrc"  # no directory component
+
+
+def test_extra_flags_tomoalign_ref1_ref2():
+    assert draft_extra_flags("TomoAlign", {"in_halfmaps": "d/half1_x.mrc"}) == \
+        ["--ref1", "d/half1_x.mrc", "--ref2", "d/half2_x.mrc"]
+
+
+def test_extra_flags_tomoalign_ref1_ref2_empty_input_returns_nothing():
+    assert draft_extra_flags("TomoAlign", {"in_halfmaps": ""}) == []
+    assert draft_extra_flags("TomoCtfRefine", {}) == []
+
+
 def test_extra_flags_default_job_returns_nothing():
     assert draft_extra_flags("Motioncorr", {}) == []
 

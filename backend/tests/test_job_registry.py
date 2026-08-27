@@ -693,6 +693,26 @@ def test_tomoalign_motion_sigma_fields_are_emitted_when_do_motion_is_on():
     assert not ({"sigma_vel", "sigma_div"} & set(unmapped))
 
 
+def test_tomoalign_in_halfmaps_omits_both_flags_when_swap_fails():
+    """No "half1"/"half2" substring anywhere in the basename -- real RELION
+    hard-errors; this app omits both flags rather than emit an incomplete
+    or guessed pair."""
+    raw = job_registry.raw_job("TomoAlign")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"in_halfmaps": "job001/reference_map.mrc"}, "TomoAlign", "")
+    assert "--ref1" not in cmd
+    assert "--ref2" not in cmd
+    assert "in_halfmaps" not in unmapped
+
+
+def test_tomoctfrefine_in_halfmaps_quotes_paths_with_spaces():
+    raw = job_registry.raw_job("TomoCtfRefine")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"in_halfmaps": "My Project/half1 map.mrc"}, "TomoCtfRefine", "")
+    assert "--ref1 'My Project/half1 map.mrc'" in cmd
+    assert "--ref2 'My Project/half2 map.mrc'" in cmd
+
+
 @pytest.mark.parametrize("internal_name", ["Class2D", "Class3D", "Autorefine", "Inimodel"])
 def test_do_ctf_correction_emits_ctf_flag(internal_name):
     """pipeline_jobs.cpp wraps this in a nested `if (!is_continue) { if
@@ -844,6 +864,10 @@ _UNMAPPED_FIELD_FIXES = [
     ("TomoAlign", {"do_shift_align": True}, "--shift_only", None),
     ("TomoAlign", {"do_motion": True}, "--motion", None),
     ("TomoAlign", {"do_motion": True, "do_sq_exp_ker": True}, "--sq_exp_ker", ("do_motion", False)),
+    ("TomoAlign", {"in_halfmaps": "job001/half1_class001.mrc"},
+     "--ref1 job001/half1_class001.mrc --ref2 job001/half2_class001.mrc", ("in_halfmaps", "")),
+    ("TomoCtfRefine", {"in_halfmaps": "job001/half2_class001.mrc"},
+     "--ref1 job001/half2_class001.mrc --ref2 job001/half1_class001.mrc", ("in_halfmaps", "")),
     ("TomoAlignTiltSeries", {"do_imod_fiducials": True}, "--imod_fiducials", None),
     ("TomoAlignTiltSeries", {"do_imod_patchtrack": True}, "--imod_patchtrack", None),
     ("TomoAlignTiltSeries", {"do_aretomo2": True}, "--aretomo2", None),
