@@ -63,6 +63,7 @@ from job_catalog import (
     draft_is_suppressed,
     draft_output_flag,
     draft_output_suffix,
+    draft_program_extra,
     draft_program_override,
     pipeline_type,
 )
@@ -525,6 +526,10 @@ def _build_draft_command(
         prefix = _mpirun_prefix(nr_mpi)
 
     parts = prefix + [program]
+    # A RELION subcommand-style positional token this job's CLI needs
+    # immediately after the program name, ahead of the output flag and
+    # every other flag -- see job_catalog.JobDraftOverride.program_extra.
+    parts.extend(draft_program_extra(base_name, field_values))
     # RELION-style output directory (project-root-relative), inserted right
     # after the program name — mirrors how getCommands*Job() appends it.
     if output_subdir and not is_exe_placeholder:
