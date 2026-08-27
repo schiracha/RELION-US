@@ -11,6 +11,7 @@ name; run_tests.sh puts a stub one there.
 Usage: python3 test_job_options_panel.py [base_url]
 """
 import os
+import re
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -33,6 +34,16 @@ def check(label, cond):
     print(f"[{status}] {label}")
     if not cond:
         ok = False
+
+
+def out_subdir(win):
+    """Extract the job's output dir (from the draft's --o / --output-directory)
+    so a simulated command can write into it -- jobs run from the PROJECT
+    ROOT (like RELION), so a bare `> file` would land in the project root,
+    not the job dir the Outputs tab reads. (Same helper as test_jobs.py.)"""
+    cmd = win.locator(".command-box").input_value()
+    m = re.search(r"--(?:o|output-directory)\s+(\S+)", cmd)
+    return (m.group(1).rstrip("/") if m else "").strip("'\"")
 
 
 def open_job(page, search, name):
@@ -253,6 +264,72 @@ def main():
         note = win3.locator('[data-role="advanced-section"] .cli-note').first.inner_text()
         check(f"A custom bridge says so instead of listing CLI options ({note[:40]}…)",
               "import bridge" in note)
+
+        # ---- Settings' job-run defaults: applied to a FRESH job only, never
+        # to a historical run's own recorded values ----
+        def put_settings(values):
+            # Also invalidates the frontend's cachedGlobalSettings via its
+            # exposed reset hook, same as a real Save click in the Settings
+            # popup would -- a raw API write here (bypassing the popup UI)
+            # needs to do the same, or every popup opened after this would
+            # still see the settings from before this call.
+            page.evaluate(
+                "(v) => fetch('/api/settings', {method: 'PUT', "
+                "headers: {'Content-Type': 'application/json'}, "
+                "body: JSON.stringify({values: v})}).then(() => "
+                "window.invalidateGlobalSettingsCache())",
+                values,
+            )
+
+        put_settings({"job_defaults.nr_mpi": None})  # clean slate
+
+        # Extract, not 2D classification -- Class2D's --o carries an
+        # output_suffix ("run", a file-rootname prefix, not a real
+        # directory: --o Class2D/jobNNN/run), so out_subdir() would point
+        # this test's echo redirect at a path that doesn't exist. Extract
+        # has no output_suffix (--o Extract/jobNNN/, a bare directory) and
+        # still has nr_mpi, so it's a safe stand-in for this check.
+        win4 = open_job(page, "Particle Extraction", "Particle Extraction")
+        page.wait_for_timeout(1000)
+        win4.locator(".opt-section-head", has_text="Running").click()
+        page.wait_for_timeout(300)
+        check("Fresh job with no global default shows the job type's own default (1)",
+              win4.locator('[data-field-key="nr_mpi"] input').input_value() == "1")
+        sub4 = out_subdir(win4)
+        win4.locator(".command-box").fill(f"echo hello-from-job4 > {sub4}/job4_output.txt")
+        win4.locator('[data-role="run-btn"]').click()
+        page.wait_for_selector('[data-role="status-line"]:has-text("completed")', timeout=10000)
+        page.wait_for_timeout(300)
+        win4.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
+
+        put_settings({"job_defaults.nr_mpi": 4})
+
+        win5 = open_job(page, "Particle Extraction", "Particle Extraction")
+        page.wait_for_timeout(1000)
+        win5.locator(".opt-section-head", has_text="Running").click()
+        page.wait_for_timeout(300)
+        check("A NEW job of the same type now prefills the global default (4)",
+              win5.locator('[data-field-key="nr_mpi"] input').input_value() == "4")
+        win5.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
+
+        page.locator('.cc-view-btn[data-view="table"]').click()
+        page.wait_for_timeout(200)
+        # The only completed run in this project's Command Center is the
+        # job4 run just above -- win5 was closed without ever clicking Run.
+        page.locator("#ccTableBody tr").first.click()
+        page.wait_for_selector(".winbox", timeout=5000)
+        win6 = page.locator(".winbox").first
+        win6.locator(".opt-section-head", has_text="Running").click()
+        page.wait_for_timeout(300)
+        check("Reopening that COMPLETED run still shows its own recorded value (1), "
+              "not the global default set afterward",
+              win6.locator('[data-field-key="nr_mpi"] input').input_value() == "1")
+        win6.locator('[data-action="close"]').click()
+        page.wait_for_timeout(200)
+
+        put_settings({"job_defaults.nr_mpi": None})  # leave clean for any later suite
 
         browser.close()
 

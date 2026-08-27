@@ -649,6 +649,78 @@ def forget_project(project_dir: str | Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# Global (per-user) settings: stored defaults for job-run fields (MPI procs,
+# threads, GPU IDs, additional arguments) and a few app-behavior knobs. Lives
+# in config_root() -- like recent_projects.json above, NOT the per-project
+# settings.json below -- because these are the user's own preferences,
+# meant to follow them across every project on this machine, not one
+# project's own state (pipeline_sync is the opposite: a property of the
+# project, not the user, hence it lives in the per-project store instead).
+# --------------------------------------------------------------------------
+
+GLOBAL_SETTINGS_FILENAME = "global_settings.json"
+
+# Flat dotted keys rather than a nested dict, so a partial update (the PUT
+# endpoint's usual case: the user changed one field in the Settings popup)
+# is a plain dict.update() -- the same reasoning _write_recents already
+# follows for its own flat shape. None means "no override" everywhere here:
+# the caller falls back to whatever it would have done without this feature
+# (a job type's own default, the Progress tab's own built-in interval, etc).
+GLOBAL_SETTINGS_DEFAULTS: dict[str, Any] = {
+    "job_defaults.nr_mpi": None,
+    "job_defaults.nr_threads": None,
+    "job_defaults.gpu_ids": None,
+    "job_defaults.other_args": None,
+    "progress.refresh_interval_s": None,
+    "progress.images_every_n_default": None,
+    "project_browse.default_folder": None,
+}
+
+
+def global_settings_path() -> Path:
+    return config_root() / GLOBAL_SETTINGS_FILENAME
+
+
+def load_global_settings() -> dict[str, Any]:
+    """Defensive like load_recent_projects: a missing or corrupt file (or one
+    that isn't even a dict, e.g. hand-edited into garbage) resolves to
+    all-None defaults rather than an error, since every caller already
+    treats None as "no override" and needs no special-casing for "never
+    saved yet"."""
+    p = global_settings_path()
+    if not p.exists():
+        return dict(GLOBAL_SETTINGS_DEFAULTS)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return dict(GLOBAL_SETTINGS_DEFAULTS)
+    if not isinstance(data, dict):
+        return dict(GLOBAL_SETTINGS_DEFAULTS)
+    merged = dict(GLOBAL_SETTINGS_DEFAULTS)
+    merged.update({k: v for k, v in data.items() if k in GLOBAL_SETTINGS_DEFAULTS})
+    return merged
+
+
+def save_global_settings(values: dict[str, Any]) -> dict[str, Any]:
+    """Merges `values` over whatever is already stored (a partial update
+    never clobbers untouched keys) and persists the result. Unknown keys are
+    silently dropped rather than stored verbatim -- this file's schema is
+    exactly GLOBAL_SETTINGS_DEFAULTS' keys, nothing more, so a typo or a
+    stale frontend build can't accumulate cruft here. Never raises, same
+    reasoning as _write_recents: a read-only or full home directory must
+    only cost the user their saved preference, not break the app."""
+    merged = load_global_settings()
+    merged.update({k: v for k, v in values.items() if k in GLOBAL_SETTINGS_DEFAULTS})
+    p = global_settings_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return merged
+
+
+# --------------------------------------------------------------------------
 # Two-way pipeline sync, per project
 #
 # Opt-in per project rather than globally: whether RELION-US should add entries

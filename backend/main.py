@@ -148,6 +148,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -806,6 +807,26 @@ def forget_recent_project(req: ProjectPathRequest):
     itself is never touched."""
     project_manager.forget_project(req.path)
     return {"ok": True, "recent": project_manager.load_recent_projects()}
+
+
+class GlobalSettingsRequest(BaseModel):
+    values: dict[str, Any]
+
+
+@app.get("/api/settings")
+def get_settings():
+    """Global (per-user) stored defaults for the Settings popup — job-run
+    field defaults and a few app-behavior knobs. Not project-scoped, unlike
+    pipeline-sync above."""
+    return {"settings": project_manager.load_global_settings()}
+
+
+@app.put("/api/settings")
+def put_settings(req: GlobalSettingsRequest):
+    """Partial update — only keys present in `values` change; see
+    save_global_settings' own merge behavior. Unknown keys are silently
+    dropped, not an error, so a stale frontend build can't wedge bad data in."""
+    return {"settings": project_manager.save_global_settings(req.values)}
 
 
 @app.post("/api/project/switch")

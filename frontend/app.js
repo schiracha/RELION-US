@@ -517,6 +517,50 @@ function buildFieldRow(key, option, value) {
 // tears down properly rather than streaming into a hidden window.
 let currentJobWinbox = null;
 
+// Cached global settings (Menu > Settings), fetched once and reused across
+// every job popup opened this session rather than re-fetched per popup;
+// cleared whenever Settings successfully saves so the next popup opened
+// picks up the change.
+let cachedGlobalSettings = null;
+async function ensureGlobalSettings() {
+  if (!cachedGlobalSettings) {
+    try {
+      cachedGlobalSettings = (await api("/api/settings")).settings;
+    } catch (err) {
+      cachedGlobalSettings = {};
+    }
+  }
+  return cachedGlobalSettings;
+}
+// A plain top-level `let` isn't reachable as window.cachedGlobalSettings
+// (script tags don't hoist block-scoped bindings onto window the way `var`
+// would) -- exposed here so the Settings popup's own Save handler, and
+// anything else that writes /api/settings directly (e.g. browser tests),
+// has one real way to invalidate the cache rather than duplicating the
+// `cachedGlobalSettings = null` assignment at each call site.
+window.invalidateGlobalSettingsCache = () => { cachedGlobalSettings = null; };
+
+// Only includes a key when this job type actually HAS that field --
+// gpu_ids is absent from many job types, and its tab-group placement varies
+// by job (Motion/Compute/autopicking/I-O), so this keys off optionsByKey
+// directly rather than any group name -- and only when the user actually
+// set a non-null value for it. Applied to a FRESH job's prefill only (see
+// openJobPopup below); reopening a historical run's real recorded values is
+// never touched by this.
+function applicableJobDefaults(optionsByKey, settings) {
+  const map = {
+    nr_mpi: settings["job_defaults.nr_mpi"],
+    nr_threads: settings["job_defaults.nr_threads"],
+    gpu_ids: settings["job_defaults.gpu_ids"],
+    other_args: settings["job_defaults.other_args"],
+  };
+  const out = {};
+  for (const [key, val] of Object.entries(map)) {
+    if (val !== null && val !== undefined && optionsByKey[key]) out[key] = val;
+  }
+  return out;
+}
+
 async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const isReopen = !!existingRun;
   // Clone (see cloneBtn's handler above): a genuinely NEW job -- isReopen
@@ -536,6 +580,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
 
   const optionsByKey = {};
   (def.options || []).forEach((o) => (optionsByKey[o.key] = o));
+  // Fetched once here and reused below for the Progress tab's own defaults
+  // (PROGRESS_POLL_MS / progressState.everyN) -- both need it, one fetch.
+  const globalSettings = await ensureGlobalSettings();
   // A job imported from RELION's pipeline carries the values RELION saved in
   // its job.star; merge them over the defaults so options RELION's job.star
   // doesn't mention (a newer RELION-US field, say) still get sane values.
@@ -546,7 +593,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       ? (existingRun.source === "relion"
           ? { ...(def.default_values || {}), ...existingRun.field_values }
           : existingRun.field_values)
-      : (def.default_values || {});
+      // Fresh job only -- see applicableJobDefaults' own docstring for why
+      // reopening/cloning never reach this branch.
+      : { ...(def.default_values || {}), ...applicableJobDefaults(optionsByKey, globalSettings) };
 
   // The RELION-style output dir (<JobDir>/jobNNN) this popup targets. For a
   // fresh job it's the prospective next dir from the job definition; passed
@@ -964,7 +1013,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   let progressTimer = null;
   let progressState = {
     enabled: true,          // "Live progress" — on by default for supported jobs
-    everyN: 1,               // spacing of the iterations offered in the picker (1 = every)
+    // Spacing of the iterations offered in the picker (1 = every). Settings'
+    // "Images every N iterations (default)" overrides the built-in 1, when set.
+    everyN: globalSettings["progress.images_every_n_default"] || 1,
     data: null,               // latest GET /progress response (iteration summaries + latest)
     selectedIteration: "latest",   // "latest" (auto-follows new polls) or a specific number
     iterationCache: {},      // iteration number -> its full {iteration, resolution_A, classes}
@@ -1332,9 +1383,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // Charts + class thumbnails from the run_it###_model.star files RELION
   // writes each iteration. Nothing is stored server-side; thumbnails are
   // rendered on demand from the MRCs RELION already wrote. Per the user's
-  // request this is per-job togglable, with a user-defined thumbnail interval
-  // and an off-by-default "keep all iterations".
-  const PROGRESS_POLL_MS = 4000;
+  // request this is per-job togglable, with a user-defined thumbnail interval.
+  const PROGRESS_POLL_MS = (globalSettings["progress.refresh_interval_s"] || 4) * 1000;
 
   function progressSupported() {
     return currentRun && PROGRESS_JOB_TYPES.has(internalName);
@@ -2595,16 +2645,28 @@ async function refreshRecentProjects() {
   }
 }
 
-function openProjectModal() {
+async function openProjectModal() {
   projectModalOverlay.classList.remove("hidden");
   clearModalError(projectModalError);
   newFolderNameInput.value = "";
+  projectPathInput.value = "";
   refreshRecentProjects();
   api("/api/project").then((proj) => {
     projectPathInput.value = proj.path;
     browseTo(proj.path);
-  }).catch(() => {
-    browseTo("");
+  }).catch(async () => {
+    // No project currently open (e.g. first launch) -- Settings'
+    // "Default project-browse folder" gives a starting point instead of a
+    // blank browser; unset, this is unchanged from before (browseTo("")).
+    // ensureGlobalSettings() is a real network round-trip on a cold cache,
+    // during which the user can already have navigated elsewhere (typed a
+    // path and hit Go, clicked a recent project) -- skip the fallback if
+    // projectPathInput no longer holds the empty value this function set
+    // moments ago, so a slow settings fetch can never clobber browsing the
+    // user has already done in the meantime.
+    const settings = await ensureGlobalSettings();
+    if (projectPathInput.value.trim() !== "") return;
+    browseTo(settings["project_browse.default_folder"] || "");
   });
 }
 
@@ -2740,10 +2802,80 @@ function choiceDialog(message, choices) {
   });
 }
 
-// TODO(settings-popup): placeholder until the Settings popup (stored
-// defaults for job-run/app-behavior globals) lands.
-function openSettingsPopup() {
-  alert("Settings is coming soon.");
+// Global (per-user) stored defaults -- WinBox popup like Visualize/Analyze
+// (leave-it-open-while-you-work), not the Change Project modal's
+// must-resolve-before-continuing pattern, since there's nothing here that
+// blocks the rest of the app.
+let currentSettingsWinbox = null;
+async function openSettingsPopup() {
+  if (currentSettingsWinbox) { try { currentSettingsWinbox.close(); } catch (err) {} currentSettingsWinbox = null; }
+
+  let current;
+  try {
+    current = (await api("/api/settings")).settings;
+  } catch (err) {
+    errorDialog("Could not load settings: " + err.message);
+    return;
+  }
+
+  const body = document.createElement("div");
+  body.className = "settings-popup";
+  body.innerHTML = `
+    <section class="settings-section">
+      <h3>Job-run defaults</h3>
+      <p class="settings-hint">Pre-fills these on every NEW job of a type that
+        has them. Reopening a job you already ran always shows what it
+        actually ran with -- these never override recorded history.</p>
+      <label>MPI procs <input type="number" min="1" data-key="job_defaults.nr_mpi"></label>
+      <label>Threads <input type="number" min="1" data-key="job_defaults.nr_threads"></label>
+      <label>GPU IDs <input type="text" placeholder="e.g. 0 or 0:1" data-key="job_defaults.gpu_ids"></label>
+      <label>Additional arguments <input type="text" data-key="job_defaults.other_args"></label>
+    </section>
+    <section class="settings-section">
+      <h3>App behavior</h3>
+      <label>Progress tab refresh (seconds) <input type="number" min="1" data-key="progress.refresh_interval_s"></label>
+      <label>Images every N iterations (default) <input type="number" min="1" data-key="progress.images_every_n_default"></label>
+      <label>Default project-browse folder <input type="text" placeholder="/path/to/start/from" data-key="project_browse.default_folder"></label>
+    </section>
+    <div class="settings-actions">
+      <button class="btn" data-role="cancel">Cancel</button>
+      <button class="btn primary" data-role="save">Save</button>
+    </div>
+  `;
+  body.querySelectorAll("[data-key]").forEach((el) => {
+    const v = current[el.dataset.key];
+    if (el.type === "checkbox") el.checked = !!v;
+    else if (v !== null && v !== undefined) el.value = v;
+  });
+
+  body.querySelector('[data-role="save"]').addEventListener("click", async () => {
+    const values = {};
+    body.querySelectorAll("[data-key]").forEach((el) => {
+      const key = el.dataset.key;
+      if (el.type === "checkbox") { values[key] = el.checked; return; }
+      const raw = el.value.trim();
+      values[key] = raw === "" ? null : (el.type === "number" ? Number(raw) : raw);
+    });
+    try {
+      await api("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      invalidateGlobalSettingsCache(); // re-fetched on the next job popup / usage
+      win.close();
+    } catch (err) {
+      errorDialog("Could not save settings: " + err.message);
+    }
+  });
+  body.querySelector('[data-role="cancel"]').addEventListener("click", () => win.close());
+
+  const win = new WinBox({
+    title: "Settings", width: "480px", height: "580px", x: "center", y: "center",
+    mount: body, class: ["settings-winbox"],
+    onclose: () => { currentSettingsWinbox = null; return false; },
+  });
+  currentSettingsWinbox = win;
 }
 
 // TODO(analyze-popup): placeholder until the Analyze popup (pipeline graph,

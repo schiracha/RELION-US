@@ -567,3 +567,56 @@ def test_unwritable_config_dir_does_not_raise(recents_home, monkeypatch):
         raise OSError("read-only file system")
     monkeypatch.setattr(project_manager.Path, "write_text", boom)
     project_manager.remember_project(recents_home)   # must not raise
+
+
+# --------------------------------------------------------------------------
+# Global (per-user) settings -- job-run defaults + a few app-behavior knobs,
+# reusing the recents_home fixture above (same config_root(), same
+# XDG_CONFIG_HOME redirection).
+# --------------------------------------------------------------------------
+
+
+def test_global_settings_missing_file_returns_defaults(recents_home):
+    assert project_manager.load_global_settings() == project_manager.GLOBAL_SETTINGS_DEFAULTS
+
+
+def test_global_settings_corrupt_file_returns_defaults_not_error(recents_home):
+    p = project_manager.global_settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json at all")
+    assert project_manager.load_global_settings() == project_manager.GLOBAL_SETTINGS_DEFAULTS
+
+
+def test_global_settings_file_holding_a_list_returns_defaults(recents_home):
+    p = project_manager.global_settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("[1, 2, 3]")
+    assert project_manager.load_global_settings() == project_manager.GLOBAL_SETTINGS_DEFAULTS
+
+
+def test_global_settings_save_then_load_round_trips(recents_home):
+    saved = project_manager.save_global_settings({"job_defaults.nr_mpi": 4})
+    assert saved["job_defaults.nr_mpi"] == 4
+    assert project_manager.load_global_settings()["job_defaults.nr_mpi"] == 4
+
+
+def test_global_settings_partial_save_does_not_clobber_other_keys(recents_home):
+    project_manager.save_global_settings({"job_defaults.nr_mpi": 4, "job_defaults.gpu_ids": "0:1"})
+    project_manager.save_global_settings({"job_defaults.nr_mpi": 8})
+    current = project_manager.load_global_settings()
+    assert current["job_defaults.nr_mpi"] == 8
+    assert current["job_defaults.gpu_ids"] == "0:1"   # untouched by the second save
+
+
+def test_global_settings_unknown_keys_are_dropped_on_save(recents_home):
+    saved = project_manager.save_global_settings({"job_defaults.nr_mpi": 2, "not_a_real_key": "x"})
+    assert "not_a_real_key" not in saved
+    assert "not_a_real_key" not in project_manager.load_global_settings()
+
+
+def test_global_settings_unwritable_config_dir_does_not_raise(recents_home, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("read-only file system")
+    monkeypatch.setattr(project_manager.Path, "write_text", boom)
+    result = project_manager.save_global_settings({"job_defaults.nr_mpi": 4})   # must not raise
+    assert result["job_defaults.nr_mpi"] == 4   # returns the merged value even though the write failed
