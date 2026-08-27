@@ -731,6 +731,49 @@ def _extract_extra_flags(field_values: dict) -> list:
     return _extract_bg_radius_flags(field_values) + _extract_helical_nr_asu_rise_fallback_flags(field_values)
 
 
+def _tomo_other_half(filename: str) -> Optional[str]:
+    """Python port of FileName::getTheOtherHalf (src/filename.cpp:456-472,
+    confirmed current): operates on the BASENAME only (a directory
+    component containing "half1"/"half2" in its own name is left
+    untouched), replaces ALL occurrences (str.replace with no count arg
+    already does this, same as C++'s replaceAllSubstrings), case-sensitive.
+    None if neither "half1" nor "half2" appears anywhere in the basename --
+    real RELION hard-errors and refuses to build the command in that case;
+    this app's policy is to omit the flags entirely instead (see
+    _tomo_ref1_ref2_flags below), not guess."""
+    directory, sep, basename = filename.rpartition("/")
+    if "half1" in basename:
+        new_basename = basename.replace("half1", "half2")
+    elif "half2" in basename:
+        new_basename = basename.replace("half2", "half1")
+    else:
+        return None
+    return f"{directory}{sep}{new_basename}" if sep else new_basename
+
+
+def _tomo_ref1_ref2_flags(field_values: dict) -> list:
+    """TomoAlign/TomoCtfRefine's in_halfmaps -> --ref1/--ref2
+    (getCommandsTomoAlignJob ~7328-7347, getCommandsTomoCtfRefineJob
+    ~7189-7208, byte-identical logic, confirmed current): fn_half2 is
+    derived from fn_half1 by FileName::getTheOtherHalf (a half1<->half2
+    string swap on the basename only -- see _tomo_other_half above), not
+    read from any field of its own. Emits nothing at all (never a
+    half-complete --ref1 alone) when in_halfmaps is empty or the swap
+    fails -- matching real RELION's own hard error in that case; this
+    app's policy is to silently omit rather than guess. Shared verbatim by
+    both jobs since the C++ logic is identical in both getCommands*Job()s.
+    Values are shell-quoted (unlike Extract's earlier extra_flags
+    builders, which only ever emitted computed numbers) since in_halfmaps
+    is a real filesystem path that can contain spaces."""
+    fn_half1 = str(field_values.get("in_halfmaps") or "").strip()
+    if not fn_half1:
+        return []
+    fn_half2 = _tomo_other_half(fn_half1)
+    if fn_half2 is None:
+        return []
+    return ["--ref1", shlex.quote(fn_half1), "--ref2", shlex.quote(fn_half2)]
+
+
 def _tomo_denoise_subcommand_tokens(field_values: dict) -> list:
     """TomoDenoiseTomograms's mode selector (getCommandsTomoDenoiseTomogramsJob
     ~6842-6853, confirmed current): the constant base program
@@ -1188,7 +1231,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_frame_scale": FlagOverride("--per_frame_scale"),  # ~7255
             "do_tomo_scale": FlagOverride("--per_tomo_scale"),  # ~7256
         },
-        suppress=frozenset({"use_direct_entries"}),
+        suppress=frozenset({"use_direct_entries", "in_halfmaps"}),
+        extra_flags=_tomo_ref1_ref2_flags,
     ),
     "TomoAlign": JobDraftOverride(
         flags={
@@ -1203,7 +1247,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_motion": FlagOverride("--motion"),  # ~7384/7403, same local-copy shape
             "do_sq_exp_ker": FlagOverride("--sq_exp_ker", condition="do_motion"),  # ~7408
         },
-        suppress=frozenset({"use_direct_entries"}),
+        suppress=frozenset({"use_direct_entries", "in_halfmaps"}),
+        extra_flags=_tomo_ref1_ref2_flags,
     ),
     "TomoReconPart": JobDraftOverride(
         flags={
@@ -1624,11 +1669,6 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #     computed (diameter->radius, extract_size- and do_rescale-dependent,
 #     ~2584-2600); the helix branch hardcodes "--helical_nr_asu 1
 #     --helical_rise 1" in its else (~2629), not read from any field.
-#   - TomoAlign/TomoCtfRefine.in_halfmaps: only half of the pair
-#     (`--ref1 <in_halfmaps>`) is a plain passthrough -- `--ref2` is derived
-#     by string substitution (getTheOtherHalf, "half1"->"half2" in the
-#     filename), not any option's own value. Mapping just --ref1 would make
-#     an incomplete command look complete; left fully unmapped instead.
 #   - TomoImport.dose_is_per_movie_frame: the SAME "dose_rate" field needs a
 #     DIFFERENT flag (--dose-per-movie-frame vs --dose-per-tilt-image)
 #     depending on this boolean (~6506) -- one option key, two possible
