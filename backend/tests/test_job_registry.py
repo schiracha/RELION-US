@@ -804,6 +804,22 @@ _UNMAPPED_FIELD_FIXES = [
     ("TomoCtffind", {"slow_search": False}, "--fast_search", ("slow_search", True)),
     ("Ctfrefine", {"do_tilt": True, "do_trefoil": True}, "--odd_aberr_max_n 3", ("do_tilt", False)),
     ("Ctfrefine", {"do_aniso_mag": False, "do_4thorder": True}, "--fit_aberr", ("do_aniso_mag", True)),
+    ("Ctfrefine", {"do_aniso_mag": True, "minres": 25.0}, "--fit_aniso", None),
+    ("Ctfrefine", {"do_aniso_mag": True, "minres": 25.0}, "--kmin_mag 25.0", ("do_aniso_mag", False)),
+    ("Ctfrefine",
+     {"do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+      "do_phase": "No", "do_defocus": "Per-particle", "do_astig": "No", "do_bfactor": "No"},
+     "--fit_defocus", ("do_aniso_mag", True)),
+    ("Ctfrefine",
+     {"do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+      "do_phase": "No", "do_defocus": "Per-particle", "do_astig": "No", "do_bfactor": "No"},
+     "--kmin_defocus 25.0", ("do_ctf", False)),
+    ("Ctfrefine",
+     {"do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+      "do_phase": "No", "do_defocus": "Per-particle", "do_astig": "No", "do_bfactor": "No"},
+     "--fit_mode fpfff", ("do_ctf", False)),
+    ("Ctfrefine", {"do_aniso_mag": False, "do_tilt": True, "minres": 12.0},
+     "--kmin_tilt 12.0", ("do_tilt", False)),
     ("Extract", {"do_reextract": True, "do_reset_offsets": True}, "--reset_offsets", ("do_reextract", False)),
     ("Extract", {"do_reextract": True, "do_recenter": True}, "--recenter", ("do_reextract", False)),
     ("Extract", {"do_invert": True}, "--invert_contrast", None),
@@ -1182,6 +1198,34 @@ def test_extract_norm_flag_survives_even_when_bg_radius_cant_be_computed():
         assert "--bg_radius" not in cmd, (bad_extract_size, cmd)
         assert "do_norm" not in unmapped
     assert not any(k in unmapped for k in ("do_norm", "bg_diameter"))
+
+
+def test_ctfrefine_do_ctf_and_do_tilt_both_true_each_get_their_own_kmin():
+    """do_ctf and do_tilt are independent siblings (not else-if) inside the
+    !do_aniso_mag branch -- both can be true at once, each appending its
+    OWN --kmin_* built from the SAME minres field under a different flag
+    name (getCommandsCtfrefineJob ~6127-6146, confirmed current)."""
+    raw = job_registry.raw_job("Ctfrefine")
+    fields = {
+        "do_aniso_mag": False, "do_ctf": True, "do_tilt": True, "minres": 15.0,
+        "do_phase": "No", "do_defocus": "No", "do_astig": "No", "do_bfactor": "No",
+    }
+    cmd, unmapped = job_registry._build_draft_command(raw, fields, "Ctfrefine", "")
+    assert "--kmin_defocus 15.0" in cmd
+    assert "--kmin_tilt 15.0" in cmd
+    assert "--fit_mode fffff" in cmd
+    assert "--kmin_mag" not in cmd
+    assert not any(k in unmapped for k in ("minres", "do_phase", "do_defocus", "do_astig", "do_bfactor"))
+
+
+def test_ctfrefine_do_aniso_mag_suppresses_do_ctf_and_do_tilt_kmin():
+    raw = job_registry.raw_job("Ctfrefine")
+    fields = {"do_aniso_mag": True, "do_ctf": True, "do_tilt": True, "minres": 20.0}
+    cmd, _ = job_registry._build_draft_command(raw, fields, "Ctfrefine", "")
+    assert "--kmin_mag 20.0" in cmd
+    assert "--kmin_defocus" not in cmd
+    assert "--kmin_tilt" not in cmd
+    assert "--fit_mode" not in cmd
 
 
 def test_extract_helical_nr_asu_rise_fallback_is_mutually_exclusive_with_the_real_values():

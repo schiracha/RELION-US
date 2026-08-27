@@ -229,6 +229,29 @@ def test_extra_flags_extract_helical_fallback_absent_once_cutting_into_segments(
     ) == []
 
 
+def test_extra_flags_ctfrefine_aniso_mag_kmin():
+    assert draft_extra_flags("Ctfrefine", {"do_aniso_mag": True, "minres": 25.0}) == \
+        ["--kmin_mag", "25.0"]
+
+
+def test_extra_flags_ctfrefine_do_ctf_kmin_and_fit_mode():
+    assert draft_extra_flags("Ctfrefine", {
+        "do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+        "do_phase": "No", "do_defocus": "Per-particle", "do_astig": "No", "do_bfactor": "No",
+    }) == ["--kmin_defocus", "25.0", "--fit_mode", "fpfff"]
+
+
+def test_extra_flags_ctfrefine_unknown_fit_label_omits_fit_mode_not_crash():
+    assert draft_extra_flags("Ctfrefine", {
+        "do_aniso_mag": False, "do_ctf": True, "minres": 25.0,
+        "do_phase": "some future label", "do_defocus": "No", "do_astig": "No", "do_bfactor": "No",
+    }) == ["--kmin_defocus", "25.0"]
+
+
+def test_extra_flags_ctfrefine_all_off_returns_nothing():
+    assert draft_extra_flags("Ctfrefine", {"do_aniso_mag": False, "do_ctf": False, "do_tilt": False}) == []
+
+
 def test_extra_flags_default_job_returns_nothing():
     assert draft_extra_flags("Motioncorr", {}) == []
 
