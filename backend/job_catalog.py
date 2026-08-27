@@ -1356,6 +1356,14 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # `else if (do_split) { command += " --split "; if (do_random)
             # command += " --random_order "; ... }` (~2861-2870).
             "do_random": FlagOverride("--random_order", condition="do_split"),
+            # `FileName fnt = joboptions["fn_model"].getString(); if
+            # (fnt.contains("Class2D/")) { ... if (do_recenter) command +=
+            # " --recenter "; }` (~2977-2990) -- do_recenter's OWN boolean
+            # check happens automatically afterward via the normal
+            # boolean-field emit logic (same as every other FlagOverride);
+            # this condition only needs to encode the ADDITIONAL fn_model
+            # substring check (issue #23).
+            "do_recenter": FlagOverride("--recenter", condition='fn_model.contains("Class2D/")'),
         },
     ),
     "Subtract": JobDraftOverride(
@@ -1425,8 +1433,7 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 # see test_job_registry.py's _UNMAPPED_FIELD_FIXES for the ones that WERE
 # safe to fix). Left unmapped rather than guessed:
 #   - Autopick.do_topaz_filaments/topaz-internal fields, Motionrefine.
-#     do_own_params, Select.do_recenter (needs a `fnt.contains("Class2D/")`
-#     string check, ~2988), TomoDenoiseTomograms.do_cryocare_train/predict,
+#     do_own_params, TomoDenoiseTomograms.do_cryocare_train/predict,
 #     Subtract.do_fliplabel: each switches to a genuinely different
 #     multi-flag/multi-value shape (or, for do_fliplabel, an entirely
 #     different command), not a single flag toggle.

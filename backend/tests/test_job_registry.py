@@ -836,6 +836,9 @@ _UNMAPPED_FIELD_FIXES = [
     ("Postprocess", {"fn_in": "half1.mrc"}, "--i half1.mrc", None),
     ("Postprocess", {"do_skip_fsc_weighting": True}, "--skip_fsc_weighting", None),
     ("Select", {"do_split": True, "do_random": True}, "--random_order", ("do_split", False)),
+    ("Select",
+     {"fn_model": "Class2D/job005/run_it025_optimiser.star", "do_recenter": True},
+     "--recenter", ("do_recenter", False)),
     ("Subtract", {"do_fliplabel": False, "fn_opt": "opt.star"}, "--i opt.star", ("do_fliplabel", True)),
     ("Subtract",
      {"do_fliplabel": False, "do_data": True, "fn_data": "d.star"}, "--data d.star", ("do_data", False)),
@@ -942,6 +945,17 @@ def test_unmapped_field_fix_emits_its_flag(internal_name, on_fields, expect_subs
         )
 
 
+def test_select_do_recenter_requires_class2d_source_regardless_of_its_own_value():
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {"fn_model": "Class3D/job006/run_it025_optimiser.star", "do_recenter": True},
+        "Select", "",
+    )
+    assert "--recenter" not in cmd
+    assert "do_recenter" not in unmapped  # correctly omitted, not "can't resolve"
+
+
 def test_jobs_without_a_suffix_entry_keep_the_bare_directory():
     """Most jobs take a plain directory for --o -- e.g. Import, whose
     DRAFT_OVERRIDES entry doesn't set output_suffix -- and must NOT gain an
@@ -1035,6 +1049,21 @@ def test_evaluate_condition(condition, field_values, expected):
     # do_log`, pipeline_jobs.cpp ~2398).
     ("do_refs || do_log", {"do_refs": False, "do_log": True}, {"do_refs", "do_log"}, True),
     ("do_refs || do_log", {"do_refs": False, "do_log": False}, {"do_refs", "do_log"}, False),
+    # A string field's substring test via `.contains("literal")" -- RELION's
+    # own FileName::contains is a plain rfind-based substring search
+    # (filename.cpp ~141-148). Confirmed for real: Select's `FileName fnt =
+    # joboptions["fn_model"].getString(); if (fnt.contains("Class2D/"))
+    # { ... }` (pipeline_jobs.cpp ~2980-2991, issue #23).
+    ('fn_model.contains("Class2D/")', {"fn_model": "Class2D/job005/run_it025_optimiser.star"},
+     {"fn_model"}, True),
+    ('fn_model.contains("Class2D/")', {"fn_model": "Class3D/job006/run_it025_optimiser.star"},
+     {"fn_model"}, False),
+    ('!fn_model.contains("Class2D/")', {"fn_model": "Class2D/job005/run_it025_optimiser.star"},
+     {"fn_model"}, False),
+    ('fn_model.contains("Class2D/")', {"fn_model": "Class2D/job005/run_it025_optimiser.star"},
+     set(), None),
+    ('fn_model.contains("Class2D/")', {"fn_model": "Class2D/job005/run_it025_optimiser.star"},
+     None, None),
 ])
 def test_evaluate_condition_bare_identifier(condition, field_values, known_keys, expected):
     assert job_registry._evaluate_condition(condition, field_values, known_keys) is expected
