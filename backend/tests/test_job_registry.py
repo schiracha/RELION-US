@@ -861,6 +861,17 @@ _UNMAPPED_FIELD_FIXES = [
     ("TomoReconstructTomograms", {"do_fourier": True}, "--fourier", None),
     ("TomoSubtomo", {"do_float16": True}, "--float16", None),
     ("TomoSubtomo", {"do_stack2d": True}, "--stack2d", None),
+    ("TomoDenoiseTomograms",
+     {"do_cryocare_train": True, "tomograms_for_training": "t1,t2", "number_training_subvolumes": 1200,
+      "subvolume_dimensions": 72},
+     "--training-tomograms t1,t2", ("do_cryocare_train", False)),
+    ("TomoDenoiseTomograms",
+     {"do_cryocare_predict": True, "denoising_tomo_name": "tomo1", "care_denoising_model": "model.tar.gz",
+      "ntiles_x": "2", "ntiles_y": "2", "ntiles_z": "2"},
+     "--tomogram-name tomo1", ("do_cryocare_predict", False)),
+    ("TomoDenoiseTomograms",
+     {"do_cryocare_predict": True, "ntiles_x": "2", "ntiles_y": "2", "ntiles_z": "2"},
+     "--n-tiles 2 2 2", ("do_cryocare_predict", False)),
 ]
 
 
@@ -940,6 +951,75 @@ def test_unmapped_field_fix_emits_its_flag(internal_name, on_fields, expect_subs
         assert expect_substr not in cmd_off, (
             f"{internal_name}: {expect_substr!r} should disappear when {field}={new_value!r}, got {cmd_off!r}"
         )
+
+
+def test_tomodenoisetomograms_training_subvolume_flags_need_tomograms_for_training_too():
+    """getCommandsTomoDenoiseTomogramsJob (~6886-6891) guards
+    --number-training-subvolumes/--subvolume-sidelength with the SAME
+    condition as --training-tomograms itself: tomograms_for_training's
+    OWN non-emptiness && do_cryocare_train -- not just do_cryocare_train.
+    With training enabled but no tomograms picked yet (the ordinary
+    not-yet-configured state), real RELION would suppress all three
+    together; a bare do_cryocare_train condition on the two numeric
+    fields would wrongly keep emitting them once they carry their own
+    non-empty slider defaults."""
+    raw = job_registry.raw_job("TomoDenoiseTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"do_cryocare_train": True, "tomograms_for_training": "",
+         "number_training_subvolumes": 200, "subvolume_dimensions": 72},
+        "TomoDenoiseTomograms", "")
+    assert "--training-tomograms" not in cmd
+    assert "--number-training-subvolumes" not in cmd
+    assert "--subvolume-sidelength" not in cmd
+
+
+def test_tomodenoisetomograms_both_modes_checked_only_emits_train_precedence_flags():
+    """do_cryocare_train and do_cryocare_predict are two independent
+    checkboxes (~6791/6797) real RELION only guards with a hard error
+    (i != 1, ~6821-6825) that this app doesn't replicate -- so the dual-
+    checked state is reachable here. _tomo_denoise_subcommand_tokens
+    already gives do_cryocare_train precedence for the subcommand token
+    itself; the predict-only flags (--tomogram-name, --model-file,
+    --n-tiles) must not ride along under the "cryoCARE:train" subcommand
+    that precedence picked, since Click would reject them there."""
+    raw = job_registry.raw_job("TomoDenoiseTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"do_cryocare_train": True, "tomograms_for_training": "t1,t2",
+         "number_training_subvolumes": 1200, "subvolume_dimensions": 72,
+         "do_cryocare_predict": True, "denoising_tomo_name": "tomo1",
+         "care_denoising_model": "model.tar.gz",
+         "ntiles_x": "2", "ntiles_y": "2", "ntiles_z": "2"},
+        "TomoDenoiseTomograms", "")
+    tokens = cmd.split()
+    assert "cryoCARE:train" in tokens
+    assert "cryoCARE:predict" not in tokens
+    assert "--training-tomograms t1,t2" in cmd
+    assert "--tomogram-name" not in cmd
+    assert "--model-file" not in cmd
+    assert "--n-tiles" not in cmd
+
+
+def test_tomodenoisetomograms_subcommand_token_precedes_output_flag():
+    """Click/Typer routes on the FIRST positional token -- the subcommand
+    must appear before --output-directory (and every other flag), not
+    just somewhere in the command."""
+    raw = job_registry.raw_job("TomoDenoiseTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_cryocare_train": True, "in_tomoset": "tomograms.star"},
+        "TomoDenoiseTomograms", "TomoDenoiseTomograms/job010")
+    tokens = cmd.split()
+    program_idx = next(i for i, t in enumerate(tokens) if "relion_python_tomo_denoise" in t)
+    assert tokens[program_idx + 1] == "cryoCARE:train"
+    assert tokens.index("--output-directory") > program_idx + 1
+
+
+def test_tomodenoisetomograms_neither_mode_selected_omits_subcommand():
+    raw = job_registry.raw_job("TomoDenoiseTomograms")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "TomoDenoiseTomograms", "")
+    assert "cryoCARE:train" not in cmd
+    assert "cryoCARE:predict" not in cmd
 
 
 def test_jobs_without_a_suffix_entry_keep_the_bare_directory():

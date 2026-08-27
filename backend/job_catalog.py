@@ -24,6 +24,7 @@ subprocess (see job_runner.py).
 """
 
 import functools
+import shlex
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -459,11 +460,15 @@ def internal_name_for_label(type_label: str, is_tomo: bool = False) -> str | Non
 # branching (which this project deliberately avoids): every entry is a
 # small, individually-cited, source-verified fact about one job, most of
 # them confirmed for real against an installed RELION 5.0.1 (not just read
-# off the source), and a genuinely branched job (TomoPickTomograms,
-# TomoDenoiseTomograms) is left out of `flags`/`value_transforms` entirely
-# rather than risk a subtly-wrong reconstruction -- its default draft stays
-# program-name-only (plus, here, just its --output-directory flag) with the
-# real source shown for hand-editing.
+# off the source), and a genuinely branched job (TomoPickTomograms) is left
+# out of `flags`/`value_transforms` entirely rather than risk a
+# subtly-wrong reconstruction -- its default draft stays program-name-only
+# (plus, here, just its --output-directory flag) with the real source shown
+# for hand-editing. TomoDenoiseTomograms is a partial exception (issue
+# #24): its cryoCARE:train/predict subcommand-select booleans are still a
+# genuine branch (see program_extra below), but the flags each mode gates
+# ARE plain single-flag toggles once the mode is known, so those five are
+# mapped normally via `flags` instead of being left fully unmapped.
 
 
 @dataclass(frozen=True)
@@ -510,6 +515,19 @@ class JobDraftOverride:
     # picked the wrong branch's literal `command = "..."` (currently only
     # TomoImport -- see its entry below for why).
     program: Optional[str] = None
+    # Extra command-line tokens inserted immediately after the resolved
+    # program name, BEFORE output_flag/subdir/the per-option loop -- for a
+    # RELION subcommand-style positional token a click/typer-based CLI
+    # requires in that EXACT position (confirmed for real:
+    # tomography_python_programs/denoise/_cli.py's `typer.Typer()`
+    # multi-command app routes on the FIRST positional argument; a --flag
+    # appearing before the subcommand name is not tolerated). Distinct
+    # from extra_output_args (runs AFTER output_flag/subdir) and
+    # extra_flags (runs at the very end) -- those two don't care about
+    # position, this one does. Returns [] for "nothing to add" (e.g. no
+    # mode selected yet). Computed from the full field_values dict, same
+    # calling convention as extra_output_args/extra_flags.
+    program_extra: Optional[Callable[[dict], list]] = None
     # RELION's output-directory flag for this job. `--o` is the default
     # every job gets when this is left None; only a genuine difference
     # (`--output-directory`, `--odir`) needs an entry.
@@ -713,6 +731,55 @@ def _extract_extra_flags(field_values: dict) -> list:
     return _extract_bg_radius_flags(field_values) + _extract_helical_nr_asu_rise_fallback_flags(field_values)
 
 
+def _tomo_denoise_subcommand_tokens(field_values: dict) -> list:
+    """TomoDenoiseTomograms's mode selector (getCommandsTomoDenoiseTomogramsJob
+    ~6842-6853, confirmed current): the constant base program
+    (`which relion_python_tomo_denoise`) is followed by a Click/Typer
+    subcommand token, "cryoCARE:train" or "cryoCARE:predict", picked by
+    two independent booleans real RELION itself requires to be mutually
+    exclusive (a hard error otherwise, i != 1). This app doesn't replicate
+    that validation -- do_cryocare_train takes precedence if both are
+    somehow true (matching the C++'s own check order), and [] (no
+    subcommand at all) if neither is set yet, the ordinary
+    not-yet-configured state."""
+    if field_values.get("do_cryocare_train"):
+        return ["cryoCARE:train"]
+    if field_values.get("do_cryocare_predict"):
+        return ["cryoCARE:predict"]
+    return []
+
+
+def _tomo_denoise_ntiles_flags(field_values: dict) -> list:
+    """TomoDenoiseTomograms's --n-tiles (getCommandsTomoDenoiseTomogramsJob
+    ~6900-6903, confirmed current): ntiles_x/y/z are three SEPARATE
+    JobOptions combined into ONE --n-tiles flag with three space-separated
+    values -- not expressible as three independent FlagOverride entries
+    (each would emit its own repeated "--n-tiles <value>", not the single
+    "--n-tiles <x> <y> <z>" relion_python_tomo_denoise expects). Gated on
+    do_cryocare_predict and all three fields non-empty (mirrors the real
+    condition's four-clause && -- the three .length() > 0 checks are just
+    the ordinary non-empty check, done directly here), AND
+    !do_cryocare_train -- same reasoning as denoising_tomo_name/
+    care_denoising_model above: do_cryocare_train/do_cryocare_predict are
+    independent checkboxes real RELION only guards with a hard error
+    (~6821-6825), reachable-but-invalid in this app's UI, and
+    _tomo_denoise_subcommand_tokens already gives do_cryocare_train
+    precedence for the subcommand token, so --n-tiles (a predict-only
+    flag) must not ride along under a "cryoCARE:train" subcommand."""
+    if not field_values.get("do_cryocare_predict") or field_values.get("do_cryocare_train"):
+        return []
+    x, y, z = (field_values.get(k) for k in ("ntiles_x", "ntiles_y", "ntiles_z"))
+    if x in (None, "") or y in (None, "") or z in (None, ""):
+        return []
+    # ntiles_x/y/z are plain user-editable text fields (not sliders), so
+    # their raw string values are quoted before going on the command line
+    # -- same as every other free-text field this job's ordinary
+    # per-option loop emits (job_registry._build_draft_command's
+    # shlex.quote(str(value)) call); extra_flags output isn't quoted by
+    # its caller, so this builder is responsible for its own quoting.
+    return ["--n-tiles", shlex.quote(str(x)), shlex.quote(str(y)), shlex.quote(str(z))]
+
+
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # getCommandsTomoImportJob, DEFAULT branch (do_coords == false):
     #   command = "relion_python_tomo_import SerialEM ..."
@@ -781,7 +848,65 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # were also checked and use plain --o, so they're deliberately NOT
     # listed here.)
     "TomoPickTomograms": JobDraftOverride(output_flag="--output-directory"),
-    "TomoDenoiseTomograms": JobDraftOverride(output_flag="--output-directory"),
+    "TomoDenoiseTomograms": JobDraftOverride(
+        output_flag="--output-directory",
+        program_extra=_tomo_denoise_subcommand_tokens,
+        flags={
+            # denoising_tomo_name/care_denoising_model's conditions are
+            # each JUST the mode-select boolean -- the extracted
+            # option_flags condition ALSO has a `.getString().length() >
+            # 0` clause on the field's OWN value, but that's exactly what
+            # the ordinary empty-value skip already does for every
+            # non-boolean field, so it needs no extra grammar here (issue
+            # #24). tomograms_for_training/number_training_subvolumes/
+            # subvolume_dimensions are NOT that shape, though (verified
+            # against getCommandsTomoDenoiseTomogramsJob ~6886-6891):
+            # RELION guards all THREE of those flags with the SAME single
+            # condition, `tomograms_for_training.length()>0 &&
+            # do_cryocare_train` -- i.e. number_training_subvolumes/
+            # subvolume_dimensions are gated on tomograms_for_training's
+            # OWN non-emptiness, not their own. A bare do_cryocare_train
+            # condition on those two would wrongly still emit
+            # --number-training-subvolumes/--subvolume-sidelength while
+            # --training-tomograms itself is correctly suppressed (e.g.
+            # do_cryocare_train checked but tomograms_for_training still
+            # empty). tomograms_for_training is a real option of this job
+            # (in known_keys), so a second bare-identifier clause is
+            # enough -- no new condition grammar needed.
+            "tomograms_for_training": FlagOverride("--training-tomograms", condition="do_cryocare_train"),
+            "number_training_subvolumes": FlagOverride(
+                "--number-training-subvolumes", condition="tomograms_for_training && do_cryocare_train"),
+            "subvolume_dimensions": FlagOverride(
+                "--subvolume-sidelength", condition="tomograms_for_training && do_cryocare_train"),
+            # Real RELION hard-errors (i != 1, ~6821-6825) before ever
+            # reaching command-building if BOTH do_cryocare_train and
+            # do_cryocare_predict are checked -- they're two independent
+            # JobOption checkboxes (~6791/6797), not a mutually-exclusive
+            # radio group, so that dual-checked state is reachable in
+            # this app's UI even though real RELION would refuse it.
+            # _tomo_denoise_subcommand_tokens already resolves that state
+            # by giving do_cryocare_train precedence for the subcommand
+            # token; these two conditions add "&& !do_cryocare_train" so
+            # the predict-only flags never ride along under the
+            # "cryoCARE:train" subcommand that precedence picked -- Click
+            # would reject --tomogram-name/--model-file there, since they
+            # belong to the OTHER subcommand.
+            "denoising_tomo_name": FlagOverride(
+                "--tomogram-name", condition="do_cryocare_predict && !do_cryocare_train"),
+            "care_denoising_model": FlagOverride(
+                "--model-file", condition="do_cryocare_predict && !do_cryocare_train"),
+        },
+        # do_cryocare_train/predict have no standalone flag of their own
+        # (fully expressed via program_extra's subcommand token now).
+        # ntiles_x/y/z are combined into extra_flags' single --n-tiles
+        # (ntiles_x's own auto-extracted condition is unevaluable -- three
+        # .length()>0 clauses on DIFFERENT fields plus a boolean -- so it
+        # would otherwise sit in unmapped_fields implying a fix is still
+        # needed when there isn't one; same reasoning as Extract's
+        # bg_diameter suppression).
+        suppress=frozenset({"do_cryocare_train", "do_cryocare_predict", "ntiles_x", "ntiles_y", "ntiles_z"}),
+        extra_flags=_tomo_denoise_ntiles_flags,
+    ),
     # Tomography's shared "optimisation set OR direct entries" input group
     # (in_optimisation / in_particles / in_tomograms / in_trajectories),
     # built by RelionJob::getTomoInputCommmand() (src/pipeline_jobs.cpp
@@ -1426,10 +1551,10 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 # safe to fix). Left unmapped rather than guessed:
 #   - Autopick.do_topaz_filaments/topaz-internal fields, Motionrefine.
 #     do_own_params, Select.do_recenter (needs a `fnt.contains("Class2D/")`
-#     string check, ~2988), TomoDenoiseTomograms.do_cryocare_train/predict,
-#     Subtract.do_fliplabel: each switches to a genuinely different
-#     multi-flag/multi-value shape (or, for do_fliplabel, an entirely
-#     different command), not a single flag toggle.
+#     string check, ~2988), Subtract.do_fliplabel: each switches to a
+#     genuinely different multi-flag/multi-value shape (or, for
+#     do_fliplabel, an entirely different command), not a single flag
+#     toggle.
 #   - Autorefine's do_helix-gated range_rot/range_tilt/range_psi (gated by
 #     `sampling != auto_local_sampling`, a numeric comparison between two
 #     SELECT fields via a healpix-order lookup table -- not boolean-
@@ -1594,6 +1719,17 @@ def draft_output_suffix(internal_name: str) -> Optional[str]:
     bare directory is correct. See JobDraftOverride.output_suffix."""
     override = _override(internal_name)
     return override.output_suffix if override is not None else None
+
+
+def draft_program_extra(internal_name: str, field_values: dict) -> list:
+    """Extra command-line tokens inserted immediately after the resolved
+    program name, before output_flag/subdir and the per-option loop -- see
+    JobDraftOverride.program_extra's own docstring for why position
+    matters here. [] if this job has none."""
+    override = _override(internal_name)
+    if override is None or override.program_extra is None:
+        return []
+    return override.program_extra(field_values)
 
 
 def draft_extra_output_args(internal_name: str, field_values: dict) -> list:
