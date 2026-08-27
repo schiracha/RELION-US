@@ -103,6 +103,11 @@ def test_conditioned_flag_override_exposes_its_condition():
     assert draft_flag_condition_for("Import", "fn_in_other") == "do_other"
 
 
+def test_select_do_recenter_condition_uses_contains_clause():
+    assert draft_flag_for("Select", "do_recenter") == "--recenter"
+    assert draft_flag_condition_for("Select", "do_recenter") == 'fn_model.contains("Class2D/")'
+
+
 def test_negated_flag_override():
     assert draft_flag_for("Class2D", "do_parallel_discio") == "--no_parallel_disc_io"
     assert draft_flag_is_negated("Class2D", "do_parallel_discio") is True
