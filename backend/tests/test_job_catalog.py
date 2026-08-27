@@ -29,6 +29,7 @@ from job_catalog import (
     draft_output_flag,
     draft_output_suffix,
     draft_numeric_value_for,
+    draft_program_extra,
     draft_program_override,
     draft_value_for,
     has_draft_numeric_transform,
@@ -279,6 +280,69 @@ def test_extra_flags_default_job_returns_nothing():
 
 
 # --------------------------------------------------------------------------
+# program_extra (TomoDenoiseTomograms's cryoCARE:train/predict subcommand
+# token -- a value inserted BEFORE output_flag/subdir, unlike extra_flags
+# and extra_output_args; issue #24)
+# --------------------------------------------------------------------------
+
+
+def test_program_extra_tomodenoise_train_mode():
+    assert draft_program_extra("TomoDenoiseTomograms", {"do_cryocare_train": True}) == \
+        ["cryoCARE:train"]
+
+
+def test_program_extra_tomodenoise_predict_mode():
+    assert draft_program_extra("TomoDenoiseTomograms", {"do_cryocare_predict": True}) == \
+        ["cryoCARE:predict"]
+
+
+def test_program_extra_tomodenoise_neither_mode_returns_nothing():
+    assert draft_program_extra("TomoDenoiseTomograms", {}) == []
+
+
+def test_program_extra_default_job_returns_nothing():
+    assert draft_program_extra("Motioncorr", {}) == []
+
+
+def test_extra_flags_tomodenoise_ntiles():
+    assert draft_extra_flags("TomoDenoiseTomograms", {
+        "do_cryocare_predict": True, "ntiles_x": "2", "ntiles_y": "3", "ntiles_z": "4",
+    }) == ["--n-tiles", "2", "3", "4"]
+
+
+def test_extra_flags_tomodenoise_ntiles_omitted_when_predict_off():
+    assert draft_extra_flags("TomoDenoiseTomograms", {
+        "do_cryocare_predict": False, "ntiles_x": "2", "ntiles_y": "3", "ntiles_z": "4",
+    }) == []
+
+
+def test_extra_flags_tomodenoise_ntiles_omitted_when_train_also_checked():
+    """do_cryocare_train/do_cryocare_predict are independent checkboxes
+    real RELION only guards with a hard error this app doesn't replicate
+    -- _tomo_denoise_subcommand_tokens gives do_cryocare_train precedence
+    for the subcommand token, so --n-tiles (a predict-only flag) must not
+    ride along under a "cryoCARE:train" subcommand."""
+    assert draft_extra_flags("TomoDenoiseTomograms", {
+        "do_cryocare_predict": True, "do_cryocare_train": True,
+        "ntiles_x": "2", "ntiles_y": "3", "ntiles_z": "4",
+    }) == []
+
+
+def test_extra_flags_tomodenoise_ntiles_shell_metacharacters_are_quoted():
+    """ntiles_x/y/z are plain user-editable text fields, not sliders --
+    their raw values must be shell-quoted the same way every other
+    free-text field on the command line is (job_registry._build_draft_
+    command's ordinary per-option loop), since extra_flags output isn't
+    quoted by its caller and the resulting draft command can go straight
+    to a subprocess shell."""
+    result = draft_extra_flags("TomoDenoiseTomograms", {
+        "do_cryocare_predict": True,
+        "ntiles_x": "2$(touch /tmp/pwned)", "ntiles_y": "3", "ntiles_z": "4",
+    })
+    assert result == ["--n-tiles", "'2$(touch /tmp/pwned)'", "3", "4"]
+
+
+# --------------------------------------------------------------------------
 # The dataclasses themselves: frozen (immutable, hashable) and defaulted
 # --------------------------------------------------------------------------
 
@@ -286,6 +350,7 @@ def test_extra_flags_default_job_returns_nothing():
 def test_job_draft_override_defaults_are_all_falsy_empty():
     override = JobDraftOverride()
     assert override.program is None
+    assert override.program_extra is None
     assert override.output_flag is None
     assert override.output_suffix is None
     assert override.flags == {}
