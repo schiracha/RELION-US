@@ -2163,23 +2163,38 @@ function computeLineageRows(runs, parentsOf) {
   return row;
 }
 
-function renderNetwork() {
-  const rowsEl = document.getElementById("ccNetworkRows");
-  const svg = document.getElementById("ccNetworkEdges");
-  const empty = document.getElementById("ccNetworkEmpty");
-  rowsEl.innerHTML = "";
-  svg.innerHTML = "";
-  empty.classList.toggle("hidden", ccRuns.length > 0);
-  if (!ccRuns.length) return;
+// The node template Command Center's Network view uses -- factored out so
+// the Analyze popup's Pipeline tab (see openAnalyzePopup) can render an
+// identical-looking DAG without duplicating this markup.
+function lineageNodeInnerHtml(run) {
+  return `
+        <div class="cc-network-node-top">
+          <span class="cc-network-node-name">${escapeHtml(run.job_name || "job???")}</span>
+          ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
+        </div>
+        <div class="cc-network-node-type">${escapeHtml(run.display_name || run.internal_name)}</div>
+        ${statusBadge(run.status)}
+      `;
+}
 
-  const { parentsOf } = buildLineageGraph(ccRuns);
-  const rowIndex = computeLineageRows(ccRuns, parentsOf);
-  const byId = new Map(ccRuns.map((r) => [r.run_id, r]));
+// The row/column/edge layout below is shared by Command Center's Network
+// view and the Analyze popup's Pipeline tab (see openAnalyzePopup) -- both
+// draw the same lineage DAG, just into different containers with different
+// per-node markup and a different node-click action, hence nodeRenderer/
+// onNodeClick being passed in rather than hardcoded here.
+function renderLineageGraph(runs, { rowsEl, svgEl, emptyEl, direction, onNodeClick, nodeRenderer }) {
+  rowsEl.innerHTML = "";
+  svgEl.innerHTML = "";
+  if (emptyEl) emptyEl.classList.toggle("hidden", runs.length > 0);
+  if (!runs.length) return;
+
+  const { parentsOf } = buildLineageGraph(runs);
+  const rowIndex = computeLineageRows(runs, parentsOf);
 
   const maxRow = Math.max(...Array.from(rowIndex.values()));
   const rows = [];
   for (let i = 0; i <= maxRow; i++) rows.push([]);
-  ccRuns.forEach((r) => rows[rowIndex.get(r.run_id)].push(r));
+  runs.forEach((r) => rows[rowIndex.get(r.run_id)].push(r));
 
   // Column position (a plain array index) per run, filled in row order so
   // later rows can average their parents' already-known columns.
@@ -2201,11 +2216,11 @@ function renderNetwork() {
   });
 
   // Row 0 (the roots) is oldest, by construction (computeLineageRows). That's
-  // also this view's default top-to-bottom order; ccNetworkDirection flips
-  // which end sits on top, same as the Timeline direction button, without
+  // also this view's default top-to-bottom order; `direction` flips which
+  // end sits on top, same as the Timeline direction button, without
   // touching the row/column math above -- only the DOM order rows are
   // appended in.
-  const visualRows = ccNetworkDirection === "desc" ? rows.slice().reverse() : rows;
+  const visualRows = direction === "desc" ? rows.slice().reverse() : rows;
 
   visualRows.forEach((rowRuns) => {
     const rowEl = document.createElement("div");
@@ -2214,36 +2229,29 @@ function renderNetwork() {
       const node = document.createElement("div");
       node.className = "cc-network-node";
       node.dataset.runId = run.run_id;
-      node.innerHTML = `
-        <div class="cc-network-node-top">
-          <span class="cc-network-node-name">${escapeHtml(run.job_name || "job???")}</span>
-          ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
-        </div>
-        <div class="cc-network-node-type">${escapeHtml(run.display_name || run.internal_name)}</div>
-        ${statusBadge(run.status)}
-      `;
-      node.addEventListener("click", () => reopenRun(run));
+      node.innerHTML = nodeRenderer(run);
+      node.addEventListener("click", () => onNodeClick(run));
       rowEl.appendChild(node);
     });
     rowsEl.appendChild(rowEl);
   });
 
-  // Edges, read back from the laid-out DOM. #ccNetworkRows is the SVG's
-  // positioned ancestor (see style.css), so offsetLeft/Top on a node give
-  // coordinates directly in the SVG's own coordinate space.
+  // Edges, read back from the laid-out DOM. rowsEl is the SVG's positioned
+  // ancestor (see style.css), so offsetLeft/Top on a node give coordinates
+  // directly in the SVG's own coordinate space.
   //
   // Attachment is by which node is visually higher, not by which is the
-  // "parent" -- ccNetworkDirection can put the newest job on top, and the
-  // line should still run from the upper node's bottom edge to the lower
-  // node's top edge either way, rather than from a "parent" edge that might
-  // now be pointing the wrong way.
+  // "parent" -- `direction` can put the newest job on top, and the line
+  // should still run from the upper node's bottom edge to the lower node's
+  // top edge either way, rather than from a "parent" edge that might now be
+  // pointing the wrong way.
   const svgNS = "http://www.w3.org/2000/svg";
   const nodeEls = new Map();
   rowsEl.querySelectorAll(".cc-network-node").forEach((el) => nodeEls.set(el.dataset.runId, el));
   const centerX = (el) => el.offsetLeft + el.offsetWidth / 2;
   const top = (el) => ({ x: centerX(el), y: el.offsetTop });
   const bottom = (el) => ({ x: centerX(el), y: el.offsetTop + el.offsetHeight });
-  ccRuns.forEach((run) => {
+  runs.forEach((run) => {
     const childEl = nodeEls.get(run.run_id);
     if (!childEl) return;
     (parentsOf.get(run.run_id) || new Set()).forEach((parentId) => {
@@ -2258,8 +2266,19 @@ function renderNetwork() {
       const path = document.createElementNS(svgNS, "path");
       path.setAttribute("d", `M ${p.x} ${p.y} C ${p.x} ${midY}, ${c.x} ${midY}, ${c.x} ${c.y}`);
       path.setAttribute("class", "cc-network-edge");
-      svg.appendChild(path);
+      svgEl.appendChild(path);
     });
+  });
+}
+
+function renderNetwork() {
+  renderLineageGraph(ccRuns, {
+    rowsEl: document.getElementById("ccNetworkRows"),
+    svgEl: document.getElementById("ccNetworkEdges"),
+    emptyEl: document.getElementById("ccNetworkEmpty"),
+    direction: ccNetworkDirection,
+    onNodeClick: reopenRun,
+    nodeRenderer: lineageNodeInnerHtml,
   });
 }
 
@@ -2489,6 +2508,13 @@ const notAProjectError = document.getElementById("notAProjectError");
 
 let pendingProjectPath = null; // path awaiting a "start new / pick different" decision
 
+// Bumped synchronously by every browseTo() call (Go, a folder row, a recent
+// entry, openProjectModal's own auto-load of the current project...) and by
+// typing into the path box, so a slow response that lands after a newer
+// navigation has already started can recognize it's stale and skip itself,
+// instead of clobbering browsing the user has already done in the meantime.
+let browseGeneration = 0;
+
 function showModalError(el, message) {
   el.textContent = message;
   el.classList.remove("hidden");
@@ -2520,16 +2546,19 @@ async function refreshProjectLabel() {
 }
 
 async function browseTo(path) {
+  const myGeneration = ++browseGeneration;
   try {
     const listing = await api("/api/project/browse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
+    if (myGeneration !== browseGeneration) return; // superseded by a newer browseTo() while this was in flight
     clearModalError(projectModalError);
     projectPathInput.value = listing.path;
     renderBrowser(listing);
   } catch (err) {
+    if (myGeneration !== browseGeneration) return;
     showModalError(projectModalError, err.message);
   }
 }
@@ -2651,21 +2680,26 @@ async function openProjectModal() {
   newFolderNameInput.value = "";
   projectPathInput.value = "";
   refreshRecentProjects();
+  // Both branches below are real network round-trips, during which the user
+  // can already have navigated elsewhere (typed a path, hit Go, clicked a
+  // folder row, clicked a recent project). browseGeneration is bumped
+  // synchronously by every such action, so snapshotting it here and checking
+  // it back lets a late response recognize it's stale and bail instead of
+  // clobbering browsing the user has already done in the meantime --
+  // checking projectPathInput's value isn't enough, since a browseTo() in
+  // flight doesn't update it until its own response arrives, and typing
+  // alone never goes through browseTo() at all until Go/Enter is pressed.
+  const generationAtOpen = browseGeneration;
   api("/api/project").then((proj) => {
+    if (browseGeneration !== generationAtOpen) return;
     projectPathInput.value = proj.path;
     browseTo(proj.path);
   }).catch(async () => {
     // No project currently open (e.g. first launch) -- Settings'
     // "Default project-browse folder" gives a starting point instead of a
     // blank browser; unset, this is unchanged from before (browseTo("")).
-    // ensureGlobalSettings() is a real network round-trip on a cold cache,
-    // during which the user can already have navigated elsewhere (typed a
-    // path and hit Go, clicked a recent project) -- skip the fallback if
-    // projectPathInput no longer holds the empty value this function set
-    // moments ago, so a slow settings fetch can never clobber browsing the
-    // user has already done in the meantime.
     const settings = await ensureGlobalSettings();
-    if (projectPathInput.value.trim() !== "") return;
+    if (browseGeneration !== generationAtOpen) return;
     browseTo(settings["project_browse.default_folder"] || "");
   });
 }
@@ -2686,6 +2720,12 @@ document.getElementById("projectPathGoBtn").addEventListener("click", () => brow
 projectPathInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") browseTo(projectPathInput.value.trim());
 });
+// Typing into the path box (unlike a folder/recent-entry click, Up, or Go --
+// all of which go through browseTo() and bump browseGeneration themselves)
+// doesn't call browseTo() until Enter/Go is pressed. Without this, openProjectModal's
+// own auto-load of the current project can resolve in that gap and overwrite
+// what the user just typed before they ever get to press Go.
+projectPathInput.addEventListener("input", () => { browseGeneration++; });
 newFolderNameInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") document.getElementById("createFolderBtn").click();
 });
@@ -2878,10 +2918,144 @@ async function openSettingsPopup() {
   currentSettingsWinbox = win;
 }
 
-// TODO(analyze-popup): placeholder until the Analyze popup (pipeline graph,
-// classification convergence/FSC, micrograph/particle scatter) lands.
-function openAnalyzePopup() {
-  alert("Analyze is coming soon.");
+// Read-only, not-a-job popup inspired by CNIO_Relion_Tools' relion_analyse.py
+// (see NOTICE.md) -- ported as technique/tab layout, not code (that project
+// is Dash+Plotly+dash_cytoscape; every chart/graph here is this app's own
+// hand-rolled SVG/canvas, to keep the frontend dependency-free). Six tabs,
+// each independently shippable; only Pipeline is wired so far -- the rest
+// show a plain "coming soon" placeholder until their own sub-phase lands.
+const ANALYZE_TABS = ["pipeline", "micrographs", "particles", "class2d", "class3d", "refine3d"];
+const ANALYZE_TAB_LABELS = {
+  pipeline: "Pipeline", micrographs: "Micrographs", particles: "Particles",
+  class2d: "2D Classification", class3d: "3D Classification", refine3d: "3D Refine",
+};
+let currentAnalyzeWinbox = null;
+
+async function showJobSummaryPanel(run, panelEl) {
+  panelEl.classList.remove("hidden");
+  panelEl.innerHTML = `
+    <div class="analyze-summary-header">
+      <strong>${escapeHtml(run.job_name || "job???")}</strong>
+      <span class="analyze-summary-type">${escapeHtml(run.display_name || run.internal_name || "")}</span>
+      <button class="btn" data-role="an-summary-close" title="Close">✕</button>
+    </div>
+    <div class="analyze-summary-body">Loading…</div>`;
+  panelEl.querySelector('[data-role="an-summary-close"]').addEventListener("click", () => {
+    panelEl.classList.add("hidden");
+  });
+  const body = panelEl.querySelector(".analyze-summary-body");
+  // Same source split reopenRun uses (see its own comment): this app's own
+  // runs already carry full field_values in the summary list (ccRuns) --
+  // GET /api/runs/{id} only reliably resolves RELION-native run_ids
+  // (run_manager.get() looks the id up in this backend session's live
+  // registry, which a run merely persisted to history.json from an earlier
+  // session was never added to) and would 404 here. RELION-native summaries
+  // deliberately carry empty field_values (project_manager.py), needing the
+  // fresh job.star read that endpoint provides.
+  let fieldValues = run.field_values || {};
+  if (run.source === "relion") {
+    try {
+      fieldValues = (await api(`/api/runs/${encodeURIComponent(run.run_id)}`)).field_values || {};
+    } catch (err) {
+      body.textContent = "Could not load this job's settings: " + err.message;
+      return;
+    }
+  }
+  // Every non-empty field, not a hand-curated per-job-type allowlist (unlike
+  // CNIO's own job_specific_data table) -- simpler, and this app's whole
+  // design principle is showing real data rather than a curated subset of it.
+  const entries = Object.entries(fieldValues)
+    .filter(([, v]) => v !== null && v !== undefined && v !== "");
+  if (!entries.length) {
+    body.textContent = "No recorded field values for this job.";
+    return;
+  }
+  body.innerHTML = `<dl class="analyze-summary-list">${
+    entries.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join("")
+  }</dl>`;
+}
+
+function renderAnalyzePipelineTab(content) {
+  const rowsEl = content.querySelector('[data-role="an-rows"]');
+  const svgEl = content.querySelector('[data-role="an-edges"]');
+  const emptyEl = content.querySelector('[data-role="an-empty"]');
+  const summaryEl = content.querySelector('[data-role="an-summary"]');
+  renderLineageGraph(ccRuns, {
+    rowsEl, svgEl, emptyEl,
+    direction: "asc", // oldest-at-top only -- this tab has no direction toggle of its own
+    nodeRenderer: lineageNodeInnerHtml,
+    onNodeClick: (run) => showJobSummaryPanel(run, summaryEl),
+  });
+}
+
+async function openAnalyzePopup() {
+  if (currentAnalyzeWinbox) { try { currentAnalyzeWinbox.close(); } catch (err) {} currentAnalyzeWinbox = null; }
+  // Refreshes the shared ccRuns directly (same fetch refreshCommandCenter
+  // itself does) without also calling renderCommandCenterViews() -- opening
+  // Analyze shouldn't force a re-render of the always-visible Command
+  // Center panel behind it as a side effect.
+  try {
+    const proj = await api("/api/project");
+    ccRuns = proj.history || [];
+  } catch (err) {
+    ccRuns = ccRuns || [];
+  }
+
+  const body = document.createElement("div");
+  body.className = "analyze-popup";
+  body.innerHTML = `
+    <div class="tab-bar" data-role="tab-bar">
+      ${ANALYZE_TABS.map((t, i) => `<button class="tab-btn${i === 0 ? " active" : ""}" data-tab="${t}">${ANALYZE_TAB_LABELS[t]}</button>`).join("")}
+    </div>
+    <div class="tab-content-area">
+      <div class="tab-content active" data-tab-content="pipeline">
+        <div class="analyze-pipeline-wrap">
+          <div class="analyze-network-canvas">
+            <div data-role="an-rows"></div>
+            <svg data-role="an-edges" xmlns="http://www.w3.org/2000/svg"></svg>
+          </div>
+          <div class="cc-empty hidden" data-role="an-empty">No jobs run yet in this project.</div>
+        </div>
+        <div class="analyze-job-summary hidden" data-role="an-summary"></div>
+      </div>
+      ${ANALYZE_TABS.slice(1).map((t) => `
+      <div class="tab-content" data-tab-content="${t}">
+        <p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>
+      </div>`).join("")}
+    </div>
+  `;
+
+  const pipelineContent = body.querySelector('[data-tab-content="pipeline"]');
+  const loadedTabs = new Set();
+  function loadTab(tab) {
+    if (loadedTabs.has(tab)) return;
+    loadedTabs.add(tab);
+    if (tab === "pipeline") renderAnalyzePipelineTab(pipelineContent);
+    // micrographs/particles/class2d/class3d/refine3d: no dynamic content yet
+    // (static "coming soon" markup above) -- their own sub-phase adds a
+    // loader here, following the same lazy-on-first-click pattern.
+  }
+  body.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      body.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      body.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+      btn.classList.add("active");
+      body.querySelector(`[data-tab-content="${btn.dataset.tab}"]`).classList.add("active");
+      loadTab(btn.dataset.tab);
+    });
+  });
+
+  const win = new WinBox({
+    title: "Analyze", width: "96%", height: "92%", x: "center", y: "center",
+    mount: body, class: ["no-full", "analyze-winbox"],
+    onresize: () => { if (loadedTabs.has("pipeline")) renderAnalyzePipelineTab(pipelineContent); },
+    onclose: () => { currentAnalyzeWinbox = null; return false; },
+  });
+  currentAnalyzeWinbox = win;
+  // WinBox mounts async -- the Pipeline tab's edge math reads real DOM
+  // offsets (see renderLineageGraph), so it needs the popup's actual laid-
+  // out size, not whatever it was mid-mount.
+  setTimeout(() => loadTab("pipeline"), 0);
 }
 
 // pickingContext (optional): {runId, kind: "spa"|"tomo", sourcePath} -- set

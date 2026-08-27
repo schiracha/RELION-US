@@ -23,6 +23,9 @@
 #                               #   branching, long-job-name pipeline
 #   ./run_tests.sh auth         # + password protection (login/logout, the
 #                               #   gate on pages/API/websocket)
+#   ./run_tests.sh analyze      # + the Analyze popup (Menu > Tools > Analyze):
+#                               #   pipeline graph, classification/refine
+#                               #   charts, micrograph/particle scatter
 #   ./run_tests.sh ui           # + every browser suite
 #   ./run_tests.sh all          # everything (use before staging a milestone)
 #
@@ -37,6 +40,7 @@
 #   project_manager.py or the Change Project dialog ...... project
 #   job numbering, the Command Center, RELION's pipeline .. legacy
 #   backend/auth.py, login.html, Run-RelionUS's auth flags auth
+#   backend/analyze.py or the Analyze popup ............... analyze
 #   frontend/app.js scaffolding shared by all popups ..... ui
 #
 # Every browser suite gets a fresh project directory and its own backend on its
@@ -184,7 +188,7 @@ start_backend() {
     # Deliberately NO .relion_us marker: the point is a project RELION built
     # and this app has never seen.
     make_legacy_project "$proj"
-  elif [[ "$name" == test_network_branching ]]; then
+  elif [[ "$name" == test_network_branching || "$name" == test_analyze ]]; then
     make_legacy_branchy_project "$proj"
   else
     mkdir -p "$proj/.relion_us"
@@ -495,6 +499,7 @@ wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
 wants legacy   && run_browser_suite test_network_branching.py yes
 wants auth     && run_browser_suite test_auth.py
+wants analyze  && run_browser_suite test_analyze.py yes
 
 echo
 echo "======================================================================"
