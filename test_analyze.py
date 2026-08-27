@@ -1,14 +1,17 @@
 """
 Playwright test for the Analyze popup (Menu > Tools > Analyze) -- a read-only,
 not-a-job window inspired by CNIO_Relion_Tools' relion_analyse.py (see
-NOTICE.md). Only the Pipeline tab is wired so far (issue-tracked sub-phases
-C2-C4 add the rest); this suite covers what exists: the popup shell (all six
-tabs present), the Pipeline tab reusing Command Center's own lineage-graph
-renderer, and the click-for-job-summary panel.
+NOTICE.md). Pipeline (C1) and 2D/3D Classification + 3D Refine (C2) are wired;
+Micrographs/Particles (C4) are still a placeholder. This suite covers: the
+popup shell (all six tabs present), the Pipeline tab reusing Command Center's
+own lineage-graph renderer plus the click-for-job-summary panel, and the 2D
+Classification tab's run picker + convergence/class-distribution charts.
 
-Needs a live backend already pointed at a branching fixture project (same one
-test_network_branching.py uses -- run_tests.sh's make_legacy_branchy_project),
-so the Pipeline tab's node/edge counts have a known-correct shape to check
+Needs a live backend already pointed at run_tests.sh's branching fixture
+project (same one test_network_branching.py uses -- make_legacy_branchy_project)
+plus one real Class2D run with iteration files
+(add_analyze_classification_run), so both the Pipeline tab's node/edge shape
+and the 2D Classification tab's charts have known-correct data to check
 against.
 
 Usage: python3 test_analyze.py [base_url] [project_dir]
@@ -69,11 +72,16 @@ def main():
         # ---- Pipeline tab: same lineage DAG Command Center's Network view
         # shows for this fixture (test_network_branching.py pins these exact
         # numbers: TomoExcludeTilt/job004 -> ... -> job010 fanning out to 4,
-        # one of those fanning out to 2 more) ----
+        # one of those fanning out to 2 more), PLUS one extra, unconnected
+        # root -- job022, this app's own Class2D fixture run added by
+        # run_tests.sh's add_analyze_classification_run for the 2D
+        # Classification tab below. 9 branching jobs + 1 isolated root = 10
+        # nodes, still 8 edges (job022 has none), still 5 rows (job022 sits
+        # alongside job004 in the existing root row, adding no new depth).
         node_count = win.locator(".cc-network-node").count()
-        check(f"All 9 jobs appear as Pipeline nodes ({node_count})", node_count == 9)
+        check(f"All 10 jobs appear as Pipeline nodes ({node_count})", node_count == 10)
         edge_count = win.locator(".cc-network-edge").count()
-        check(f"8 edges for the 9-job branching pipeline ({edge_count})", edge_count == 8)
+        check(f"8 edges for the 9-job branching pipeline + 1 isolated root ({edge_count})", edge_count == 8)
         rows = win.locator(".cc-network-row").all_inner_texts()
         check(f"5 rows deep ({len(rows)})", len(rows) == 5)
         check("job010's fan-out row has all 4 of its children",
@@ -104,6 +112,39 @@ def main():
         check("Pipeline tab content is no longer the active one",
               "active" not in (win.locator('[data-tab-content="pipeline"]').get_attribute("class") or ""))
 
+        # ---- 2D Classification tab: run picker + convergence + distribution
+        # charts, against job022's 3 real iterations (add_analyze_classification_run) ----
+        win.locator('.tab-btn[data-tab="class2d"]').click()
+        page.wait_for_timeout(600)
+        class2d = win.locator('[data-tab-content="class2d"]')
+        options = class2d.locator('[data-role="an-run-select"] option').all_inner_texts()
+        check(f"Run picker lists the Class2D fixture run ({options})",
+              any("job022" in o for o in options))
+        check("Convergence chart renders", class2d.locator('[data-role="an-convergence-chart"] svg').count() == 1)
+        col_options = class2d.locator('[data-role="an-convergence-col"] option').all_inner_texts()
+        check(f"Convergence column picker offers all three real columns ({col_options})",
+              set(col_options) == {"Orientation changes", "Offset changes", "Particles that changed class"})
+        check("Class-distribution chart renders",
+              class2d.locator('[data-role="an-distribution-chart"] svg').count() == 1)
+        band_count = class2d.locator('[data-role="an-distribution-chart"] path').count()
+        check(f"Distribution chart draws one band per class (3 classes, {band_count} paths)", band_count == 3)
+
+        # switching the convergence column redraws with a different chart title
+        col_select = class2d.locator('[data-role="an-convergence-col"]')
+        col_select.select_option(label="Particles that changed class")
+        page.wait_for_timeout(300)
+        # .text_content(), not .inner_text() -- Playwright's inner_text()
+        # requires an HTMLElement and an SVG <title> isn't one.
+        chart_title = class2d.locator('[data-role="an-convergence-chart"] svg title').text_content()
+        check(f"Switching the convergence column redraws the chart ({chart_title!r})",
+              "Particles that changed class" in chart_title)
+
+        # ---- a classification tab with no matching runs says so plainly ----
+        win.locator('.tab-btn[data-tab="class3d"]').click()
+        page.wait_for_timeout(300)
+        check("3D Classification tab reports no matching runs (this fixture has none)",
+              "no class3d runs" in win.locator('[data-tab-content="class3d"]').inner_text().lower())
+
         # ---- reopening after closing rebuilds cleanly (no stale DOM refs) ----
         win.locator(".wb-close").first.click()
         page.wait_for_timeout(300)
@@ -114,8 +155,8 @@ def main():
         page.wait_for_selector(".analyze-winbox", timeout=5000)
         page.wait_for_timeout(600)
         win2 = page.locator(".analyze-winbox")
-        check("Reopened Pipeline tab still shows all 9 nodes",
-              win2.locator(".cc-network-node").count() == 9)
+        check("Reopened Pipeline tab still shows all 10 nodes",
+              win2.locator(".cc-network-node").count() == 10)
 
         browser.close()
 

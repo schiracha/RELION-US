@@ -188,8 +188,16 @@ start_backend() {
     # Deliberately NO .relion_us marker: the point is a project RELION built
     # and this app has never seen.
     make_legacy_project "$proj"
-  elif [[ "$name" == test_network_branching || "$name" == test_analyze ]]; then
+  elif [[ "$name" == test_network_branching ]]; then
     make_legacy_branchy_project "$proj"
+  elif [[ "$name" == test_analyze ]]; then
+    # Same branching pipeline test_network_branching.py uses (Pipeline tab
+    # reuses that exact DAG rendering, see app.js's renderLineageGraph) plus
+    # one of this app's OWN completed runs with real iteration files, so the
+    # 2D Classification tab's convergence/distribution charts have something
+    # real to plot -- see add_analyze_classification_run below.
+    make_legacy_branchy_project "$proj"
+    add_analyze_classification_run "$proj"
   else
     mkdir -p "$proj/.relion_us"
     echo "[]" > "$proj/.relion_us/run_history.json"
@@ -441,6 +449,60 @@ STAR
            "$proj/TomoRecon/job015" "$proj/TomoAlign/job013" \
            "$proj/TomoExcludeTilt/job014" "$proj/TomoSubtomo/job018" \
            "$proj/TomoRecon/job021"
+}
+
+# add_analyze_classification_run <project_dir>
+# One completed Class2D run of THIS app's own (not RELION-native, so no
+# job.star/pipeline entry needed -- .relion_us/run_history.json is enough
+# for run_manager._resolve_run_cwd to find it), with 3 real iterations of
+# run_it###_model.star + run_it###_optimiser.star written via starfile so
+# the Analyze popup's 2D Classification tab (backend/analyze.py) has real
+# convergence/class-distribution history to plot. STAR shapes match real
+# RELION output (list blocks for model_general/optimiser_general, a loop_
+# for model_classes) -- same discipline test_progress.py's own fixtures use.
+add_analyze_classification_run() {
+  local proj="$1"
+  local job="$proj/Class2D/job022"
+  mkdir -p "$job" "$proj/.relion_us"
+  cat > "$proj/.relion_us/run_history.json" <<JSON
+[{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
+  "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
+  "command": "true", "cwd": "$job", "status": "completed", "exit_code": 0,
+  "started_at": 1700000000.0, "ended_at": 1700000100.0, "field_values": {},
+  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
+JSON
+  "$PYTHON" - "$job" <<'PY'
+import sys
+import pandas as pd
+import starfile
+
+job = sys.argv[1]
+nc = 3
+for it in range(1, 4):
+    dist = [0.5 - it * 0.03, 0.3 + it * 0.01, 0.2 + it * 0.02]
+    starfile.write({
+        "model_general": {
+            "rlnCurrentResolution": 1.0 / (25.0 - it),
+            "rlnNrClasses": nc,
+            "rlnReferenceDimensionality": 2,
+            "rlnPixelSize": 1.4,
+        },
+        "model_classes": pd.DataFrame({
+            "rlnReferenceImage": [f"{k + 1:06d}@run_it{it:03d}_classes.mrcs" for k in range(nc)],
+            "rlnClassDistribution": dist,
+            "rlnEstimatedResolution": [20.0 - it + k for k in range(nc)],
+            "rlnAccuracyRotations": [3.0] * nc,
+            "rlnAccuracyTranslationsAngst": [1.1] * nc,
+        }),
+    }, f"{job}/run_it{it:03d}_model.star", overwrite=True)
+    starfile.write({
+        "optimiser_general": {
+            "rlnChangesOptimalOrientations": 10.0 / it,
+            "rlnChangesOptimalOffsets": 3.0 / it,
+            "rlnChangesOptimalClasses": 50.0 / it,
+        }
+    }, f"{job}/run_it{it:03d}_optimiser.star", overwrite=True)
+PY
 }
 
 # run_browser_suite <script> [pass_project_dir]

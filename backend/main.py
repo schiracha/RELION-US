@@ -157,6 +157,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+import analyze
 import auth
 import ctf_qc
 import job_registry
@@ -1024,6 +1025,33 @@ def run_orientation_distribution(run_id: str):
     data = progress.read_orientation_distribution(Path(cwd))
     data["supported"] = True
     return data
+
+
+# --------------------------------------------------------------------------
+# Analyze popup (Menu > Tools > Analyze) -- reads across a run's whole
+# iteration history rather than just the latest, for the classification/
+# refinement convergence charts. See analyze.py. Not gated by
+# progress.supports_progress() the way the endpoints above are: the
+# frontend's own tab/run-picker already only ever calls these for a run of
+# the right job type, and a mismatched call just gets available: False back
+# (no optimiser.star/model.star found), same as an unstarted run would.
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/runs/{run_id}/analyze/convergence")
+def analyze_convergence(run_id: str):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return analyze.read_optimiser_series(Path(cwd))
+
+
+@app.get("/api/runs/{run_id}/analyze/class-distribution")
+def analyze_class_distribution(run_id: str):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return analyze.read_class_distribution_series(Path(cwd))
 
 
 @app.get("/api/runs/{run_id}/progress/thumbnail")

@@ -990,6 +990,7 @@ html, body {
 .progress-empty { color: var(--text-dim); font-size: 12px; padding: 14px 2px; font-style: italic; }
 .progress-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .tip-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.tip-more { color: var(--text-dim); font-style: italic; }
 .progress-tooltip {
   position: absolute; top: 0; transform: translateX(-50%);
   background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px;
@@ -1058,3 +1059,16 @@ html, body {
 .analyze-summary-list { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; font-size: 12px; }
 .analyze-summary-list dt { color: var(--text-dim); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 .analyze-summary-list dd { margin: 0; word-break: break-word; }
+
+.analyze-run-picker { padding: 10px 2px 14px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.analyze-run-picker label { font-size: 12px; color: var(--text-dim); }
+.analyze-run-picker select {
+  margin-left: 6px; padding: 4px 8px; background: var(--panel-alt);
+  border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+}
+.analyze-chart-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.analyze-chart-head h4 { margin: 0; }
+.analyze-chart-head select {
+  padding: 2px 6px; background: var(--panel-alt); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 11px;
+}

@@ -2929,6 +2929,15 @@ const ANALYZE_TAB_LABELS = {
   pipeline: "Pipeline", micrographs: "Micrographs", particles: "Particles",
   class2d: "2D Classification", class3d: "3D Classification", refine3d: "3D Refine",
 };
+// Tabs backed by renderAnalyzeClassificationTab (C2) -- job type filters the
+// run picker; showDistribution is false for 3D Refine since Autorefine is
+// always exactly one class (a "distribution across classes" chart would
+// have nothing to show).
+const ANALYZE_CLASSIFICATION_TABS = {
+  class2d: { jobType: "Class2D", showDistribution: true },
+  class3d: { jobType: "Class3D", showDistribution: true },
+  refine3d: { jobType: "Autorefine", showDistribution: false }, // RELION's own internal name for 3D auto-refine
+};
 let currentAnalyzeWinbox = null;
 
 async function showJobSummaryPanel(run, panelEl) {
@@ -2988,6 +2997,113 @@ function renderAnalyzePipelineTab(content) {
   });
 }
 
+// Human-readable label/unit for each convergence column real RELION writes
+// to data_optimiser_general every iteration (src/ml_optimiser.cpp ~1480-
+// 1482, verified against real source, not assumed from any third-party
+// tool's naming -- see backend/analyze.py's own CONVERGENCE_COLUMNS).
+const CONVERGENCE_COLUMN_META = {
+  rlnChangesOptimalOrientations: { label: "Orientation changes", unit: "°" },
+  rlnChangesOptimalOffsets: { label: "Offset changes", unit: " px" },
+  rlnChangesOptimalClasses: { label: "Particles that changed class", unit: "" },
+};
+
+// Shared by the 2D Classification / 3D Classification / 3D Refine tabs --
+// same two charts (convergence, and class distribution across iterations),
+// differing only in which job type's runs populate the picker and whether
+// the distribution chart is meaningful at all (Refine3D is always exactly
+// one class, so showDistribution is false for that tab).
+async function renderAnalyzeClassificationTab(content, { jobType, showDistribution }) {
+  const eligible = ccRuns.filter((r) => r.internal_name === jobType);
+  content.innerHTML = `
+    <div class="analyze-run-picker">
+      <label>Run <select data-role="an-run-select"></select></label>
+    </div>
+    <div data-role="an-charts"></div>
+  `;
+  const select = content.querySelector('[data-role="an-run-select"]');
+  const chartsEl = content.querySelector('[data-role="an-charts"]');
+  if (!eligible.length) {
+    chartsEl.innerHTML = `<p class="analyze-coming-soon">No ${escapeHtml(jobType)} runs in this project yet.</p>`;
+    select.disabled = true;
+    return;
+  }
+  eligible
+    .slice()
+    .sort((a, b) => (b.job_number || 0) - (a.job_number || 0)) // most recent job first
+    .forEach((r) => {
+      const opt = document.createElement("option");
+      opt.value = r.run_id;
+      opt.textContent = `${r.job_name} (${r.status})`;
+      select.appendChild(opt);
+    });
+
+  async function renderForRun(runId) {
+    chartsEl.innerHTML = '<p class="analyze-coming-soon">Loading…</p>';
+    let convergence;
+    let distribution = { available: false, iterations: [], classes: {} };
+    try {
+      const reqs = [api(`/api/runs/${encodeURIComponent(runId)}/analyze/convergence`)];
+      if (showDistribution) reqs.push(api(`/api/runs/${encodeURIComponent(runId)}/analyze/class-distribution`));
+      const results = await Promise.all(reqs);
+      convergence = results[0];
+      if (showDistribution) distribution = results[1];
+    } catch (err) {
+      chartsEl.innerHTML = `<p class="analyze-coming-soon">Could not load: ${escapeHtml(err.message)}</p>`;
+      return;
+    }
+
+    chartsEl.innerHTML = `
+      <div class="progress-section">
+        <div class="analyze-chart-head">
+          <h4>Convergence</h4>
+          ${convergence.columns.length > 1 ? '<select data-role="an-convergence-col"></select>' : ""}
+        </div>
+        <div data-role="an-convergence-chart"></div>
+      </div>
+      ${showDistribution ? `
+      <div class="progress-section">
+        <h4>Class distribution</h4>
+        <div data-role="an-distribution-chart"></div>
+      </div>` : ""}
+    `;
+
+    const convergenceHost = chartsEl.querySelector('[data-role="an-convergence-chart"]');
+    if (!convergence.available || !convergence.columns.length) {
+      convergenceHost.innerHTML = '<div class="progress-empty">No optimiser.star history reported yet.</div>';
+    } else {
+      const colSelect = chartsEl.querySelector('[data-role="an-convergence-col"]');
+      const drawConvergence = (col) => {
+        const meta = CONVERGENCE_COLUMN_META[col] || { label: col, unit: "" };
+        drawAccuracyChart(convergenceHost, convergence.series, {
+          key: col, label: meta.label, unit: meta.unit, color: "s1",
+        });
+      };
+      if (colSelect) {
+        convergence.columns.forEach((col) => {
+          const opt = document.createElement("option");
+          opt.value = col;
+          opt.textContent = (CONVERGENCE_COLUMN_META[col] || {}).label || col;
+          colSelect.appendChild(opt);
+        });
+        colSelect.addEventListener("change", () => drawConvergence(colSelect.value));
+      }
+      drawConvergence(convergence.columns[0]);
+    }
+
+    if (showDistribution) {
+      const distHost = chartsEl.querySelector('[data-role="an-distribution-chart"]');
+      if (!distribution.available) {
+        distHost.innerHTML = '<div class="progress-empty">No class-distribution history reported yet.</div>';
+      } else {
+        drawClassDistributionSeriesChart(distHost, distribution.iterations, distribution.classes);
+      }
+    }
+  }
+
+  select.addEventListener("change", () => renderForRun(select.value));
+  await renderForRun(select.value);
+}
+
 async function openAnalyzePopup() {
   if (currentAnalyzeWinbox) { try { currentAnalyzeWinbox.close(); } catch (err) {} currentAnalyzeWinbox = null; }
   // Refreshes the shared ccRuns directly (same fetch refreshCommandCenter
@@ -3020,7 +3136,7 @@ async function openAnalyzePopup() {
       </div>
       ${ANALYZE_TABS.slice(1).map((t) => `
       <div class="tab-content" data-tab-content="${t}">
-        <p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>
+        ${ANALYZE_CLASSIFICATION_TABS[t] ? "" : `<p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>`}
       </div>`).join("")}
     </div>
   `;
@@ -3031,9 +3147,11 @@ async function openAnalyzePopup() {
     if (loadedTabs.has(tab)) return;
     loadedTabs.add(tab);
     if (tab === "pipeline") renderAnalyzePipelineTab(pipelineContent);
-    // micrographs/particles/class2d/class3d/refine3d: no dynamic content yet
-    // (static "coming soon" markup above) -- their own sub-phase adds a
-    // loader here, following the same lazy-on-first-click pattern.
+    else if (ANALYZE_CLASSIFICATION_TABS[tab]) {
+      renderAnalyzeClassificationTab(body.querySelector(`[data-tab-content="${tab}"]`), ANALYZE_CLASSIFICATION_TABS[tab]);
+    }
+    // micrographs/particles: no dynamic content yet (static "coming soon"
+    // markup above) -- C4 adds a loader here, same lazy-on-first-click pattern.
   }
   body.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -4223,6 +4341,121 @@ function drawClassDistributionChart(host, classes) {
   });
   host.appendChild(svg);
   host.appendChild(tip);
+}
+
+// A distinct hue per class, spread evenly around the wheel -- Class2D
+// routinely has 20-100+ classes, far more than the theme's fixed
+// --series-1/--series-2 pair covers, so colors are generated rather than
+// looked up. Fixed saturation/lightness read reasonably against both
+// dark and light --panel (a filled area's contrast partner is the grid/
+// border around it, not the page background, unlike a thin line).
+function classColor(index, total) {
+  const hue = ((index - 1) / Math.max(total, 1)) * 360;
+  return `hsl(${hue.toFixed(0)}, 65%, 55%)`;
+}
+
+// Stacked-area chart: each class's share of particles, across every
+// iteration (the Analyze popup's 2D/3D Classification tabs -- see
+// openAnalyzePopup) -- distinct from drawClassDistributionChart above
+// (a bar chart of the LATEST iteration only, used by the Progress tab).
+// `classes` is {classIndex: [fraction_per_iteration, ...]}, each array
+// parallel to `iterations`. Bands are drawn bottom-to-top in class-index
+// order, each one's bottom edge riding on the running total of every class
+// stacked below it -- reused as the next band's own bottom, alongside its
+// own top -- so no matter how the shares shift, the stack always fills
+// 0-100%.
+function drawClassDistributionSeriesChart(host, iterations, classes) {
+  host.innerHTML = "";
+  const classIndices = Object.keys(classes).map(Number).sort((a, b) => a - b);
+  if (!iterations.length || !classIndices.length) {
+    host.innerHTML = '<div class="progress-empty">No class-distribution history reported yet.</div>';
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 200, ML = 40, MR = 20, MT = 18, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const n = iterations.length;
+  const xMin = iterations[0], xMax = iterations[n - 1];
+  const X = (i) => ML + (xMax === xMin ? plotW / 2 : ((i - xMin) / (xMax - xMin)) * plotW);
+  const Y = (v) => MT + plotH - v * plotH; // v is a 0..1 fraction of the stack
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent = "Class distribution by iteration";
+
+  for (let t = 0; t <= 4; t++) {
+    const v = t / 4, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = `${(v * 100).toFixed(0)}%`;
+    svg.appendChild(lab);
+  }
+  [xMin, xMax].forEach((i, idx) => {
+    const t = svgEl("text", { x: X(i), y: H - 8, "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9 });
+    t.textContent = `it ${i}`;
+    svg.appendChild(t);
+  });
+
+  const cumTop = iterations.map(() => 0);
+  classIndices.forEach((classIdx) => {
+    const values = classes[classIdx];
+    const bands = iterations.map((it, i) => {
+      const v = values[i] != null ? values[i] : 0;
+      const bottom = cumTop[i];
+      const top = bottom + v;
+      cumTop[i] = top;
+      return { it, bottom, top };
+    });
+    const topPath = bands.map((b, i) => `${i ? "L" : "M"}${X(b.it).toFixed(1)},${Y(b.top).toFixed(1)}`).join(" ");
+    const bottomPath = bands.slice().reverse()
+      .map((b) => `L${X(b.it).toFixed(1)},${Y(b.bottom).toFixed(1)}`).join(" ");
+    svg.appendChild(svgEl("path", {
+      d: `${topPath} ${bottomPath} Z`,
+      fill: classColor(classIdx, classIndices.length), opacity: 0.85,
+      stroke: c.surface, "stroke-width": 0.5,
+    }));
+  });
+  host.appendChild(svg);
+
+  // Hover: nearest iteration's classes, largest share first, capped at 8 --
+  // this chart routinely has far more classes than a tooltip can usefully
+  // list one-per-line.
+  const MAX_TOOLTIP_CLASSES = 8;
+  const hoverLine = svgEl("line", { y1: MT, y2: MT + plotH, stroke: c.dim, "stroke-width": 1, opacity: 0 });
+  svg.appendChild(hoverLine);
+  const hit = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(hit);
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+  host.appendChild(tip);
+  hit.addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let nearestI = 0;
+    iterations.forEach((it, i) => {
+      if (Math.abs(X(it) - px) < Math.abs(X(iterations[nearestI]) - px)) nearestI = i;
+    });
+    const nearestIt = iterations[nearestI];
+    hoverLine.setAttribute("x1", X(nearestIt));
+    hoverLine.setAttribute("x2", X(nearestIt));
+    hoverLine.setAttribute("opacity", "0.6");
+    tip.classList.remove("hidden");
+    tip.style.left = `${(X(nearestIt) / W) * 100}%`;
+    const ranked = classIndices
+      .map((classIdx) => ({ classIdx, v: classes[classIdx][nearestI] }))
+      .filter((r) => r.v != null)
+      .sort((a, b) => b.v - a.v);
+    const shown = ranked.slice(0, MAX_TOOLTIP_CLASSES)
+      .map((r) => `<br><span class="tip-swatch" style="background:${classColor(r.classIdx, classIndices.length)}"></span>` +
+        `Class ${r.classIdx}: ${(r.v * 100).toFixed(1)}%`)
+      .join("");
+    const more = ranked.length > MAX_TOOLTIP_CLASSES
+      ? `<br><span class="tip-more">+${ranked.length - MAX_TOOLTIP_CLASSES} more</span>` : "";
+    tip.innerHTML = `<b>Iteration ${nearestIt}</b>${shown}${more}`;
+  });
+  hit.addEventListener("mouseleave", () => {
+    hoverLine.setAttribute("opacity", "0");
+    tip.classList.add("hidden");
+  });
 }
 
 // Line chart: DefocusU/DefocusV against micrograph order, for the CTF QC tab.
