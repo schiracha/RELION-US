@@ -30,10 +30,14 @@ def _write_optimiser(job, it, **cols):
     starfile.write({"optimiser_general": cols}, job / f"run_it{it:03d}_optimiser.star", overwrite=True)
 
 
-def _write_model_iteration(job, it, *, nc=NC, distributions=None, half=False):
+def _write_model_iteration(job, it, *, nc=NC, distributions=None, half=False, fsc_shells=None):
     """Same real-shape convention as test_progress.py's _write_iteration
     (model_general as a plain dict -> STAR list block), trimmed to only what
-    read_class_distribution_series actually reads (rlnClassDistribution)."""
+    read_class_distribution_series actually reads (rlnClassDistribution),
+    plus optional model_class_N loop_ blocks (one per class, one row per
+    Fourier shell -- verified against MlModel::write(), ml_model.cpp
+    ~748-771) for read_class_fsc. fsc_shells, when given, is a list of
+    {resolution, fsc, ssnr} triples shared by every class in this fixture."""
     dist = distributions if distributions is not None else [1.0 / nc] * nc
     blocks = {
         "model_general": {
@@ -50,6 +54,14 @@ def _write_model_iteration(job, it, *, nc=NC, distributions=None, half=False):
             "rlnAccuracyTranslationsAngst": [1.1] * nc,
         }),
     }
+    if fsc_shells:
+        for k in range(nc):
+            blocks[f"model_class_{k + 1}"] = pd.DataFrame({
+                "rlnSpectralIndex": list(range(len(fsc_shells))),
+                "rlnAngstromResolution": [s["resolution"] for s in fsc_shells],
+                "rlnGoldStandardFsc": [s["fsc"] + k * 0.01 for s in fsc_shells],
+                "rlnSsnrMap": [s["ssnr"] + k * 0.1 for s in fsc_shells],
+            })
     names = [f"run_it{it:03d}_half1_model.star", f"run_it{it:03d}_half2_model.star"] if half \
         else [f"run_it{it:03d}_model.star"]
     for name in names:
@@ -147,3 +159,63 @@ def test_class_distribution_skips_iterations_with_no_classes_block(tmp_path):
     _write_model_iteration(tmp_path, 2, nc=2, distributions=[0.5, 0.5])
     result = analyze.read_class_distribution_series(tmp_path)
     assert result["iterations"] == [2]   # iteration 1's empty classes block contributes nothing
+
+
+# --------------------------------------------------------------------------
+# read_class_fsc
+# --------------------------------------------------------------------------
+
+FSC_SHELLS = [
+    {"resolution": 20.0, "fsc": 0.99, "ssnr": 50.0},
+    {"resolution": 10.0, "fsc": 0.80, "ssnr": 10.0},
+    {"resolution": 5.0, "fsc": 0.10, "ssnr": 0.5},
+]
+
+
+def test_class_fsc_no_files_not_available(tmp_path):
+    result = analyze.read_class_fsc(tmp_path)
+    assert result == {"available": False, "iteration": None, "classes": {}}
+
+
+def test_class_fsc_reads_last_iteration_by_default(tmp_path):
+    _write_model_iteration(tmp_path, 1, nc=2, fsc_shells=FSC_SHELLS)
+    _write_model_iteration(tmp_path, 2, nc=2, fsc_shells=FSC_SHELLS)
+    result = analyze.read_class_fsc(tmp_path)
+    assert result["available"] is True
+    assert result["iteration"] == 2
+    assert set(result["classes"].keys()) == {1, 2}
+    assert result["classes"][1]["resolution"] == [20.0, 10.0, 5.0]
+    assert result["classes"][1]["fsc"] == [0.99, 0.80, 0.10]
+    assert result["classes"][1]["ssnr"] == [50.0, 10.0, 0.5]
+    # class 2's fixture values are offset from class 1's (see _write_model_iteration)
+    assert result["classes"][2]["fsc"][0] == pytest.approx(0.99 + 0.01)
+
+
+def test_class_fsc_reads_a_specific_earlier_iteration(tmp_path):
+    _write_model_iteration(tmp_path, 1, nc=1, fsc_shells=FSC_SHELLS)
+    _write_model_iteration(tmp_path, 2, nc=1, fsc_shells=[{"resolution": 20.0, "fsc": 0.5, "ssnr": 5.0}])
+    result = analyze.read_class_fsc(tmp_path, iteration=1)
+    assert result["iteration"] == 1
+    assert result["classes"][1]["fsc"] == [0.99, 0.80, 0.10]
+
+
+def test_class_fsc_unknown_iteration_not_available(tmp_path):
+    _write_model_iteration(tmp_path, 1, nc=1, fsc_shells=FSC_SHELLS)
+    result = analyze.read_class_fsc(tmp_path, iteration=99)
+    assert result == {"available": False, "iteration": None, "classes": {}}
+
+
+def test_class_fsc_not_available_when_model_class_blocks_are_missing(tmp_path):
+    # A model.star with the ordinary model_general/model_classes blocks but
+    # no model_class_N sub-blocks at all (fsc_shells=None) -- e.g. a very
+    # old RELION version, or a file this app hasn't seen the shape of yet.
+    _write_model_iteration(tmp_path, 1, nc=2)
+    result = analyze.read_class_fsc(tmp_path)
+    assert result == {"available": False, "iteration": 1, "classes": {}}
+
+
+def test_class_fsc_half_set_only_still_works(tmp_path):
+    _write_model_iteration(tmp_path, 1, nc=1, fsc_shells=FSC_SHELLS, half=True)
+    result = analyze.read_class_fsc(tmp_path)
+    assert result["available"] is True
+    assert result["classes"][1]["fsc"] == [0.99, 0.80, 0.10]

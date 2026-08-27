@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import re
 from pathlib import Path
+from typing import Optional
 
 import progress
 
@@ -139,3 +140,69 @@ def read_class_distribution_series(job_dir: Path) -> dict:
             classes.setdefault(c["index"], []).append(c["distribution"])
 
     return {"available": bool(iterations), "iterations": iterations, "classes": classes}
+
+
+# model_class_1, model_class_2, ... (one-indexed -- confirmed against
+# MlModel::write(), src/ml_model.cpp ~748-771: MDsigma.setName("model_class_"
+# + integerToString(iclass+1))). A loop_ table, one row per Fourier shell.
+_MODEL_CLASS_RE = re.compile(r"^model_class_(\d+)$")
+
+
+@functools.lru_cache(maxsize=256)
+def _parse_model_class_fsc_cached(path_str: str, mtime: float, size: int) -> dict:
+    """Per-class resolution/FSC/SSNR arrays from one iteration's model.star.
+    rlnAngstromResolution, rlnGoldStandardFsc, and rlnSsnrMap are all THREE
+    unconditionally written together to every model_class_N block, every
+    iteration (ml_model.cpp ~757-768, confirmed against real source) --
+    NOT mutually exclusive alternatives gated on half-set vs. plain
+    classification, despite what the column names alone might suggest; a
+    plain classification without random halves still gets a (less
+    meaningful, but present) rlnGoldStandardFsc column. Both are returned
+    here and the frontend picks which curve to plot by default."""
+    import starfile
+
+    raw = starfile.read(path_str, always_dict=True)
+    out: dict = {}
+    for key, block in raw.items():
+        m = _MODEL_CLASS_RE.match(key)
+        if not m or block is None or not len(block):
+            continue
+        class_idx = int(m.group(1))
+        cols = block.columns
+        if "rlnAngstromResolution" not in cols:
+            continue
+        resolution = block["rlnAngstromResolution"].tolist()
+        entry = {"resolution": [float(v) for v in resolution]}
+        if "rlnGoldStandardFsc" in cols:
+            entry["fsc"] = [float(v) for v in block["rlnGoldStandardFsc"].tolist()]
+        if "rlnSsnrMap" in cols:
+            entry["ssnr"] = [float(v) for v in block["rlnSsnrMap"].tolist()]
+        if "fsc" in entry or "ssnr" in entry:
+            out[class_idx] = entry
+    return out
+
+
+def read_class_fsc(job_dir: Path, iteration: Optional[int] = None) -> dict:
+    """Per-class FSC/SSNR-vs-resolution for the last (or a given) iteration.
+    Reuses progress.py's own _iteration_files for which file to read (same
+    half-set handling as read_class_distribution_series above) -- but a
+    dedicated parse (_parse_model_class_fsc_cached), not
+    _parse_model_star_cached, since model_class_N is a different block
+    shape (loop_, one per class) that module has no reason to know about."""
+    files = progress._iteration_files(job_dir)
+    if not files:
+        return {"available": False, "iteration": None, "classes": {}}
+    if iteration is not None:
+        match = next(((it, p) for it, p in files if it == iteration), None)
+        if match is None:
+            return {"available": False, "iteration": None, "classes": {}}
+        it, path = match
+    else:
+        it, path = files[-1]
+
+    try:
+        st = path.stat()
+    except OSError:
+        return {"available": False, "iteration": None, "classes": {}}
+    classes = _parse_model_class_fsc_cached(str(path), st.st_mtime, st.st_size)
+    return {"available": bool(classes), "iteration": it, "classes": classes}

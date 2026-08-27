@@ -2929,14 +2929,17 @@ const ANALYZE_TAB_LABELS = {
   pipeline: "Pipeline", micrographs: "Micrographs", particles: "Particles",
   class2d: "2D Classification", class3d: "3D Classification", refine3d: "3D Refine",
 };
-// Tabs backed by renderAnalyzeClassificationTab (C2) -- job type filters the
-// run picker; showDistribution is false for 3D Refine since Autorefine is
-// always exactly one class (a "distribution across classes" chart would
-// have nothing to show).
+// Tabs backed by renderAnalyzeClassificationTab (C2/C3) -- job type filters
+// the run picker. showDistribution is false for 3D Refine since Autorefine
+// is always exactly one class (a "distribution across classes" chart would
+// have nothing to show). show3d gates the FSC chart and the viewing-
+// direction heatmap -- both are 3D-only concepts, same reasoning
+// progress.py's own ORIENTATION_DISTRIBUTION_JOBS (PROGRESS_JOBS minus
+// Class2D) already encodes for the Progress tab.
 const ANALYZE_CLASSIFICATION_TABS = {
-  class2d: { jobType: "Class2D", showDistribution: true },
-  class3d: { jobType: "Class3D", showDistribution: true },
-  refine3d: { jobType: "Autorefine", showDistribution: false }, // RELION's own internal name for 3D auto-refine
+  class2d: { jobType: "Class2D", showDistribution: true, show3d: false },
+  class3d: { jobType: "Class3D", showDistribution: true, show3d: true },
+  refine3d: { jobType: "Autorefine", showDistribution: false, show3d: true }, // RELION's own internal name for 3D auto-refine
 };
 let currentAnalyzeWinbox = null;
 
@@ -3012,7 +3015,7 @@ const CONVERGENCE_COLUMN_META = {
 // differing only in which job type's runs populate the picker and whether
 // the distribution chart is meaningful at all (Refine3D is always exactly
 // one class, so showDistribution is false for that tab).
-async function renderAnalyzeClassificationTab(content, { jobType, showDistribution }) {
+async function renderAnalyzeClassificationTab(content, { jobType, showDistribution, show3d }) {
   const eligible = ccRuns.filter((r) => r.internal_name === jobType);
   content.innerHTML = `
     <div class="analyze-run-picker">
@@ -3041,12 +3044,16 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
     chartsEl.innerHTML = '<p class="analyze-coming-soon">Loading…</p>';
     let convergence;
     let distribution = { available: false, iterations: [], classes: {} };
+    let fsc = { available: false, classes: {} };
     try {
       const reqs = [api(`/api/runs/${encodeURIComponent(runId)}/analyze/convergence`)];
       if (showDistribution) reqs.push(api(`/api/runs/${encodeURIComponent(runId)}/analyze/class-distribution`));
+      if (show3d) reqs.push(api(`/api/runs/${encodeURIComponent(runId)}/analyze/class-fsc`));
       const results = await Promise.all(reqs);
-      convergence = results[0];
-      if (showDistribution) distribution = results[1];
+      let i = 0;
+      convergence = results[i++];
+      if (showDistribution) distribution = results[i++];
+      if (show3d) fsc = results[i++];
     } catch (err) {
       chartsEl.innerHTML = `<p class="analyze-coming-soon">Could not load: ${escapeHtml(err.message)}</p>`;
       return;
@@ -3064,6 +3071,25 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
       <div class="progress-section">
         <h4>Class distribution</h4>
         <div data-role="an-distribution-chart"></div>
+      </div>` : ""}
+      ${show3d ? `
+      <div class="progress-section">
+        <div class="analyze-chart-head">
+          <h4>FSC${fsc.iteration != null ? ` (iteration ${fsc.iteration})` : ""}</h4>
+          <select data-role="an-fsc-metric">
+            <option value="fsc">Gold-standard FSC</option>
+            <option value="ssnr">SSNR</option>
+          </select>
+        </div>
+        <div data-role="an-fsc-chart"></div>
+      </div>
+      <div class="progress-section">
+        <h4>Viewing-direction distribution</h4>
+        <div class="progress-controls" style="border-bottom:none;margin-bottom:4px;padding:0 0 6px;">
+          <button class="btn" data-role="an-orient-btn">Generate from most recent completed iteration</button>
+          <span class="progress-status" data-role="an-orient-status"></span>
+        </div>
+        <div data-role="an-orient-body"></div>
       </div>` : ""}
     `;
 
@@ -3097,6 +3123,48 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
       } else {
         drawClassDistributionSeriesChart(distHost, distribution.iterations, distribution.classes);
       }
+    }
+
+    if (show3d) {
+      const fscHost = chartsEl.querySelector('[data-role="an-fsc-chart"]');
+      const metricSelect = chartsEl.querySelector('[data-role="an-fsc-metric"]');
+      const drawFsc = () => drawClassFscChart(fscHost, fsc.classes, { metric: metricSelect.value });
+      if (!fsc.available) {
+        fscHost.innerHTML = '<div class="progress-empty">No per-class FSC/SSNR data in this iteration.</div>';
+      } else {
+        drawFsc();
+      }
+      metricSelect.addEventListener("change", drawFsc);
+
+      // On demand only, same as the Progress tab's own viewing-direction
+      // button (app.js's renderProgressBody) -- data.star is a per-PARTICLE
+      // file that can run into the tens of millions of rows, never fetched
+      // automatically.
+      const orientBody = chartsEl.querySelector('[data-role="an-orient-body"]');
+      const orientStatus = chartsEl.querySelector('[data-role="an-orient-status"]');
+      const orientBtn = chartsEl.querySelector('[data-role="an-orient-btn"]');
+      orientBtn.addEventListener("click", async () => {
+        orientBtn.disabled = true;
+        orientStatus.textContent = "Reading particle orientations…";
+        orientBody.innerHTML = "";
+        try {
+          const data = await api(`/api/runs/${encodeURIComponent(runId)}/orientation-distribution`);
+          if (!data.available) {
+            orientStatus.textContent = "";
+            orientBody.innerHTML = data.iteration != null
+              ? `<div class="progress-empty">Iteration ${data.iteration}'s data.star has no orientation columns yet.</div>`
+              : '<div class="progress-empty">No completed iteration to read yet.</div>';
+            return;
+          }
+          orientStatus.textContent = `iteration ${data.iteration} · ${data.n_particles.toLocaleString()} particles`;
+          drawOrientationHeatmap(orientBody, data);
+        } catch (err) {
+          orientStatus.textContent = "";
+          orientBody.innerHTML = `<div class="progress-empty">Could not read orientations: ${escapeHtml(err.message)}</div>`;
+        } finally {
+          orientBtn.disabled = false;
+        }
+      });
     }
   }
 
@@ -4451,6 +4519,112 @@ function drawClassDistributionSeriesChart(host, iterations, classes) {
     const more = ranked.length > MAX_TOOLTIP_CLASSES
       ? `<br><span class="tip-more">+${ranked.length - MAX_TOOLTIP_CLASSES} more</span>` : "";
     tip.innerHTML = `<b>Iteration ${nearestIt}</b>${shown}${more}`;
+  });
+  hit.addEventListener("mouseleave", () => {
+    hoverLine.setAttribute("opacity", "0");
+    tip.classList.add("hidden");
+  });
+}
+
+// Multi-line chart: FSC (or SSNR) against resolution shell, one line per
+// class -- the Analyze popup's 3D Classification/3D Refine tabs (see
+// renderAnalyzeClassificationTab). `classes` is {classIndex: {resolution:
+// [...], fsc: [...], ssnr: [...]}}, all three arrays parallel (one entry per
+// Fourier shell, ascending index = ascending resolution = descending Å).
+// X is plotted by SHELL INDEX, not by the Å value directly: shells are
+// evenly spaced in frequency (1/Å), which is what a real FSC plot's x-axis
+// actually is -- Å values only label the two ends, the same "first/last
+// iteration" labeling convention drawResolutionChart already uses, just
+// applied to shells instead.
+function drawClassFscChart(host, classes, { metric = "fsc" } = {}) {
+  host.innerHTML = "";
+  const classIndices = Object.keys(classes).map(Number).sort((a, b) => a - b);
+  const series = classIndices
+    .map((idx) => ({ idx, resolution: classes[idx].resolution, values: classes[idx][metric] }))
+    .filter((s) => s.values && s.values.length);
+  if (!series.length) {
+    host.innerHTML = `<div class="progress-empty">No ${metric === "fsc" ? "FSC" : "SSNR"} data in this iteration.</div>`;
+    return;
+  }
+  const c = themeColors();
+  const W = 460, H = 200, ML = 40, MR = 20, MT = 18, MB = 30;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const n = Math.max(...series.map((s) => s.values.length));
+  const yRef = metric === "fsc" ? 0.143 : 1.0; // gold-standard threshold vs. SSNR=1
+  let yMax = Math.max(yRef, ...series.flatMap((s) => s.values)) * 1.08;
+  const yMin = Math.min(0, ...series.flatMap((s) => s.values));
+  const X = (i) => ML + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const Y = (v) => MT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "progress-chart", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent =
+    metric === "fsc" ? "Gold-standard FSC by resolution shell" : "SSNR by resolution shell";
+
+  for (let t = 0; t <= 3; t++) {
+    const v = yMin + ((yMax - yMin) * t) / 3, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: c.grid, "stroke-width": 1, opacity: 0.5 }));
+    const lab = svgEl("text", { x: ML - 6, y: y + 3, "text-anchor": "end", fill: c.dim, "font-size": 9 });
+    lab.textContent = v.toFixed(2);
+    svg.appendChild(lab);
+  }
+  const refY = Y(yRef);
+  svg.appendChild(svgEl("line", {
+    x1: ML, y1: refY, x2: ML + plotW, y2: refY, stroke: c.dim, "stroke-width": 1, "stroke-dasharray": "3,3",
+  }));
+  const refLab = svgEl("text", { x: ML + plotW, y: refY - 3, "text-anchor": "end", fill: c.dim, "font-size": 8 });
+  refLab.textContent = metric === "fsc" ? "0.143" : "SSNR = 1";
+  svg.appendChild(refLab);
+
+  const resArr = series[0].resolution;
+  [0, resArr.length - 1].forEach((i, idx) => {
+    const t = svgEl("text", { x: X(i), y: H - 8, "text-anchor": idx ? "end" : "start", fill: c.dim, "font-size": 9 });
+    t.textContent = `${resArr[i].toFixed(1)} Å`;
+    svg.appendChild(t);
+  });
+
+  series.forEach((s) => {
+    const color = classColor(s.idx, classIndices.length);
+    const d = s.values.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+    svg.appendChild(svgEl("path", {
+      d, fill: "none", stroke: color, "stroke-width": 1.5, "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+  });
+  host.appendChild(svg);
+
+  // Hover: nearest shell's classes, largest value first -- same cap-and-rank
+  // pattern as drawClassDistributionSeriesChart's tooltip, for the same
+  // reason (routinely more classes than a tooltip can list one-per-line).
+  const MAX_TOOLTIP_CLASSES = 8;
+  const hoverLine = svgEl("line", { y1: MT, y2: MT + plotH, stroke: c.dim, "stroke-width": 1, opacity: 0 });
+  svg.appendChild(hoverLine);
+  const hit = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(hit);
+  const tip = document.createElement("div");
+  tip.className = "progress-tooltip hidden";
+  host.appendChild(tip);
+  hit.addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let nearestI = 0;
+    for (let i = 1; i < n; i++) {
+      if (Math.abs(X(i) - px) < Math.abs(X(nearestI) - px)) nearestI = i;
+    }
+    hoverLine.setAttribute("x1", X(nearestI));
+    hoverLine.setAttribute("x2", X(nearestI));
+    hoverLine.setAttribute("opacity", "0.6");
+    tip.classList.remove("hidden");
+    tip.style.left = `${(X(nearestI) / W) * 100}%`;
+    const ranked = series
+      .filter((s) => s.values[nearestI] != null)
+      .map((s) => ({ idx: s.idx, v: s.values[nearestI] }))
+      .sort((a, b) => b.v - a.v);
+    const shown = ranked.slice(0, MAX_TOOLTIP_CLASSES)
+      .map((r) => `<br><span class="tip-swatch" style="background:${classColor(r.idx, classIndices.length)}"></span>` +
+        `Class ${r.idx}: ${r.v.toFixed(3)}`)
+      .join("");
+    const more = ranked.length > MAX_TOOLTIP_CLASSES
+      ? `<br><span class="tip-more">+${ranked.length - MAX_TOOLTIP_CLASSES} more</span>` : "";
+    tip.innerHTML = `<b>${resArr[nearestI].toFixed(1)} Å</b>${shown}${more}`;
   });
   hit.addEventListener("mouseleave", () => {
     hoverLine.setAttribute("opacity", "0");

@@ -1054,6 +1054,14 @@ def analyze_class_distribution(run_id: str):
     return analyze.read_class_distribution_series(Path(cwd))
 
 
+@app.get("/api/runs/{run_id}/analyze/class-fsc")
+def analyze_class_fsc(run_id: str, iteration: int | None = Query(None)):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return analyze.read_class_fsc(Path(cwd), iteration)
+
+
 @app.get("/api/runs/{run_id}/progress/thumbnail")
 def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
     cwd = run_manager._resolve_run_cwd(run_id)

@@ -452,31 +452,41 @@ STAR
 }
 
 # add_analyze_classification_run <project_dir>
-# One completed Class2D run of THIS app's own (not RELION-native, so no
-# job.star/pipeline entry needed -- .relion_us/run_history.json is enough
-# for run_manager._resolve_run_cwd to find it), with 3 real iterations of
-# run_it###_model.star + run_it###_optimiser.star written via starfile so
-# the Analyze popup's 2D Classification tab (backend/analyze.py) has real
-# convergence/class-distribution history to plot. STAR shapes match real
-# RELION output (list blocks for model_general/optimiser_general, a loop_
-# for model_classes) -- same discipline test_progress.py's own fixtures use.
+# Two completed runs of THIS app's own (not RELION-native, so no job.star/
+# pipeline entry needed -- .relion_us/run_history.json is enough for
+# run_manager._resolve_run_cwd to find them): a Class2D job with 3 real
+# iterations of run_it###_model.star + run_it###_optimiser.star (2D
+# Classification tab's convergence/class-distribution charts), and a
+# Class3D job additionally carrying model_class_N FSC/SSNR sub-blocks and a
+# run_it###_data.star (3D Classification tab's FSC chart + viewing-
+# direction heatmap). STAR shapes match real RELION output (list blocks for
+# model_general/optimiser_general, loop_ for model_classes/model_class_N)
+# -- same discipline test_progress.py's own fixtures use.
 add_analyze_classification_run() {
   local proj="$1"
-  local job="$proj/Class2D/job022"
-  mkdir -p "$job" "$proj/.relion_us"
+  local job2d="$proj/Class2D/job022"
+  local job3d="$proj/Class3D/job023"
+  mkdir -p "$job2d" "$job3d" "$proj/.relion_us"
   cat > "$proj/.relion_us/run_history.json" <<JSON
 [{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
   "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
-  "command": "true", "cwd": "$job", "status": "completed", "exit_code": 0,
+  "command": "true", "cwd": "$job2d", "status": "completed", "exit_code": 0,
   "started_at": 1700000000.0, "ended_at": 1700000100.0, "field_values": {},
+  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false},
+ {"run_id": "analyze-fixture-c3d", "source": null, "internal_name": "Class3D",
+  "display_name": "3D Classification", "job_name": "job023", "job_number": 23,
+  "command": "true", "cwd": "$job3d", "status": "completed", "exit_code": 0,
+  "started_at": 1700000200.0, "ended_at": 1700000300.0, "field_values": {},
   "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
 JSON
-  "$PYTHON" - "$job" <<'PY'
+  "$PYTHON" - "$job2d" "$job3d" <<'PY'
 import sys
+import numpy as np
 import pandas as pd
 import starfile
 
-job = sys.argv[1]
+job2d, job3d = sys.argv[1], sys.argv[2]
+
 nc = 3
 for it in range(1, 4):
     dist = [0.5 - it * 0.03, 0.3 + it * 0.01, 0.2 + it * 0.02]
@@ -494,14 +504,58 @@ for it in range(1, 4):
             "rlnAccuracyRotations": [3.0] * nc,
             "rlnAccuracyTranslationsAngst": [1.1] * nc,
         }),
-    }, f"{job}/run_it{it:03d}_model.star", overwrite=True)
+    }, f"{job2d}/run_it{it:03d}_model.star", overwrite=True)
     starfile.write({
         "optimiser_general": {
             "rlnChangesOptimalOrientations": 10.0 / it,
             "rlnChangesOptimalOffsets": 3.0 / it,
             "rlnChangesOptimalClasses": 50.0 / it,
         }
-    }, f"{job}/run_it{it:03d}_optimiser.star", overwrite=True)
+    }, f"{job2d}/run_it{it:03d}_optimiser.star", overwrite=True)
+
+nc3 = 2
+shells = list(range(20))
+resolutions = [40.0 / (i + 1) for i in shells]
+for it in range(1, 3):
+    dist3 = [0.6, 0.4] if it == 1 else [0.55, 0.45]
+    blocks = {
+        "model_general": {
+            "rlnCurrentResolution": 1.0 / (15.0 - it),
+            "rlnNrClasses": nc3,
+            "rlnReferenceDimensionality": 3,
+            "rlnPixelSize": 1.4,
+        },
+        "model_classes": pd.DataFrame({
+            "rlnReferenceImage": [f"run_it{it:03d}_class{k + 1:03d}.mrc" for k in range(nc3)],
+            "rlnClassDistribution": dist3,
+            "rlnEstimatedResolution": [8.0, 9.0],
+            "rlnAccuracyRotations": [3.0] * nc3,
+            "rlnAccuracyTranslationsAngst": [1.1] * nc3,
+        }),
+    }
+    for k in range(nc3):
+        fsc = [max(0.0, 1.0 - i / 16.0 - k * 0.05) for i in shells]
+        ssnr = [max(0.01, 15.0 - i * 0.7 - k * 2) for i in shells]
+        blocks[f"model_class_{k + 1}"] = pd.DataFrame({
+            "rlnSpectralIndex": shells,
+            "rlnAngstromResolution": resolutions,
+            "rlnGoldStandardFsc": fsc,
+            "rlnSsnrMap": ssnr,
+        })
+    starfile.write(blocks, f"{job3d}/run_it{it:03d}_model.star", overwrite=True)
+    starfile.write({"optimiser_general": {
+        "rlnChangesOptimalOrientations": 4.0 / it,
+        "rlnChangesOptimalOffsets": 1.0 / it,
+        "rlnChangesOptimalClasses": 15.0 / it,
+    }}, f"{job3d}/run_it{it:03d}_optimiser.star", overwrite=True)
+
+rng = np.random.default_rng(0)
+n = 200
+particles = pd.DataFrame({
+    "rlnAngleRot": rng.uniform(-180, 180, n),
+    "rlnAngleTilt": rng.uniform(0, 180, n),
+})
+starfile.write({"particles": particles}, f"{job3d}/run_it002_data.star", overwrite=True)
 PY
 }
 
