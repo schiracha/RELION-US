@@ -3172,6 +3172,192 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
   await renderForRun(select.value);
 }
 
+// Plain <canvas>, not SVG -- the first departure from this app's usual
+// hand-rolled-SVG chart convention (see the "Small SVG charts" banner
+// above), deliberately: a particles STAR routinely has hundreds of
+// thousands of rows, and one SVG <circle> per point would be far slower to
+// lay out and repaint than filling pixels directly. Read-only for now (no
+// rectangle-select yet, see openAnalyzePopup's own note on the Particles
+// tab) -- just axis pickers, point rendering, and a nearest-point hover
+// tooltip, following the same crosshair-tooltip spirit as every SVG chart
+// here even though the hit-testing itself has to be done by hand (canvas
+// has no per-element mouseenter the way an SVG <circle> would).
+function renderScatterCanvas(canvas, rows, { xKey, yKey }) {
+  const c = themeColors();
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 460, cssH = 300;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const pts = rows
+    .map((r) => ({ x: r[xKey], y: r[yKey], row: r }))
+    .filter((p) => p.x != null && p.y != null);
+  if (!pts.length) {
+    ctx.fillStyle = c.dim;
+    ctx.font = "12px sans-serif";
+    ctx.fillText("No rows with both values set.", 12, 20);
+    return null;
+  }
+
+  const ML = 46, MR = 12, MT = 10, MB = 26;
+  const plotW = cssW - ML - MR, plotH = cssH - MT - MB;
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  let xMin = Math.min(...xs), xMax = Math.max(...xs);
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  if (xMax - xMin < 1e-9) { xMin -= 1; xMax += 1; }
+  if (yMax - yMin < 1e-9) { yMin -= 1; yMax += 1; }
+  const xPad = (xMax - xMin) * 0.05, yPad = (yMax - yMin) * 0.05;
+  xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
+  const X = (v) => ML + ((v - xMin) / (xMax - xMin)) * plotW;
+  const Y = (v) => MT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  // gridlines + axis labels
+  ctx.strokeStyle = c.grid;
+  ctx.fillStyle = c.dim;
+  ctx.font = "9px sans-serif";
+  ctx.lineWidth = 1;
+  for (let t = 0; t <= 3; t++) {
+    const yv = yMin + ((yMax - yMin) * t) / 3, y = Y(yv);
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + plotW, y); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "right";
+    ctx.fillText(yv.toFixed(2), ML - 6, y + 3);
+  }
+  ctx.textAlign = "left";
+  ctx.fillText(xMin.toFixed(2), ML, cssH - 8);
+  ctx.textAlign = "right";
+  ctx.fillText(xMax.toFixed(2), ML + plotW, cssH - 8);
+
+  // points
+  ctx.fillStyle = c.s1;
+  ctx.globalAlpha = 0.65;
+  pts.forEach((p) => {
+    ctx.beginPath();
+    ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  return { pts, X, Y, ML, MT, plotW, plotH };
+}
+
+// Wires a rendered scatter's hover tooltip -- separate from
+// renderScatterCanvas itself so a caller can re-render (new axes, new data)
+// without re-attaching listeners, and so a future rectangle-select can
+// layer on top of the same geometry this returns.
+function wireScatterHover(canvas, geometry, tip, { xLabel, yLabel }) {
+  if (!geometry) { tip.classList.add("hidden"); return; }
+  const { pts, X, Y } = geometry;
+  canvas.onmousemove = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    let nearest = null, nearestD = Infinity;
+    pts.forEach((p) => {
+      const d = (X(p.x) - mx) ** 2 + (Y(p.y) - my) ** 2;
+      if (d < nearestD) { nearestD = d; nearest = p; }
+    });
+    if (!nearest || nearestD > 400) { tip.classList.add("hidden"); return; }
+    tip.classList.remove("hidden");
+    tip.style.left = `${((X(nearest.x)) / canvas.clientWidth) * 100}%`;
+    tip.style.top = `${Y(nearest.y)}px`;
+    tip.innerHTML = `${escapeHtml(xLabel)}: ${nearest.x.toFixed(3)}<br>${escapeHtml(yLabel)}: ${nearest.y.toFixed(3)}`;
+  };
+  canvas.onmouseleave = () => tip.classList.add("hidden");
+}
+
+// Particles tab -- unlike the classification tabs, not tied to a specific
+// job's own run: the user points this at any particles STAR directly
+// (Extract's particles.star, a Select job's output, an optimisation set,
+// ...), same "type a path or Browse" input the tomogram viewer already uses
+// for its own STAR fields. Read-only scatter for now: axis pickers + a
+// canvas plot + hover tooltip, no rectangle-select/export yet (a larger,
+// separate increment -- this app's first STAR-*writing* code, deliberately
+// not rushed in alongside the read path).
+function renderAnalyzeParticlesTab(content) {
+  content.innerHTML = `
+    <div class="analyze-run-picker">
+      <label class="viz-field">
+        <span class="viz-field-label">Particles STAR</span>
+        <span class="viz-input-row">
+          <input type="text" class="viz-input-sm" data-role="an-particles-path" placeholder="Extract/job010/particles.star">
+          <button type="button" class="btn btn-icon" data-role="an-particles-browse" title="Browse for a particles STAR file">…</button>
+        </span>
+      </label>
+      <button class="btn primary" data-role="an-particles-load" style="margin-top:8px">Load</button>
+      <span class="progress-status" data-role="an-particles-status"></span>
+    </div>
+    <div data-role="an-particles-body"></div>
+  `;
+  const pathInput = content.querySelector('[data-role="an-particles-path"]');
+  const status = content.querySelector('[data-role="an-particles-status"]');
+  const body = content.querySelector('[data-role="an-particles-body"]');
+
+  content.querySelector('[data-role="an-particles-browse"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({ title: "Select a particles STAR file", extensions: [".star"] });
+    if (picked) pathInput.value = picked;
+  });
+
+  let currentData = null;
+  async function load() {
+    const path = pathInput.value.trim();
+    if (!path) return;
+    status.textContent = "Loading…";
+    body.innerHTML = "";
+    try {
+      currentData = await api("/api/analyze/particle-scatter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+    } catch (err) {
+      status.textContent = "";
+      body.innerHTML = `<p class="analyze-coming-soon">Could not load: ${escapeHtml(err.message)}</p>`;
+      return;
+    }
+    if (!currentData.available || currentData.columns.length < 2) {
+      status.textContent = "";
+      body.innerHTML = '<p class="analyze-coming-soon">No numeric particle columns to plot (needs a particles STAR with at least two).</p>';
+      return;
+    }
+    status.textContent = `${currentData.rows.length.toLocaleString()} particles · ${currentData.columns.length} numeric columns`;
+    body.innerHTML = `
+      <div class="analyze-chart-head">
+        <label>X <select data-role="an-particles-x"></select></label>
+        <label>Y <select data-role="an-particles-y"></select></label>
+      </div>
+      <div class="analyze-scatter-wrap">
+        <canvas data-role="an-particles-canvas"></canvas>
+        <div class="progress-tooltip hidden" data-role="an-particles-tip"></div>
+      </div>
+    `;
+    const xSelect = body.querySelector('[data-role="an-particles-x"]');
+    const ySelect = body.querySelector('[data-role="an-particles-y"]');
+    currentData.columns.forEach((col) => {
+      xSelect.appendChild(new Option(col, col));
+      ySelect.appendChild(new Option(col, col));
+    });
+    xSelect.value = currentData.columns[0];
+    ySelect.value = currentData.columns[1];
+
+    const canvas = body.querySelector('[data-role="an-particles-canvas"]');
+    const tip = body.querySelector('[data-role="an-particles-tip"]');
+    const redraw = () => {
+      const geometry = renderScatterCanvas(canvas, currentData.rows, { xKey: xSelect.value, yKey: ySelect.value });
+      wireScatterHover(canvas, geometry, tip, { xLabel: xSelect.value, yLabel: ySelect.value });
+    };
+    xSelect.addEventListener("change", redraw);
+    ySelect.addEventListener("change", redraw);
+    redraw();
+  }
+  content.querySelector('[data-role="an-particles-load"]').addEventListener("click", load);
+  pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+}
+
 async function openAnalyzePopup() {
   if (currentAnalyzeWinbox) { try { currentAnalyzeWinbox.close(); } catch (err) {} currentAnalyzeWinbox = null; }
   // Refreshes the shared ccRuns directly (same fetch refreshCommandCenter
@@ -3204,7 +3390,7 @@ async function openAnalyzePopup() {
       </div>
       ${ANALYZE_TABS.slice(1).map((t) => `
       <div class="tab-content" data-tab-content="${t}">
-        ${ANALYZE_CLASSIFICATION_TABS[t] ? "" : `<p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>`}
+        ${ANALYZE_CLASSIFICATION_TABS[t] || t === "particles" ? "" : `<p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>`}
       </div>`).join("")}
     </div>
   `;
@@ -3215,11 +3401,13 @@ async function openAnalyzePopup() {
     if (loadedTabs.has(tab)) return;
     loadedTabs.add(tab);
     if (tab === "pipeline") renderAnalyzePipelineTab(pipelineContent);
+    else if (tab === "particles") renderAnalyzeParticlesTab(body.querySelector('[data-tab-content="particles"]'));
     else if (ANALYZE_CLASSIFICATION_TABS[tab]) {
       renderAnalyzeClassificationTab(body.querySelector(`[data-tab-content="${tab}"]`), ANALYZE_CLASSIFICATION_TABS[tab]);
     }
-    // micrographs/particles: no dynamic content yet (static "coming soon"
-    // markup above) -- C4 adds a loader here, same lazy-on-first-click pattern.
+    // micrographs: no dynamic content yet (static "coming soon" markup
+    // above) -- a later increment adds a loader here, same
+    // lazy-on-first-click pattern as every other tab.
   }
   body.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {

@@ -1062,6 +1062,21 @@ def analyze_class_fsc(run_id: str, iteration: int | None = Query(None)):
     return analyze.read_class_fsc(Path(cwd), iteration)
 
 
+class AnalyzeScatterRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/analyze/particle-scatter")
+def analyze_particle_scatter(req: AnalyzeScatterRequest):
+    """Not tied to a run_id, unlike the endpoints above -- the Particles tab
+    points this at any particles STAR directly (see analyze.py's own
+    docstring on that section)."""
+    try:
+        return analyze.read_particle_scatter_columns(run_manager.project_dir, req.path)
+    except analyze.AnalyzeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/api/runs/{run_id}/progress/thumbnail")
 def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
     cwd = run_manager._resolve_run_cwd(run_id)

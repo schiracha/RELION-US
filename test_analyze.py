@@ -1,11 +1,14 @@
 """
 Playwright test for the Analyze popup (Menu > Tools > Analyze) -- a read-only,
 not-a-job window inspired by CNIO_Relion_Tools' relion_analyse.py (see
-NOTICE.md). Pipeline (C1), 2D/3D Classification + 3D Refine (C2), and the FSC
-chart + viewing-direction heatmap (C3) are wired; Micrographs/Particles (C4)
-are still a placeholder. This suite covers: the popup shell (all six tabs
-present), the Pipeline tab reusing Command Center's own lineage-graph
-renderer plus the click-for-job-summary panel, the 2D Classification tab's
+NOTICE.md). Pipeline (C1), 2D/3D Classification + 3D Refine (C2), the FSC
+chart + viewing-direction heatmap (C3), and the Particles tab's read-only
+scatter plot (first slice of C4) are wired; Micrographs and the Particles
+tab's rectangle-select + STAR export are still to come. This suite covers:
+the popup shell (all six tabs present), the Pipeline tab reusing Command
+Center's own lineage-graph renderer plus the click-for-job-summary panel,
+the Particles tab's path input + axis pickers + canvas scatter (plus the
+path-traversal guard on its backend endpoint), the 2D Classification tab's
 run picker + convergence/class-distribution charts, and the 3D
 Classification tab's additional FSC chart (with its FSC/SSNR metric picker)
 and on-demand viewing-direction heatmap (reusing the Progress tab's own
@@ -13,12 +16,13 @@ drawOrientationHeatmap and /orientation-distribution endpoint).
 
 Needs a live backend already pointed at run_tests.sh's branching fixture
 project (same one test_network_branching.py uses -- make_legacy_branchy_project)
-plus one real Class2D run and one real Class3D run with iteration files
+plus a real Class2D run, a real Class3D run, and a real particles.star
 (add_analyze_classification_run), so the Pipeline tab's node/edge shape and
-both classification tabs' charts have known-correct data to check against.
+every wired tab's own data have known-correct fixtures to check against.
 
 Usage: python3 test_analyze.py [base_url] [project_dir]
 """
+import json
 import os
 import sys
 
@@ -115,6 +119,41 @@ def main():
               "coming soon" in win.locator('[data-tab-content="micrographs"]').inner_text().lower())
         check("Pipeline tab content is no longer the active one",
               "active" not in (win.locator('[data-tab-content="pipeline"]').get_attribute("class") or ""))
+
+        # ---- Particles tab: path input (not a run picker -- see
+        # renderAnalyzeParticlesTab's own docstring) + canvas scatter, against
+        # run_tests.sh's real particles.star fixture (Extract/job024) ----
+        win.locator('.tab-btn[data-tab="particles"]').click()
+        page.wait_for_timeout(300)
+        particles_tab = win.locator('[data-tab-content="particles"]')
+        particles_tab.locator('[data-role="an-particles-path"]').fill("Extract/job024/particles.star")
+        particles_tab.locator('[data-role="an-particles-load"]').click()
+        page.wait_for_timeout(700)
+        p_status = particles_tab.locator('[data-role="an-particles-status"]').inner_text()
+        check(f"Particles tab loads the fixture STAR ({p_status!r})", "40 particles" in p_status)
+        x_options = particles_tab.locator('[data-role="an-particles-x"] option').all_inner_texts()
+        check(f"Axis pickers exclude Name columns ({x_options})",
+              "rlnMicrographName" not in x_options and "rlnImageName" not in x_options
+              and "rlnCoordinateX" in x_options)
+        check("Scatter canvas renders",
+              particles_tab.locator('[data-role="an-particles-canvas"]').count() == 1)
+        canvas_box = particles_tab.locator('[data-role="an-particles-canvas"]').bounding_box()
+        check(f"Canvas has real drawn dimensions ({canvas_box})",
+              canvas_box is not None and canvas_box["width"] > 100 and canvas_box["height"] > 100)
+
+        # A path outside the project is refused, not silently ignored or
+        # crashed on -- via page.request (Playwright's own APIRequestContext,
+        # not routed through the page's browsing context) rather than
+        # page.evaluate(fetch(...)), so this deliberately-provoked 400
+        # doesn't also trip the page.on("response") listener above and read
+        # as a page error at the very end of this test.
+        escape_resp = page.request.post(
+            f"{BASE_URL}/api/analyze/particle-scatter",
+            data=json.dumps({"path": "../../../../etc/passwd"}),
+            headers={"Content-Type": "application/json"},
+        )
+        check(f"A path outside the project is refused, not read (HTTP {escape_resp.status})",
+              escape_resp.status == 400)
 
         # ---- 2D Classification tab: run picker + convergence + distribution
         # charts, against job022's 3 real iterations (add_analyze_classification_run) ----

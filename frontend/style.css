@@ -1072,3 +1072,7 @@ html, body {
   padding: 2px 6px; background: var(--panel-alt); border: 1px solid var(--border);
   border-radius: 4px; color: var(--text); font-size: 11px;
 }
+.analyze-chart-head label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.analyze-scatter-wrap { position: relative; }
+.analyze-scatter-wrap canvas { width: 100%; display: block; cursor: crosshair; }
+.analyze-scatter-wrap .progress-tooltip { transform: translate(8px, -50%); }

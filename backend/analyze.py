@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Optional
 
 import progress
+import viz
+
+
+class AnalyzeError(Exception):
+    """Bad request (unreadable/unsafe path, no numeric columns, etc.) ->
+    HTTP 400, same convention as progress.ProgressError/viz.VizError."""
 
 # run_it025_optimiser.star -- confirmed against MlOptimiser::write()
 # (src/ml_optimiser.cpp ~1359-1378, RELION 5.0.1 checkout).
@@ -206,3 +212,55 @@ def read_class_fsc(job_dir: Path, iteration: Optional[int] = None) -> dict:
         return {"available": False, "iteration": None, "classes": {}}
     classes = _parse_model_class_fsc_cached(str(path), st.st_mtime, st.st_size)
     return {"available": bool(classes), "iteration": it, "classes": classes}
+
+
+# --------------------------------------------------------------------------
+# Particle scatter plot (Analyze popup's Particles tab -- C4). Not tied to a
+# specific run's own iteration files like everything above: the user points
+# this at any particles STAR directly (Extract's particles.star, a Select
+# job's output, an optimisation set, ...), the same "type a path or Browse"
+# input the tomogram viewer already uses for its own STAR fields (see
+# viz.inspect). Reuses viz._safe for the same project-directory containment
+# check the viewer already enforces on every path it's given, rather than
+# inventing a second one.
+# --------------------------------------------------------------------------
+
+
+def read_particle_scatter_columns(project_dir: Path, raw_path: str) -> dict:
+    """A particles STAR's particles+optics blocks, listed for the scatter
+    plot's axis pickers. Column list excludes anything containing "Name"
+    (matches CNIO's own dropdown-population rule in relion_analyse.py --
+    those are string/path fields like rlnMicrographName/rlnImageName, not
+    meaningful scatter axes) and anything not numeric (a scatter plot needs
+    real numbers on both axes; a handful of RELION's own columns, e.g.
+    rlnOpticsGroupName, aren't caught by the "Name" filter alone but also
+    aren't numeric)."""
+    import pandas as pd
+    import starfile
+
+    try:
+        path = viz._safe(project_dir, raw_path)
+    except viz.VizError as exc:
+        raise AnalyzeError(str(exc)) from exc
+    try:
+        raw = starfile.read(path, always_dict=True)
+    except Exception as exc:
+        raise AnalyzeError(f"cannot read {path.name}: {exc}") from exc
+
+    particles = raw.get("particles")
+    if particles is None or not len(particles):
+        return {"available": False, "columns": [], "rows": []}
+
+    numeric_cols = [
+        c for c in particles.columns
+        if "Name" not in c and pd.api.types.is_numeric_dtype(particles[c])
+    ]
+    if not numeric_cols:
+        return {"available": False, "columns": [], "rows": []}
+
+    rows = []
+    for i, row in particles[numeric_cols].iterrows():
+        entry = {c: (None if pd.isna(row[c]) else float(row[c])) for c in numeric_cols}
+        entry["_row_index"] = int(i)
+        rows.append(entry)
+    return {"available": True, "columns": numeric_cols, "rows": rows}

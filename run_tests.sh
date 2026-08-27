@@ -466,7 +466,8 @@ add_analyze_classification_run() {
   local proj="$1"
   local job2d="$proj/Class2D/job022"
   local job3d="$proj/Class3D/job023"
-  mkdir -p "$job2d" "$job3d" "$proj/.relion_us"
+  local job_extract="$proj/Extract/job024"
+  mkdir -p "$job2d" "$job3d" "$job_extract" "$proj/.relion_us"
   cat > "$proj/.relion_us/run_history.json" <<JSON
 [{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
   "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
@@ -479,13 +480,13 @@ add_analyze_classification_run() {
   "started_at": 1700000200.0, "ended_at": 1700000300.0, "field_values": {},
   "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
 JSON
-  "$PYTHON" - "$job2d" "$job3d" <<'PY'
+  "$PYTHON" - "$job2d" "$job3d" "$job_extract" <<'PY'
 import sys
 import numpy as np
 import pandas as pd
 import starfile
 
-job2d, job3d = sys.argv[1], sys.argv[2]
+job2d, job3d, job_extract = sys.argv[1], sys.argv[2], sys.argv[3]
 
 nc = 3
 for it in range(1, 4):
@@ -556,6 +557,21 @@ particles = pd.DataFrame({
     "rlnAngleTilt": rng.uniform(0, 180, n),
 })
 starfile.write({"particles": particles}, f"{job3d}/run_it002_data.star", overwrite=True)
+
+# For the Particles tab (C4) -- not tied to a run, just a real particles
+# STAR somewhere under the project for its own path input/Browse button.
+n_p = 40
+starfile.write({
+    "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+    "particles": pd.DataFrame({
+        "rlnMicrographName": [f"mic_{i % 5}.mrc" for i in range(n_p)],
+        "rlnImageName": [f"{i + 1:06d}@Extract/job024/particles.mrcs" for i in range(n_p)],
+        "rlnCoordinateX": rng.uniform(0, 4000, n_p),
+        "rlnCoordinateY": rng.uniform(0, 4000, n_p),
+        "rlnDefocusU": rng.normal(15000, 2000, n_p),
+        "rlnOpticsGroup": [1] * n_p,
+    }),
+}, f"{job_extract}/particles.star", overwrite=True)
 PY
 }
 

@@ -219,3 +219,63 @@ def test_class_fsc_half_set_only_still_works(tmp_path):
     result = analyze.read_class_fsc(tmp_path)
     assert result["available"] is True
     assert result["classes"][1]["fsc"] == [0.99, 0.80, 0.10]
+
+
+# --------------------------------------------------------------------------
+# read_particle_scatter_columns
+# --------------------------------------------------------------------------
+
+
+def _write_particles_star(path, n=4):
+    starfile.write({
+        "optics": pd.DataFrame({
+            "rlnOpticsGroup": [1],
+            "rlnOpticsGroupName": ["opticsGroup1"],
+            "rlnVoltage": [300.0],
+        }),
+        "particles": pd.DataFrame({
+            "rlnMicrographName": [f"mic_{i}.mrc" for i in range(n)],
+            "rlnImageName": [f"{i + 1:06d}@Extract/job010/particles.mrcs" for i in range(n)],
+            "rlnCoordinateX": [100.0 + i for i in range(n)],
+            "rlnCoordinateY": [200.0 + i * 2 for i in range(n)],
+            "rlnDefocusU": [12000.0 + i * 100 for i in range(n)],
+            "rlnOpticsGroup": [1] * n,
+        }),
+    }, path, overwrite=True)
+
+
+def test_particle_scatter_columns_excludes_name_and_non_numeric(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star)
+    result = analyze.read_particle_scatter_columns(tmp_path, "particles.star")
+    assert result["available"] is True
+    assert "rlnMicrographName" not in result["columns"]
+    assert "rlnImageName" not in result["columns"]
+    assert set(result["columns"]) == {"rlnCoordinateX", "rlnCoordinateY", "rlnDefocusU", "rlnOpticsGroup"}
+
+
+def test_particle_scatter_rows_carry_a_row_index(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=3)
+    result = analyze.read_particle_scatter_columns(tmp_path, "particles.star")
+    assert [r["_row_index"] for r in result["rows"]] == [0, 1, 2]
+    assert result["rows"][1]["rlnCoordinateX"] == 101.0
+
+
+def test_particle_scatter_missing_file_raises_analyze_error(tmp_path):
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.read_particle_scatter_columns(tmp_path, "does_not_exist.star")
+
+
+def test_particle_scatter_path_escaping_project_dir_raises_analyze_error(tmp_path):
+    outside = tmp_path.parent / "outside_the_project.star"
+    _write_particles_star(outside)
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.read_particle_scatter_columns(tmp_path, str(outside))
+
+
+def test_particle_scatter_no_particles_block_not_available(tmp_path):
+    star = tmp_path / "empty.star"
+    starfile.write({"optics": pd.DataFrame({"rlnOpticsGroup": [1]})}, star, overwrite=True)
+    result = analyze.read_particle_scatter_columns(tmp_path, "empty.star")
+    assert result == {"available": False, "columns": [], "rows": []}
