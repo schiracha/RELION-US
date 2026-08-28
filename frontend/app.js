@@ -3182,7 +3182,7 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
 // tooltip, following the same crosshair-tooltip spirit as every SVG chart
 // here even though the hit-testing itself has to be done by hand (canvas
 // has no per-element mouseenter the way an SVG <circle> would).
-function renderScatterCanvas(canvas, rows, { xKey, yKey }) {
+function renderScatterCanvas(canvas, rows, { xKey, yKey, selected }) {
   const c = themeColors();
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth || 460, cssH = 300;
@@ -3233,29 +3233,46 @@ function renderScatterCanvas(canvas, rows, { xKey, yKey }) {
   ctx.textAlign = "right";
   ctx.fillText(xMax.toFixed(2), ML + plotW, cssH - 8);
 
-  // points
+  // points -- unselected first, selected ones drawn after (on top) in the
+  // accent color so a selection reads clearly even where points overlap
+  const isSelected = (p) => selected && selected.has(p.row._row_index);
   ctx.fillStyle = c.s1;
   ctx.globalAlpha = 0.65;
   pts.forEach((p) => {
+    if (isSelected(p)) return;
     ctx.beginPath();
     ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2);
     ctx.fill();
   });
+  if (selected && selected.size) {
+    ctx.fillStyle = c.s2;
+    ctx.globalAlpha = 0.9;
+    pts.forEach((p) => {
+      if (!isSelected(p)) return;
+      ctx.beginPath();
+      ctx.arc(X(p.x), Y(p.y), 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
   ctx.globalAlpha = 1;
 
   return { pts, X, Y, ML, MT, plotW, plotH };
 }
 
-// Wires a rendered scatter's hover tooltip -- separate from
-// renderScatterCanvas itself so a caller can re-render (new axes, new data)
-// without re-attaching listeners, and so a future rectangle-select can
-// layer on top of the same geometry this returns.
-function wireScatterHover(canvas, geometry, tip, { xLabel, yLabel }) {
+// Wires a rendered scatter's hover tooltip AND rectangle-select, as one
+// combined set of listeners rather than two separate wire* functions each
+// assigning canvas.onmousemove -- the second assignment would just clobber
+// the first's. The live drag rectangle is a plain CSS-positioned <div>
+// (selrectEl) updated on every mousemove, not a canvas redraw -- cheap
+// regardless of point count; the canvas itself is only redrawn once,
+// on mouseup, to show the new selection highlighted (see
+// renderScatterCanvas's own `selected` param).
+function wireScatterInteraction(canvas, selrectEl, geometry, tip, { xLabel, yLabel, onSelectionChange }) {
   if (!geometry) { tip.classList.add("hidden"); return; }
   const { pts, X, Y } = geometry;
-  canvas.onmousemove = (ev) => {
-    const rect = canvas.getBoundingClientRect();
-    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  let dragStart = null;
+
+  function showTooltipNear(mx, my) {
     let nearest = null, nearestD = Infinity;
     pts.forEach((p) => {
       const d = (X(p.x) - mx) ** 2 + (Y(p.y) - my) ** 2;
@@ -3263,21 +3280,61 @@ function wireScatterHover(canvas, geometry, tip, { xLabel, yLabel }) {
     });
     if (!nearest || nearestD > 400) { tip.classList.add("hidden"); return; }
     tip.classList.remove("hidden");
-    tip.style.left = `${((X(nearest.x)) / canvas.clientWidth) * 100}%`;
+    tip.style.left = `${(X(nearest.x) / canvas.clientWidth) * 100}%`;
     tip.style.top = `${Y(nearest.y)}px`;
     tip.innerHTML = `${escapeHtml(xLabel)}: ${nearest.x.toFixed(3)}<br>${escapeHtml(yLabel)}: ${nearest.y.toFixed(3)}`;
+  }
+
+  canvas.onmousedown = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    dragStart = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    tip.classList.add("hidden");
   };
-  canvas.onmouseleave = () => tip.classList.add("hidden");
+  canvas.onmousemove = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    if (dragStart) {
+      const x0 = Math.min(dragStart.x, mx), x1 = Math.max(dragStart.x, mx);
+      const y0 = Math.min(dragStart.y, my), y1 = Math.max(dragStart.y, my);
+      selrectEl.classList.remove("hidden");
+      selrectEl.style.left = `${x0}px`; selrectEl.style.top = `${y0}px`;
+      selrectEl.style.width = `${x1 - x0}px`; selrectEl.style.height = `${y1 - y0}px`;
+      return;
+    }
+    showTooltipNear(mx, my);
+  };
+  canvas.onmouseup = (ev) => {
+    if (!dragStart) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    const dragDist = Math.hypot(mx - dragStart.x, my - dragStart.y);
+    const x0 = Math.min(dragStart.x, mx), x1 = Math.max(dragStart.x, mx);
+    const y0 = Math.min(dragStart.y, my), y1 = Math.max(dragStart.y, my);
+    dragStart = null;
+    selrectEl.classList.add("hidden");
+    // A plain click (no real drag) clears the selection rather than
+    // selecting the single nearest point -- rectangle-select is the only
+    // selection gesture here, so a non-drag click has nothing to select.
+    if (dragDist < 4) { onSelectionChange(new Set()); return; }
+    const picked = new Set(
+      pts.filter((p) => { const px = X(p.x), py = Y(p.y); return px >= x0 && px <= x1 && py >= y0 && py <= y1; })
+         .map((p) => p.row._row_index)
+    );
+    onSelectionChange(picked);
+  };
+  canvas.onmouseleave = () => {
+    tip.classList.add("hidden");
+    if (dragStart) { dragStart = null; selrectEl.classList.add("hidden"); }
+  };
 }
 
 // Particles tab -- unlike the classification tabs, not tied to a specific
 // job's own run: the user points this at any particles STAR directly
 // (Extract's particles.star, a Select job's output, an optimisation set,
 // ...), same "type a path or Browse" input the tomogram viewer already uses
-// for its own STAR fields. Read-only scatter for now: axis pickers + a
-// canvas plot + hover tooltip, no rectangle-select/export yet (a larger,
-// separate increment -- this app's first STAR-*writing* code, deliberately
-// not rushed in alongside the read path).
+// for its own STAR fields. Drag a rectangle on the plot to select particles,
+// then export the selection (or everything else) to a new STAR file in the
+// same folder -- this app's first STAR-*writing* feature.
 function renderAnalyzeParticlesTab(content) {
   content.innerHTML = `
     <div class="analyze-run-picker">
@@ -3303,6 +3360,9 @@ function renderAnalyzeParticlesTab(content) {
   });
 
   let currentData = null;
+  let currentPath = null;
+  let selectedIndices = new Set();
+
   async function load() {
     const path = pathInput.value.trim();
     if (!path) return;
@@ -3319,6 +3379,8 @@ function renderAnalyzeParticlesTab(content) {
       body.innerHTML = `<p class="analyze-coming-soon">Could not load: ${escapeHtml(err.message)}</p>`;
       return;
     }
+    currentPath = path;
+    selectedIndices = new Set();
     if (!currentData.available || currentData.columns.length < 2) {
       status.textContent = "";
       body.innerHTML = '<p class="analyze-coming-soon">No numeric particle columns to plot (needs a particles STAR with at least two).</p>';
@@ -3330,10 +3392,19 @@ function renderAnalyzeParticlesTab(content) {
         <label>X <select data-role="an-particles-x"></select></label>
         <label>Y <select data-role="an-particles-y"></select></label>
       </div>
+      <p class="analyze-scatter-hint">Drag a rectangle on the plot to select particles.</p>
       <div class="analyze-scatter-wrap">
         <canvas data-role="an-particles-canvas"></canvas>
+        <div class="analyze-scatter-selrect hidden" data-role="an-particles-selrect"></div>
         <div class="progress-tooltip hidden" data-role="an-particles-tip"></div>
       </div>
+      <div class="analyze-export-row">
+        <span data-role="an-particles-selcount">No selection</span>
+        <input type="text" class="viz-input-sm" data-role="an-particles-export-name" placeholder="selected_particles.star">
+        <button class="btn" data-role="an-particles-export-selected" disabled>Export selected</button>
+        <button class="btn" data-role="an-particles-export-rest" disabled>Export unselected</button>
+      </div>
+      <div class="progress-status" data-role="an-particles-export-status"></div>
     `;
     const xSelect = body.querySelector('[data-role="an-particles-x"]');
     const ySelect = body.querySelector('[data-role="an-particles-y"]');
@@ -3345,14 +3416,51 @@ function renderAnalyzeParticlesTab(content) {
     ySelect.value = currentData.columns[1];
 
     const canvas = body.querySelector('[data-role="an-particles-canvas"]');
+    const selrect = body.querySelector('[data-role="an-particles-selrect"]');
     const tip = body.querySelector('[data-role="an-particles-tip"]');
-    const redraw = () => {
-      const geometry = renderScatterCanvas(canvas, currentData.rows, { xKey: xSelect.value, yKey: ySelect.value });
-      wireScatterHover(canvas, geometry, tip, { xLabel: xSelect.value, yLabel: ySelect.value });
-    };
+    const selCount = body.querySelector('[data-role="an-particles-selcount"]');
+    const exportName = body.querySelector('[data-role="an-particles-export-name"]');
+    const exportSelectedBtn = body.querySelector('[data-role="an-particles-export-selected"]');
+    const exportRestBtn = body.querySelector('[data-role="an-particles-export-rest"]');
+    const exportStatus = body.querySelector('[data-role="an-particles-export-status"]');
+
+    function updateSelectionUi() {
+      const n = selectedIndices.size;
+      selCount.textContent = n ? `${n.toLocaleString()} selected` : "No selection";
+      exportSelectedBtn.disabled = n === 0;
+      exportRestBtn.disabled = n === 0 || n === currentData.rows.length;
+    }
+
+    function redraw() {
+      const geometry = renderScatterCanvas(canvas, currentData.rows, {
+        xKey: xSelect.value, yKey: ySelect.value, selected: selectedIndices,
+      });
+      wireScatterInteraction(canvas, selrect, geometry, tip, {
+        xLabel: xSelect.value, yLabel: ySelect.value,
+        onSelectionChange: (picked) => { selectedIndices = picked; updateSelectionUi(); redraw(); },
+      });
+    }
     xSelect.addEventListener("change", redraw);
     ySelect.addEventListener("change", redraw);
     redraw();
+    updateSelectionUi();
+
+    async function doExport(complement) {
+      const filename = exportName.value.trim() || (complement ? "unselected_particles.star" : "selected_particles.star");
+      exportStatus.textContent = "Writing…";
+      try {
+        const result = await api("/api/analyze/export-star", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: currentPath, row_indices: Array.from(selectedIndices), complement, filename }),
+        });
+        exportStatus.textContent = `Wrote ${result.rows.toLocaleString()} rows to ${result.path}`;
+      } catch (err) {
+        exportStatus.textContent = `Could not export: ${err.message}`;
+      }
+    }
+    exportSelectedBtn.addEventListener("click", () => doExport(false));
+    exportRestBtn.addEventListener("click", () => doExport(true));
   }
   content.querySelector('[data-role="an-particles-load"]').addEventListener("click", load);
   pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });

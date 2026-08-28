@@ -1,14 +1,15 @@
 """
-Playwright test for the Analyze popup (Menu > Tools > Analyze) -- a read-only,
-not-a-job window inspired by CNIO_Relion_Tools' relion_analyse.py (see
-NOTICE.md). Pipeline (C1), 2D/3D Classification + 3D Refine (C2), the FSC
-chart + viewing-direction heatmap (C3), and the Particles tab's read-only
-scatter plot (first slice of C4) are wired; Micrographs and the Particles
-tab's rectangle-select + STAR export are still to come. This suite covers:
-the popup shell (all six tabs present), the Pipeline tab reusing Command
-Center's own lineage-graph renderer plus the click-for-job-summary panel,
-the Particles tab's path input + axis pickers + canvas scatter (plus the
-path-traversal guard on its backend endpoint), the 2D Classification tab's
+Playwright test for the Analyze popup (Menu > Tools > Analyze) -- not a job
+(never appears in the Command Center, nothing here polls or streams output),
+inspired by CNIO_Relion_Tools' relion_analyse.py (see NOTICE.md). Pipeline
+(C1), 2D/3D Classification + 3D Refine (C2), the FSC chart + viewing-
+direction heatmap (C3), and the Particles tab's scatter plot with rectangle-
+select + STAR export (C4) are wired; only the Micrographs tab is still a
+placeholder. This suite covers: the popup shell (all six tabs present), the
+Pipeline tab reusing Command Center's own lineage-graph renderer plus the
+click-for-job-summary panel, the Particles tab's path input + axis pickers +
+canvas scatter + drag-to-select + export (this repo's first STAR-*writing*
+code, plus its path/filename-traversal guards), the 2D Classification tab's
 run picker + convergence/class-distribution charts, and the 3D
 Classification tab's additional FSC chart (with its FSC/SSNR metric picker)
 and on-demand viewing-direction heatmap (reusing the Progress tab's own
@@ -140,6 +141,72 @@ def main():
         canvas_box = particles_tab.locator('[data-role="an-particles-canvas"]').bounding_box()
         check(f"Canvas has real drawn dimensions ({canvas_box})",
               canvas_box is not None and canvas_box["width"] > 100 and canvas_box["height"] > 100)
+
+        # ---- rectangle-select + export (C4's write path) ----
+        sel_count = particles_tab.locator('[data-role="an-particles-selcount"]')
+        export_selected_btn = particles_tab.locator('[data-role="an-particles-export-selected"]')
+        export_rest_btn = particles_tab.locator('[data-role="an-particles-export-rest"]')
+        check("No selection at first", sel_count.inner_text() == "No selection")
+        check("Export buttons start disabled", export_selected_btn.is_disabled() and export_rest_btn.is_disabled())
+
+        # Drag a rectangle covering the whole plot area -- with 40 fixture
+        # particles spread across the full axis range (run_tests.sh's
+        # add_analyze_classification_run), this should select all of them.
+        cx, cy = canvas_box["x"], canvas_box["y"]
+        page.mouse.move(cx + 5, cy + 5)
+        page.mouse.down()
+        page.mouse.move(cx + canvas_box["width"] - 5, cy + canvas_box["height"] - 5, steps=5)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        sel_text = sel_count.inner_text()
+        check(f"Dragging a rectangle over the whole plot selects particles ({sel_text!r})",
+              "selected" in sel_text and "No selection" not in sel_text)
+        check("Export selected becomes enabled once something is selected", not export_selected_btn.is_disabled())
+
+        name_input = particles_tab.locator('[data-role="an-particles-export-name"]')
+        name_input.fill("browser_test_export.star")
+        export_selected_btn.click()
+        page.wait_for_timeout(500)
+        export_status = particles_tab.locator('[data-role="an-particles-export-status"]').inner_text()
+        check(f"Export writes a real file and reports it ({export_status!r})",
+              "Wrote" in export_status and "browser_test_export.star" in export_status)
+
+        # A click with no real drag (same mousedown/up point) clears the
+        # selection rather than selecting the nearest point -- rectangle
+        # is the only selection gesture this widget has.
+        page.mouse.click(cx + canvas_box["width"] / 2, cy + canvas_box["height"] / 2)
+        page.wait_for_timeout(200)
+        check("A plain click (no drag) clears the selection",
+              sel_count.inner_text() == "No selection" and export_selected_btn.is_disabled())
+
+        # Exporting to a name that already exists is refused, not silently
+        # overwritten -- via page.request for the same response-listener
+        # reason as the path-traversal check below.
+        overwrite_resp = page.request.post(
+            f"{BASE_URL}/api/analyze/export-star",
+            data=json.dumps({
+                "path": "Extract/job024/particles.star", "row_indices": [0, 1],
+                "complement": False, "filename": "browser_test_export.star",
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        check(f"Exporting over an existing file is refused (HTTP {overwrite_resp.status})",
+              overwrite_resp.status == 400)
+
+        # A destination filename with a path separator is refused too --
+        # the write side's own guard, distinct from (and stricter than) the
+        # read side's project-containment check above (see
+        # analyze.export_star_subset's own docstring on why).
+        filename_escape_resp = page.request.post(
+            f"{BASE_URL}/api/analyze/export-star",
+            data=json.dumps({
+                "path": "Extract/job024/particles.star", "row_indices": [0],
+                "complement": False, "filename": "../escape.star",
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        check(f"A destination filename with a path separator is refused (HTTP {filename_escape_resp.status})",
+              filename_escape_resp.status == 400)
 
         # A path outside the project is refused, not silently ignored or
         # crashed on -- via page.request (Playwright's own APIRequestContext,

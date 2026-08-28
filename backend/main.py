@@ -1077,6 +1077,26 @@ def analyze_particle_scatter(req: AnalyzeScatterRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class AnalyzeExportRequest(BaseModel):
+    path: str
+    row_indices: list[int]
+    complement: bool = False
+    filename: str
+
+
+@app.post("/api/analyze/export-star")
+def analyze_export_star(req: AnalyzeExportRequest):
+    """This app's first STAR-*writing* endpoint -- see
+    analyze.export_star_subset's own docstring for why the destination is
+    a bare filename, never a path."""
+    try:
+        return analyze.export_star_subset(
+            run_manager.project_dir, req.path, req.row_indices, req.complement, req.filename,
+        )
+    except analyze.AnalyzeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/api/runs/{run_id}/progress/thumbnail")
 def run_progress_thumbnail(run_id: str, reference: str = Query(...)):
     cwd = run_manager._resolve_run_cwd(run_id)

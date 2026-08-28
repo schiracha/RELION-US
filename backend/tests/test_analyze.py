@@ -279,3 +279,85 @@ def test_particle_scatter_no_particles_block_not_available(tmp_path):
     starfile.write({"optics": pd.DataFrame({"rlnOpticsGroup": [1]})}, star, overwrite=True)
     result = analyze.read_particle_scatter_columns(tmp_path, "empty.star")
     assert result == {"available": False, "columns": [], "rows": []}
+
+
+# --------------------------------------------------------------------------
+# export_star_subset -- this repo's first STAR-*writing* code, so every test
+# here does a real write-then-reread round trip via starfile.read, not just
+# checking the function's own return value.
+# --------------------------------------------------------------------------
+
+
+def test_export_selected_rows_round_trips(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=6)
+    result = analyze.export_star_subset(tmp_path, "particles.star", [0, 2, 4], False, "selected.star")
+    assert result["rows"] == 3
+    assert result["path"] == "selected.star"
+
+    reread = starfile.read(tmp_path / "selected.star", always_dict=True)
+    assert len(reread["particles"]) == 3
+    # rows 0/2/4 (0-based) -> rlnCoordinateX 100/102/104 (see _write_particles_star)
+    assert sorted(reread["particles"]["rlnCoordinateX"].tolist()) == [100.0, 102.0, 104.0]
+    # optics block carried over unchanged
+    assert reread["optics"]["rlnVoltage"].iloc[0] == 300.0
+
+
+def test_export_complement_writes_everything_else(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=6)
+    result = analyze.export_star_subset(tmp_path, "particles.star", [0, 2, 4], True, "rest.star")
+    assert result["rows"] == 3
+    reread = starfile.read(tmp_path / "rest.star", always_dict=True)
+    assert sorted(reread["particles"]["rlnCoordinateX"].tolist()) == [101.0, 103.0, 105.0]
+
+
+def test_export_appends_star_extension_if_missing(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=3)
+    result = analyze.export_star_subset(tmp_path, "particles.star", [0], False, "no_extension")
+    assert result["path"] == "no_extension.star"
+    assert (tmp_path / "no_extension.star").exists()
+
+
+def test_export_refuses_to_overwrite_an_existing_file(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=3)
+    (tmp_path / "taken.star").write_text("# already here\n")
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.export_star_subset(tmp_path, "particles.star", [0], False, "taken.star")
+
+
+def test_export_rejects_a_filename_with_a_path_separator(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=3)
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.export_star_subset(tmp_path, "particles.star", [0], False, "../escape.star")
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.export_star_subset(tmp_path, "particles.star", [0], False, "sub/dir.star")
+
+
+def test_export_source_path_escaping_project_dir_raises(tmp_path):
+    outside = tmp_path.parent / "outside2.star"
+    _write_particles_star(outside, n=3)
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.export_star_subset(tmp_path, str(outside), [0], False, "out.star")
+
+
+def test_export_empty_selection_raises(tmp_path):
+    star = tmp_path / "particles.star"
+    _write_particles_star(star, n=3)
+    # Row indices that don't exist in this file -- intersecting with the
+    # real range leaves nothing to export.
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.export_star_subset(tmp_path, "particles.star", [99, 100], False, "empty.star")
+
+
+def test_export_writes_into_the_sources_own_directory(tmp_path):
+    sub = tmp_path / "Extract" / "job010"
+    sub.mkdir(parents=True)
+    star = sub / "particles.star"
+    _write_particles_star(star, n=4)
+    result = analyze.export_star_subset(tmp_path, "Extract/job010/particles.star", [0, 1], False, "out.star")
+    assert result["path"] == "Extract/job010/out.star"
+    assert (sub / "out.star").exists()

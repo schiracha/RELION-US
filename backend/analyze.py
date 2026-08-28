@@ -264,3 +264,61 @@ def read_particle_scatter_columns(project_dir: Path, raw_path: str) -> dict:
         entry["_row_index"] = int(i)
         rows.append(entry)
     return {"available": True, "columns": numeric_cols, "rows": rows}
+
+
+def export_star_subset(
+    project_dir: Path, source_raw_path: str, row_indices: list[int],
+    complement: bool, out_filename: str,
+) -> dict:
+    """Writes selected (or, if complement=True, everything EXCEPT selected)
+    particle rows to a new STAR file, optics block (and anything else in
+    the source file) carried over unchanged. This is the first STAR-
+    *writing* code in this repo -- everything else here, and in viz.py/
+    progress.py, is read-only.
+
+    The destination is deliberately never a caller-supplied path the way
+    the source is: out_filename is constrained to a bare filename (no `/`,
+    no `..`) and joined under the SOURCE file's own directory. A read that
+    escapes the project is a privacy problem; a WRITE that escapes it is a
+    much worse one, so this doesn't reuse viz._safe's "resolve then check
+    it's still inside the project" pattern for the output side at all --
+    there's no path to resolve, just a filename component, which is a
+    stronger guarantee than re-deriving the same check would be."""
+    import pandas as pd
+    import starfile
+
+    try:
+        source_path = viz._safe(project_dir, source_raw_path)
+    except viz.VizError as exc:
+        raise AnalyzeError(str(exc)) from exc
+
+    if not out_filename or "/" in out_filename or "\\" in out_filename or out_filename in (".", ".."):
+        raise AnalyzeError("invalid output filename")
+    if not out_filename.endswith(".star"):
+        out_filename += ".star"
+    out_path = source_path.parent / out_filename
+    if out_path.exists():
+        raise AnalyzeError(f"{out_filename} already exists in that folder -- choose a different name")
+
+    try:
+        raw = starfile.read(source_path, always_dict=True)
+    except Exception as exc:
+        raise AnalyzeError(f"cannot read {source_path.name}: {exc}") from exc
+    particles = raw.get("particles")
+    if particles is None or not len(particles):
+        raise AnalyzeError("no particles block to export from")
+
+    all_indices = set(range(len(particles)))
+    selected = set(row_indices) & all_indices
+    keep = (all_indices - selected) if complement else selected
+    if not keep:
+        raise AnalyzeError("selection is empty -- nothing to export")
+
+    subset = particles.iloc[sorted(keep)].reset_index(drop=True)
+    out_blocks = dict(raw)
+    out_blocks["particles"] = subset
+    try:
+        starfile.write(out_blocks, out_path, overwrite=False)
+    except Exception as exc:
+        raise AnalyzeError(f"could not write {out_filename}: {exc}") from exc
+    return {"path": str(out_path.relative_to(project_dir)), "rows": len(subset)}
