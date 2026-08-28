@@ -766,7 +766,12 @@ That license follows the material this repository redistributes:
 C++ source and the field defaults and help strings for all 32 job types,
 extracted from RELION (© MRC Laboratory of Molecular Biology, GPL-2.0-or-later)
 — the same data the RELION Source tab shows you. `frontend/vendor/` bundles
-WinBox.js under Apache-2.0.
+WinBox.js under Apache-2.0. The Analyze popup (Menu ▸ Tools ▸ Analyze) ports
+the tab layout and technique — not source — of `relion_analyse.py` from
+[CNIO_Relion_Tools](https://github.com/cryoEM-CNIO/CNIO_Relion_Tools)
+(cryoEM-CNIO organization, GPL-3.0); every chart in it is this app's own
+hand-rolled SVG/canvas rendering, built on none of that project's Dash/
+Plotly/Cytoscape stack.
 
 `NOTICE.md` has the full attribution, what was taken from where, and the
 third-party format/dependency situation. RELION-US is an independent project,
