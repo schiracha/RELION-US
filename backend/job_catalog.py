@@ -113,7 +113,12 @@ JOB_CATALOG = {
                                    "Local resolution estimation (from unfiltered half-maps and a 3D mask)"),
     "DynaMight":                 ("dynamight", "DynaMight", "Post-processing & Analysis",
                                    "Modelling continuous heterogeneity"),
-    "ModelAngelo":                ("modelangelo", "ModelAngelo", "Post-processing & Analysis",
+    # "(beta)": this job's draft command and options go beyond what
+    # RELION's own GUI offers (see SYNTHETIC_OPTIONS' mask_path and the
+    # two-command build+hmm_search draft, both source-verified but this
+    # app's own addition, not a straight reproduction of RELION -- see
+    # the "ModelAngelo" section above DRAFT_OVERRIDES for the full design).
+    "ModelAngelo":                ("modelangelo", "ModelAngelo (beta)", "Post-processing & Analysis",
                                    "Automated atomic model building"),
     "External":                  ("relion.external", "External Job", "Other",
                                    "Run non-RELION programs from within the pipeline"),
@@ -525,9 +530,14 @@ class JobDraftOverride:
     # from extra_output_args (runs AFTER output_flag/subdir) and
     # extra_flags (runs at the very end) -- those two don't care about
     # position, this one does. Returns [] for "nothing to add" (e.g. no
-    # mode selected yet). Computed from the full field_values dict, same
-    # calling convention as extra_output_args/extra_flags.
-    program_extra: Optional[Callable[[dict], list]] = None
+    # mode selected yet). Takes (field_values, output_subdir) -- the second
+    # argument exists for the "exe-placeholder" jobs (DynaMight/ModelAngelo/
+    # External), whose usual automatic --o/subdir insertion is skipped
+    # entirely (see _build_draft_command), so this is the only hook of the
+    # three that still sees output_subdir for them; ModelAngelo's own entry
+    # below is the first (and so far only) user of it. Existing callers
+    # that don't need it just ignore the second parameter.
+    program_extra: Optional[Callable[[dict, str], list]] = None
     # RELION's output-directory flag for this job. `--o` is the default
     # every job gets when this is left None; only a genuine difference
     # (`--output-directory`, `--odir`) needs an entry.
@@ -602,7 +612,11 @@ class JobDraftOverride:
     # a job needing several genuinely-independent computed-token groups
     # (as Extract does here, for #17 and #18 together) combines them in
     # its own small composed function instead (see _extract_extra_flags).
-    extra_flags: Optional[Callable[[dict], list]] = None
+    # Takes (field_values, output_subdir) -- same reasoning as
+    # program_extra's own second parameter above; ModelAngelo's hmm_search
+    # second-command builder is the first user of it here too (it needs
+    # output_subdir for -i/-o, which reuse the build step's own directory).
+    extra_flags: Optional[Callable[[dict, str], list]] = None
 
 
 def _import_ofile_args(field_values: dict) -> list:
@@ -723,11 +737,14 @@ def _extract_helical_nr_asu_rise_fallback_flags(field_values: dict) -> list:
     return []
 
 
-def _extract_extra_flags(field_values: dict) -> list:
+def _extract_extra_flags(field_values: dict, output_subdir: str = "") -> list:
     """Extract's DRAFT_OVERRIDES.extra_flags: combines the two
     multi-field/branch-dependent groups the generic per-option rule and
     the other transform mechanisms can't express (issues #17 and #18) --
-    see the two builders above for each one's own reasoning."""
+    see the two builders above for each one's own reasoning.
+    output_subdir is unused -- this job gets its output flag the ordinary
+    automatic way, unlike the exe-placeholder jobs extra_flags's second
+    parameter exists for."""
     return _extract_bg_radius_flags(field_values) + _extract_helical_nr_asu_rise_fallback_flags(field_values)
 
 
@@ -751,7 +768,7 @@ def _tomo_other_half(filename: str) -> Optional[str]:
     return f"{directory}{sep}{new_basename}" if sep else new_basename
 
 
-def _tomo_ref1_ref2_flags(field_values: dict) -> list:
+def _tomo_ref1_ref2_flags(field_values: dict, output_subdir: str = "") -> list:
     """TomoAlign/TomoCtfRefine's in_halfmaps -> --ref1/--ref2
     (getCommandsTomoAlignJob ~7328-7347, getCommandsTomoCtfRefineJob
     ~7189-7208, byte-identical logic, confirmed current): fn_half2 is
@@ -774,7 +791,7 @@ def _tomo_ref1_ref2_flags(field_values: dict) -> list:
     return ["--ref1", shlex.quote(fn_half1), "--ref2", shlex.quote(fn_half2)]
 
 
-def _tomo_denoise_subcommand_tokens(field_values: dict) -> list:
+def _tomo_denoise_subcommand_tokens(field_values: dict, output_subdir: str = "") -> list:
     """TomoDenoiseTomograms's mode selector (getCommandsTomoDenoiseTomogramsJob
     ~6842-6853, confirmed current): the constant base program
     (`which relion_python_tomo_denoise`) is followed by a Click/Typer
@@ -784,7 +801,9 @@ def _tomo_denoise_subcommand_tokens(field_values: dict) -> list:
     that validation -- do_cryocare_train takes precedence if both are
     somehow true (matching the C++'s own check order), and [] (no
     subcommand at all) if neither is set yet, the ordinary
-    not-yet-configured state."""
+    not-yet-configured state. output_subdir is unused here -- this job
+    gets its --output-directory the ordinary automatic way, unlike the
+    exe-placeholder jobs program_extra's second parameter exists for."""
     if field_values.get("do_cryocare_train"):
         return ["cryoCARE:train"]
     if field_values.get("do_cryocare_predict"):
@@ -792,7 +811,7 @@ def _tomo_denoise_subcommand_tokens(field_values: dict) -> list:
     return []
 
 
-def _tomo_denoise_ntiles_flags(field_values: dict) -> list:
+def _tomo_denoise_ntiles_flags(field_values: dict, output_subdir: str = "") -> list:
     """TomoDenoiseTomograms's --n-tiles (getCommandsTomoDenoiseTomogramsJob
     ~6900-6903, confirmed current): ntiles_x/y/z are three SEPARATE
     JobOptions combined into ONE --n-tiles flag with three space-separated
@@ -830,7 +849,7 @@ _CTF_FIT_LETTER = {"No": "f", "Per-micrograph": "m", "Per-particle": "p"}
 # renaming a choice) resolves to None below, not a wrong guess.
 
 
-def _ctfrefine_kmin_and_fit_mode_flags(field_values: dict) -> list:
+def _ctfrefine_kmin_and_fit_mode_flags(field_values: dict, output_subdir: str = "") -> list:
     """Ctfrefine's do_aniso_mag/do_ctf/do_tilt branch (getCommandsCtfrefineJob
     ~6116-6151, confirmed current): each toggle's own self-contained flag
     is a plain FlagOverride (see the Ctfrefine DRAFT_OVERRIDES entry
@@ -874,6 +893,114 @@ def _ctfrefine_kmin_and_fit_mode_flags(field_values: dict) -> list:
     if field_values.get("do_tilt") and has_minres:
         out += ["--kmin_tilt", str(minres)]
     return out
+
+
+# ModelAngelo (issue #37; getCommandsModelAngeloJob/initialiseModelAngeloJob,
+# src/pipeline_jobs.cpp ~5688-5800, RELION 5.0.1, re-confirmed against a
+# fresh read of the same function -- full source transcribed below since
+# it's short enough to check every line against, unlike this module's usual
+# "cite line numbers" convention:
+#
+#   command = fn_modelangelo_exe
+#   if p_seq or d_seq or r_seq: command += " build "; append -pf/-df/-rf
+#     for whichever of the three is set (independently optional)
+#   else: command += " build_no_seq "
+#   command += " -v " + fn_map
+#   command += " -o " + outputname
+#   command += " -d " + gpu_id            # unconditional, even if empty
+#   command += " " + other_args
+#   commands.push_back(command)
+#
+#   if do_hhmer:
+#     if fn_lib == "": error, refuse to build a command at all
+#     command2 = fn_modelangelo_exe + " hmm_search "
+#     command2 += " -i " + outputname     # SAME directory the build step used
+#     command2 += " -f " + fn_lib
+#     command2 += " -o " + outputname     # SAME directory again
+#     command2 += " -a " + alphabet
+#     command2 += " --F1 .. --F2 .. --F3 .. --E .."
+#     command2 += " " + other_args
+#     commands.push_back(command2)
+#
+# Two things this app's usual mechanisms can't express on their own:
+#   1. output_subdir is needed for -o/-i, but ModelAngelo is an
+#      "exe-placeholder" job (program comes from fn_modelangelo_exe, not a
+#      fixed binary) -- _build_draft_command skips its whole automatic
+#      --o/subdir/extra_output_args block for exe-placeholder jobs
+#      entirely (see its own comment on why), so program_extra/extra_flags
+#      had to gain output_subdir as an explicit second parameter (see
+#      JobDraftOverride's own comments) just for this job.
+#   2. ONE job emits TWO independent commands. Represented here as ordinary
+#      shell syntax (`&&`) rather than inventing a "second command" concept
+#      in the job runner -- the draft command already runs through
+#      asyncio.create_subprocess_shell (job_runner.py), so a literal `&&`
+#      Just Works, the same way a user chaining two commands by hand would
+#      write it. RELION's own two commands.push_back() calls get joined the
+#      same way under the hood (prepareFinalCommand), so this isn't new
+#      behavior, just spelling out what RELION already does as visible
+#      shell syntax instead of hiding it in two separate command slots.
+#
+# What's deliberately NOT replicated: real RELION's hard error when
+# do_hhmer is checked but fn_lib is empty ("you need to provide a library
+# to perform the HMM search against"). This app's policy elsewhere is to
+# leave a genuinely-incomplete draft for the user to notice and fix, not to
+# validate or block client-side -- consistent with every other job here.
+# Also not replicated: other_args being appended to BOTH commands
+# separately (RELION appends its own copy to each). This app's generic
+# trailing-other_args logic in _build_draft_command runs once, after
+# everything else -- so other_args ends up attached to the SECOND command
+# only when do_hhmer is on. A user who needs it on the first command too
+# can just add it there by hand; not worth a special case for a field that
+# defaults to empty.
+def _modelangelo_program_extra(field_values: dict, output_subdir: str) -> list:
+    """`build`/`build_no_seq` subcommand-select, plus the compulsory -o
+    (see this section's own header comment for the source). -v/-pf/-df/
+    -rf/-d are ordinary FlagOverride entries in this job's DRAFT_OVERRIDES
+    entry below since none of them need output_subdir; this hook exists
+    only because -o does. Also appends -m <mask_path> when set: mask_path
+    is NOT a real RELION field (see SYNTHETIC_OPTIONS below for why) --
+    read directly here since the generic per-option loop was never told
+    about it and wouldn't otherwise consider it."""
+    if not output_subdir:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    seq_given = any(field_values.get(k) for k in ("p_seq", "d_seq", "r_seq"))
+    tokens = ["build" if seq_given else "build_no_seq", "-o", shlex.quote(subdir)]
+    mask = field_values.get("mask_path")
+    if mask:
+        tokens += ["-m", shlex.quote(str(mask))]
+    return tokens
+
+
+def _modelangelo_hmm_search_command(field_values: dict, output_subdir: str) -> list:
+    """The second, independent hmm_search command RELION appends when "Perform
+    HMMer search?" is checked -- see this section's own header comment for
+    the source and design notes. F1/F2/F3/E are suppressed from the
+    primary (build) command's per-option loop (see the DRAFT_OVERRIDES
+    entry below) and re-emitted here instead, since they belong to THIS
+    command, not the build one -- the generic loop would otherwise still
+    attach them to the build command, which is wrong (confirmed: RELION's
+    own source only ever adds them to command2)."""
+    if not field_values.get("do_hhmer") or not output_subdir:
+        return []
+    exe = field_values.get("fn_modelangelo_exe")
+    fn_lib = field_values.get("fn_lib")
+    if not exe or not fn_lib:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    tokens = [
+        "&&", shlex.quote(str(exe)), "hmm_search",
+        "-i", shlex.quote(subdir), "-f", shlex.quote(str(fn_lib)),
+        "-o", shlex.quote(subdir),
+    ]
+    alphabet = field_values.get("alphabet")
+    if alphabet:
+        tokens += ["-a", shlex.quote(str(alphabet))]
+    for key, flag in (("F1", "--F1"), ("F2", "--F2"), ("F3", "--F3"), ("E", "--E")):
+        value = field_values.get(key)
+        if value not in (None, ""):
+            tokens += [flag, shlex.quote(str(value))]
+    return tokens
 
 
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
@@ -1002,6 +1129,43 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # bg_diameter suppression).
         suppress=frozenset({"do_cryocare_train", "do_cryocare_predict", "ntiles_x", "ntiles_y", "ntiles_z"}),
         extra_flags=_tomo_denoise_ntiles_flags,
+    ),
+    # See the "ModelAngelo" section header comment above
+    # _modelangelo_program_extra for the full source this entry is
+    # verified against, and the two mechanisms (output_subdir threaded
+    # into program_extra/extra_flags, and a literal `&&` for the second
+    # command) this job needed that no other job here has needed yet.
+    "ModelAngelo": JobDraftOverride(
+        program_extra=_modelangelo_program_extra,
+        flags={
+            "fn_map": FlagOverride("-v"),
+            "p_seq": FlagOverride("-pf"),
+            "d_seq": FlagOverride("-df"),
+            "r_seq": FlagOverride("-rf"),
+            # RELION emits -d unconditionally, even with gpu_id left blank
+            # (no `!= ""` guard around it, unlike p_seq/d_seq/r_seq above) --
+            # this app's ordinary empty-value skip means a blank gpu_id
+            # omits the flag entirely here rather than reproducing RELION's
+            # own "-d " (empty argument). Not worth a special case (like the
+            # existing gpu_ids/--gpu one elsewhere in this module) for a job
+            # whose underlying tool already treats a missing --device as
+            # "find an available GPU" on its own (confirmed:
+            # model_angelo/apps/build.py's own default=None for --device).
+            "gpu_id": FlagOverride("-d"),
+        },
+        # do_hhmer/fn_lib/alphabet/F1/F2/F3/E have no flag of their own on
+        # the PRIMARY (build) command -- they're fully expressed by
+        # _modelangelo_hmm_search_command instead, which builds the entire
+        # second command (see extra_flags below). fn_modelangelo_exe is
+        # genuinely handled too, just not as a flag: _build_draft_command's
+        # own exe-placeholder resolution (job_registry.py) already consumes
+        # it to become the program name itself, at the very front of the
+        # command -- suppressed here so it isn't ALSO reported unmapped for
+        # a value that's actually right there, just not behind a `--flag`.
+        suppress=frozenset({
+            "do_hhmer", "fn_lib", "alphabet", "F1", "F2", "F3", "E", "fn_modelangelo_exe",
+        }),
+        extra_flags=_modelangelo_hmm_search_command,
     ),
     # Tomography's shared "optimisation set OR direct entries" input group
     # (in_optimisation / in_particles / in_tomograms / in_trajectories),
@@ -1675,6 +1839,49 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 #     flags; FlagOverride only supports one flag per key.
 
 
+# Option fields this app adds on top of what RELION's own source defines --
+# used ONLY for ModelAngelo's mask_path so far. --mask-path/-m is a real,
+# documented ModelAngelo CLI option (model_angelo/apps/build.py and
+# build_no_seq.py, both accept it identically: "path to mask file",
+# default None) that RELION's own GUI never asks for at all -- confirmed
+# absent from getCommandsModelAngeloJob's real source (see the "ModelAngelo"
+# section above DRAFT_OVERRIDES) and from job_definitions_raw.json's
+# extracted option list for this job. This is NOT reconstructed-or-guessed
+# RELION behavior the way everything else in this module is -- RELION
+# simply doesn't have this field -- so it's kept in its own clearly-labeled
+# table rather than folded into DRAFT_OVERRIDES, which is specifically
+# "verified against RELION's own source" territory. This is also why
+# ModelAngelo is marked "(beta)" in JOB_CATALOG above: it's the one job in
+# this app that goes beyond faithfully reproducing RELION itself.
+SYNTHETIC_OPTIONS: dict[str, list[dict]] = {
+    "ModelAngelo": [{
+        "key": "mask_path",
+        "label": "Mask (optional; not in RELION's own GUI):",
+        "field_type": "inputnode",
+        "default": "",
+        "help": (
+            "Optional mask restricting ModelAngelo to a region of the map -- "
+            "passed through to build's/build_no_seq's --mask-path/-m. "
+            "ModelAngelo's own CLI has supported this for both subcommands "
+            "since before RELION's own GUI wrapped it; RELION's GUI never "
+            "asks for it, so this field exists only here (see this app's "
+            "\"(beta)\" label on the ModelAngelo job in the sidebar)."
+        ),
+    }],
+}
+
+
+def synthetic_options(internal_name: str) -> list[dict]:
+    """Extra option fields this app adds beyond RELION's own extracted set,
+    for a job whose real underlying tool supports something RELION's GUI
+    never exposes. [] for every job except the ones in SYNTHETIC_OPTIONS
+    above (see its own comment for why ModelAngelo is the one job that has
+    any). Returns fresh dicts each call -- callers may freely combine this
+    with a job's real options list without risking a shared mutable
+    default."""
+    return [dict(opt) for opt in SYNTHETIC_OPTIONS.get(internal_name, [])]
+
+
 def _override(internal_name: str) -> Optional[JobDraftOverride]:
     return DRAFT_OVERRIDES.get(internal_name)
 
@@ -1814,7 +2021,7 @@ def draft_output_suffix(internal_name: str) -> Optional[str]:
     return override.output_suffix if override is not None else None
 
 
-def draft_program_extra(internal_name: str, field_values: dict) -> list:
+def draft_program_extra(internal_name: str, field_values: dict, output_subdir: str = "") -> list:
     """Extra command-line tokens inserted immediately after the resolved
     program name, before output_flag/subdir and the per-option loop -- see
     JobDraftOverride.program_extra's own docstring for why position
@@ -1822,7 +2029,7 @@ def draft_program_extra(internal_name: str, field_values: dict) -> list:
     override = _override(internal_name)
     if override is None or override.program_extra is None:
         return []
-    return override.program_extra(field_values)
+    return override.program_extra(field_values, output_subdir)
 
 
 def draft_extra_output_args(internal_name: str, field_values: dict) -> list:
@@ -1836,7 +2043,7 @@ def draft_extra_output_args(internal_name: str, field_values: dict) -> list:
     return override.extra_output_args(field_values)
 
 
-def draft_extra_flags(internal_name: str, field_values: dict) -> list:
+def draft_extra_flags(internal_name: str, field_values: dict, output_subdir: str = "") -> list:
     """Extra command-line tokens computed from the full field_values dict,
     appended once per job near the end of the draft command -- for a value
     built from MULTIPLE fields with real conditional/computed logic (e.g.
@@ -1845,7 +2052,7 @@ def draft_extra_flags(internal_name: str, field_values: dict) -> list:
     override = _override(internal_name)
     if override is None or override.extra_flags is None:
         return []
-    return override.extra_flags(field_values)
+    return override.extra_flags(field_values, output_subdir)
 
 
 # --------------------------------------------------------------------------

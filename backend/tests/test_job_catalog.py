@@ -34,6 +34,7 @@ from job_catalog import (
     draft_value_for,
     has_draft_numeric_transform,
     has_draft_value_transform,
+    synthetic_options,
 )
 
 
@@ -340,6 +341,139 @@ def test_extra_flags_tomodenoise_ntiles_shell_metacharacters_are_quoted():
         "ntiles_x": "2$(touch /tmp/pwned)", "ntiles_y": "3", "ntiles_z": "4",
     })
     assert result == ["--n-tiles", "'2$(touch /tmp/pwned)'", "3", "4"]
+
+
+# --------------------------------------------------------------------------
+# ModelAngelo (issue #37): program_extra's build/build_no_seq subcommand +
+# compulsory -o/-m, extra_flags' second (hmm_search) command, and the one
+# synthetic (non-RELION) field, mask_path. Full integration coverage
+# (build_job_definition's whole draft string, unmapped_fields, options
+# list) lives in test_job_registry.py; these pin program_extra/extra_flags'
+# own contract directly, same split TomoDenoise's tests above use.
+# --------------------------------------------------------------------------
+
+
+def test_program_extra_modelangelo_picks_build_when_protein_seq_given():
+    assert draft_program_extra("ModelAngelo", {"p_seq": "p.fasta"}, "ModelAngelo/job042") == \
+        ["build", "-o", "ModelAngelo/job042/"]
+
+
+def test_program_extra_modelangelo_picks_build_when_only_dna_or_rna_seq_given():
+    """RELION's own condition is p_seq OR d_seq OR r_seq -- protein isn't
+    special, any one of the three is enough to pick "build" over
+    "build_no_seq" (getCommandsModelAngeloJob, confirmed current)."""
+    assert draft_program_extra("ModelAngelo", {"d_seq": "d.fasta"}, "ModelAngelo/job042")[0] == "build"
+    assert draft_program_extra("ModelAngelo", {"r_seq": "r.fasta"}, "ModelAngelo/job042")[0] == "build"
+
+
+def test_program_extra_modelangelo_picks_build_no_seq_when_no_sequences_given():
+    assert draft_program_extra("ModelAngelo", {}, "ModelAngelo/job042") == \
+        ["build_no_seq", "-o", "ModelAngelo/job042/"]
+
+
+def test_program_extra_modelangelo_adds_trailing_slash_to_output_subdir():
+    assert draft_program_extra("ModelAngelo", {}, "ModelAngelo/job042")[1:] == \
+        ["-o", "ModelAngelo/job042/"]
+
+
+def test_program_extra_modelangelo_returns_nothing_without_output_subdir():
+    """output_subdir is the one thing program_extra needs that isn't itself
+    a field value -- an empty/missing one (shouldn't happen in practice,
+    build_job_definition always has a real one) means there's nothing
+    sensible to draft yet, same "not configured" convention as every other
+    []-returning case here."""
+    assert draft_program_extra("ModelAngelo", {"p_seq": "p.fasta"}, "") == []
+
+
+def test_program_extra_modelangelo_includes_mask_when_set():
+    assert draft_program_extra(
+        "ModelAngelo", {"mask_path": "MaskCreate/job020/mask.mrc"}, "ModelAngelo/job042"
+    ) == ["build_no_seq", "-o", "ModelAngelo/job042/", "-m", "MaskCreate/job020/mask.mrc"]
+
+
+def test_program_extra_modelangelo_omits_mask_when_unset():
+    assert "-m" not in draft_program_extra("ModelAngelo", {}, "ModelAngelo/job042")
+
+
+def test_program_extra_modelangelo_quotes_shell_metacharacters():
+    result = draft_program_extra(
+        "ModelAngelo", {"mask_path": "$(touch /tmp/pwned).mrc"}, "ModelAngelo/job042"
+    )
+    assert result[-1] == "'$(touch /tmp/pwned).mrc'"
+
+
+def test_extra_flags_modelangelo_hmm_search_omitted_when_do_hhmer_off():
+    assert draft_extra_flags("ModelAngelo", {
+        "do_hhmer": False, "fn_modelangelo_exe": "relion_python_modelangelo",
+        "fn_lib": "lib.fasta",
+    }, "ModelAngelo/job042") == []
+
+
+def test_extra_flags_modelangelo_hmm_search_omitted_without_a_library():
+    """Real RELION hard-errors here ("you need to provide a library to
+    perform the HMM search against") rather than emitting a command at
+    all -- this app's policy is to leave an incomplete draft for the user
+    to notice, not guess or silently substitute something, so [] (no
+    second command) is the right answer, not a command missing -f."""
+    assert draft_extra_flags("ModelAngelo", {
+        "do_hhmer": True, "fn_modelangelo_exe": "relion_python_modelangelo", "fn_lib": "",
+    }, "ModelAngelo/job042") == []
+
+
+def test_extra_flags_modelangelo_hmm_search_full_command():
+    result = draft_extra_flags("ModelAngelo", {
+        "do_hhmer": True,
+        "fn_modelangelo_exe": "relion_python_modelangelo",
+        "fn_lib": "Import/job001/all_seqs.fasta",
+        "alphabet": "amino",
+        "F1": "10.", "F2": "10.", "F3": "10.", "E": "100.",
+    }, "ModelAngelo/job042")
+    assert result == [
+        "&&", "relion_python_modelangelo", "hmm_search",
+        "-i", "ModelAngelo/job042/",
+        "-f", "Import/job001/all_seqs.fasta",
+        "-o", "ModelAngelo/job042/",
+        "-a", "amino",
+        "--F1", "10.", "--F2", "10.", "--F3", "10.", "--E", "100.",
+    ]
+
+
+def test_extra_flags_modelangelo_hmm_search_reuses_the_build_steps_own_directory():
+    """-i and -o both take output_subdir -- hmm_search reads the build
+    step's own output and writes its own results into that SAME directory,
+    not a separate one (getCommandsModelAngeloJob's outputname is reused
+    for both, confirmed current)."""
+    result = draft_extra_flags("ModelAngelo", {
+        "do_hhmer": True, "fn_modelangelo_exe": "exe", "fn_lib": "lib.fasta",
+    }, "ModelAngelo/job042")
+    i_value = result[result.index("-i") + 1]
+    o_value = result[result.index("-o") + 1]
+    assert i_value == o_value == "ModelAngelo/job042/"
+
+
+def test_extra_flags_modelangelo_hmm_search_quotes_shell_metacharacters():
+    result = draft_extra_flags("ModelAngelo", {
+        "do_hhmer": True, "fn_modelangelo_exe": "exe",
+        "fn_lib": "$(touch /tmp/pwned).fasta",
+    }, "ModelAngelo/job042")
+    assert "'$(touch /tmp/pwned).fasta'" in result
+
+
+def test_synthetic_options_modelangelo_has_mask_path():
+    opts = synthetic_options("ModelAngelo")
+    assert [o["key"] for o in opts] == ["mask_path"]
+    assert opts[0]["default"] == ""
+
+
+def test_synthetic_options_default_job_has_none():
+    assert synthetic_options("Motioncorr") == []
+
+
+def test_synthetic_options_returns_fresh_copies_not_shared_mutable_state():
+    a = synthetic_options("ModelAngelo")
+    a[0]["key"] = "mutated"
+    b = synthetic_options("ModelAngelo")
+    assert b[0]["key"] == "mask_path"
 
 
 # --------------------------------------------------------------------------

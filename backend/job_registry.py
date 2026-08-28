@@ -66,6 +66,7 @@ from job_catalog import (
     draft_program_extra,
     draft_program_override,
     pipeline_type,
+    synthetic_options,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -529,7 +530,7 @@ def _build_draft_command(
     # A RELION subcommand-style positional token this job's CLI needs
     # immediately after the program name, ahead of the output flag and
     # every other flag -- see job_catalog.JobDraftOverride.program_extra.
-    parts.extend(draft_program_extra(base_name, field_values))
+    parts.extend(draft_program_extra(base_name, field_values, output_subdir))
     # RELION-style output directory (project-root-relative), inserted right
     # after the program name — mirrors how getCommands*Job() appends it.
     if output_subdir and not is_exe_placeholder:
@@ -732,7 +733,7 @@ def _build_draft_command(
     # --bg_radius, computed from bg_diameter/extract_size and (when
     # do_rescale is on) rescale together. See
     # job_catalog.JobDraftOverride.extra_flags.
-    parts.extend(draft_extra_flags(base_name, field_values))
+    parts.extend(draft_extra_flags(base_name, field_values, output_subdir))
 
     # RELION appends this verbatim at the end of the command
     # (`command += " " + joboptions["other_args"].getString();`) -- deliberately
@@ -777,8 +778,38 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
     meta = JOB_CATALOG[internal_name]  # (label_new, display_name, category, description) -- own entry, not base's
     label_new, display_name, category, description = meta
 
-    standard_groups = _standard_groups(raw)
-    options_by_key = {o["key"]: o for o in raw.get("options", [])}
+    # This app's own additions on top of RELION's real extracted options
+    # (e.g. ModelAngelo's mask_path) -- see job_catalog.SYNTHETIC_OPTIONS
+    # for why this exists at all and why it's kept separate from
+    # DRAFT_OVERRIDES. [] for every job except the handful listed there, so
+    # this is a no-op for the rest. Builds a shallow-copied `raw` variant
+    # (never mutate raw["options"]/raw["tab_layout"] in place -- _load_raw()
+    # caches and shares them across every request) with the synthetic
+    # field(s) appended to both the options list and the "I/O" tab group,
+    # so they render in the popup exactly like a real RELION field would.
+    # Deliberately NOT passed to _build_draft_command below: a synthetic
+    # field is handled entirely by its own job's program_extra/extra_flags
+    # override (which reads field_values directly), never by the generic
+    # per-option loop -- that loop only sees fields it's told about via
+    # raw_job.get("options"), so leaving it out of `raw` itself is what
+    # keeps it out of that loop, not an oversight.
+    synthetic = synthetic_options(internal_name)
+    raw_with_synthetic = raw
+    if synthetic:
+        raw_with_synthetic = dict(raw)
+        raw_with_synthetic["options"] = [*raw.get("options", []), *synthetic]
+        layout = raw.get("tab_layout")
+        if layout and layout.get("tab_fields", {}).get("I/O"):
+            raw_with_synthetic["tab_layout"] = {
+                **layout,
+                "tab_fields": {
+                    **layout["tab_fields"],
+                    "I/O": [*layout["tab_fields"]["I/O"], *(o["key"] for o in synthetic)],
+                },
+            }
+
+    standard_groups = _standard_groups(raw_with_synthetic)
+    options_by_key = {o["key"]: o for o in raw_with_synthetic.get("options", [])}
     default_values = {k: _field_default_value(o) for k, o in options_by_key.items()}
     draft_command, unmapped = _build_draft_command(
         raw, default_values, internal_name, output_subdir
@@ -788,7 +819,7 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
     # wants offered as an explicit two-way dropdown instead of a checkbox --
     # see job_catalog.boolean_select_labels's own docstring.
     options = []
-    for opt in raw.get("options", []):
+    for opt in raw_with_synthetic.get("options", []):
         labels = boolean_select_labels(internal_name, opt["key"])
         if labels:
             opt = {**opt, "boolean_labels": {"false": labels[0], "true": labels[1]}}

@@ -1066,6 +1066,105 @@ def test_tomodenoisetomograms_neither_mode_selected_omits_subcommand():
     assert "cryoCARE:predict" not in cmd
 
 
+# --------------------------------------------------------------------------
+# ModelAngelo (issue #37) -- full draft-command integration. program_extra/
+# extra_flags' own contract is covered directly in test_job_catalog.py;
+# these check the WHOLE thing _build_draft_command/build_job_definition
+# actually assembles, the same split every other job's tests in this file
+# use for a DRAFT_OVERRIDES entry with its own program_extra/extra_flags.
+# --------------------------------------------------------------------------
+
+
+def test_modelangelo_default_draft_has_no_unmapped_fields():
+    """Every one of the 9 originally-unmapped fields (issue #37) should now
+    be either mapped (flags), consumed as the program itself
+    (fn_modelangelo_exe), or handled by program_extra/extra_flags
+    (everything hmm_search-related) -- none left over."""
+    d = job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    assert d["unmapped_fields"] == []
+
+
+def test_modelangelo_default_draft_uses_the_configured_executable_as_the_program():
+    d = job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    # RELION's own default for this field really is this literal wrapper
+    # script name (confirmed: job_definitions_raw.json's own extracted
+    # default), not a placeholder -- see fn_modelangelo_exe's own help text.
+    assert d["draft_command"].startswith("relion_python_modelangelo build_no_seq")
+
+
+def test_modelangelo_draft_picks_build_no_seq_and_omits_hmm_search_by_default():
+    d = job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    assert "build_no_seq" in d["draft_command"]
+    assert "build " not in d["draft_command"] + " "  # not the bare "build" subcommand
+    assert "hmm_search" not in d["draft_command"]
+    assert "&&" not in d["draft_command"]
+
+
+def test_modelangelo_full_build_plus_hmm_search_draft():
+    raw = job_registry.raw_job("ModelAngelo")
+    field_values = {
+        "fn_map": "PostProcess/job030/postprocess.mrc",
+        "p_seq": "Import/job001/protein.fasta",
+        "fn_modelangelo_exe": "/opt/modelangelo/bin/model_angelo",
+        "gpu_id": "0",
+        "do_hhmer": True,
+        "fn_lib": "Import/job001/all_seqs.fasta",
+        "alphabet": "amino",
+        "F1": "10.", "F2": "10.", "F3": "10.", "E": "100.",
+    }
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, field_values, "ModelAngelo", "ModelAngelo/job042")
+    assert unmapped == []
+    # Build command: program, subcommand immediately after (position
+    # matters for a subcommand-style CLI), then its own flags.
+    assert cmd.startswith("/opt/modelangelo/bin/model_angelo build -o ModelAngelo/job042/")
+    assert "-v Import/job001/protein.fasta" not in cmd  # -v takes fn_map, not p_seq
+    assert "-v PostProcess/job030/postprocess.mrc" in cmd
+    assert "-pf Import/job001/protein.fasta" in cmd
+    assert "-d 0" in cmd
+    # Chained second command, in real RELION's own order (-i/-f/-o/-a/F1-E).
+    assert " && /opt/modelangelo/bin/model_angelo hmm_search " in cmd
+    assert "-i ModelAngelo/job042/" in cmd
+    assert "-f Import/job001/all_seqs.fasta" in cmd
+    assert cmd.count("-o ModelAngelo/job042/") == 2  # once for build, once for hmm_search
+    assert "-a amino" in cmd
+    assert "--F1 10." in cmd and "--F2 10." in cmd and "--F3 10." in cmd and "--E 100." in cmd
+
+
+def test_modelangelo_mask_path_is_a_real_option_but_not_from_relion_source():
+    d = job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    keys = {o["key"] for o in d["options"]}
+    assert "mask_path" in keys
+    # Never in the real extracted data -- confirms this came from
+    # synthetic_options, not a RELION source change nobody noticed.
+    assert "mask_path" not in {o["key"] for o in job_registry.raw_job("ModelAngelo")["options"]}
+    assert d["default_values"]["mask_path"] == ""
+
+
+def test_modelangelo_mask_path_lands_in_the_io_tab_group():
+    d = job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    io_group = next(g for g in d["standard_groups"] if g["name"] == "I/O")
+    assert "mask_path" in io_group["fields"]
+
+
+def test_modelangelo_mask_path_flag_appears_in_the_draft_when_set():
+    raw = job_registry.raw_job("ModelAngelo")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"mask_path": "MaskCreate/job020/mask.mrc"}, "ModelAngelo", "ModelAngelo/job042")
+    assert "-m MaskCreate/job020/mask.mrc" in cmd
+
+
+def test_modelangelo_other_jobs_options_are_unaffected_by_the_synthetic_field():
+    """synthetic_options must be additive only -- building any other job's
+    definition (before or after ModelAngelo's) must not leak mask_path
+    into it, and must not mutate the cached raw data _load_raw() shares
+    across every request."""
+    job_registry.build_job_definition("ModelAngelo", "ModelAngelo/job042")
+    d = job_registry.build_job_definition("Motioncorr", "MotionCorr/job002")
+    assert "mask_path" not in {o["key"] for o in d["options"]}
+    assert "mask_path" not in {o["key"] for o in job_registry.raw_job("ModelAngelo")["options"]}
+
+
 def test_select_do_recenter_requires_class2d_source_regardless_of_its_own_value():
     raw = job_registry.raw_job("Select")
     cmd, unmapped = job_registry._build_draft_command(
