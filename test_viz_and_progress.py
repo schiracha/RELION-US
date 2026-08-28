@@ -1,7 +1,8 @@
 """
 Playwright suite for the recent-projects list, the orthogonal (three-panel)
 tomogram viewer, the dark/light theme switch, the job Progress tab (live
-charts + class thumbnails), and the visualizer's Browse file pickers.
+charts + class thumbnails), the CTF QC tab (end-of-job charts + power-
+spectrum thumbnails), and the visualizer's Browse file pickers.
 
 One backend + one browser session for the whole file. Order matters: the
 orthogonal-viewer section writes and checks against its own MRC/picks
@@ -111,10 +112,45 @@ for it in range(1, 13):
 print("done")
 '''
 
+# CTF Estimation writes its joint results ONCE, at the very end (see
+# backend/ctf_qc.py's module docstring) -- unlike FAKE_JOB above, no
+# per-iteration files, no sleep loop. RELION's own --o convention for this
+# job is a bare directory (no filename prefix, confirmed against the real
+# getCommandsCtffindJob source: `command += " --o " + outputname` where
+# outputname already ends in "/") -- so argv[1] here IS the job directory
+# to mkdir into directly, unlike FAKE_JOB's prefix handling.
+FAKE_CTFFIND_JOB = '''
+import sys
+from pathlib import Path
+import numpy as np, mrcfile, starfile, pandas as pd
+out = Path(sys.argv[1])
+out.mkdir(parents=True, exist_ok=True)
+n = 5
+rng = np.random.default_rng(1)
+names = [f"mic_{i}.mrc" for i in range(n)]
+for name in names:
+    with mrcfile.new(out / f"{name}.ctf", overwrite=True) as m:
+        m.set_data((rng.random((32, 32)) * 0.3).astype(np.float32))
+starfile.write({
+    "micrographs": pd.DataFrame({
+        "rlnMicrographName": names,
+        "rlnCtfImage": [f"{name}.ctf:mrc" for name in names],
+        "rlnDefocusU": rng.normal(15000, 2000, n),
+        "rlnDefocusV": rng.normal(14000, 2000, n),
+        "rlnCtfAstigmatism": rng.uniform(0, 500, n),
+        "rlnDefocusAngle": rng.uniform(0, 180, n),
+        "rlnCtfFigureOfMerit": rng.uniform(0.02, 0.15, n),
+        "rlnCtfMaxResolution": rng.uniform(3.0, 8.0, n),
+    })
+}, out / "micrographs_ctf.star", overwrite=True)
+print("done")
+'''
+
 
 def main():
     nx, ny, nz = make_viewer_fixtures()
     (PROJECT_DIR / "fake_iterative_job.py").write_text(FAKE_JOB)
+    (PROJECT_DIR / "fake_ctffind_job.py").write_text(FAKE_CTFFIND_JOB)
 
     with sync_playwright() as p:
         browser = launch_browser(p)
@@ -361,6 +397,71 @@ def main():
         check(f"Status line reflects the picked iteration ({status_after_pick!r})",
               f"iteration {earlier_value}" in status_after_pick)
         check("Thumbnails still render for the picked iteration", win.locator(".thumb img").count() >= 1)
+
+        win.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
+
+        # ==== CTF QC tab (Ctffind only) ==========================================
+        # Regression coverage for a real bug found while auditing this suite:
+        # refreshCtfQcTabVisibility() only ever called refreshCtfQc() once
+        # (guarded by ctfQcContent.dataset.built), same "built once" pattern
+        # that broke Progress polling above -- but CTF QC has NO polling loop
+        # by design (RELION writes its summary once, at the very end), so a
+        # job that was still running when its tab first built would show
+        # "not available" forever, even after finishing. Fixed by re-checking
+        # on every subsequent refreshToolbarState() call (status transitions,
+        # incl. the websocket's "completed" message) until data.available is
+        # true. This section starts the job and opens the tab BEFORE the job
+        # finishes, specifically to exercise that "still running when first
+        # built, must catch up later" path rather than the easier case of
+        # opening the tab only after completion.
+        page.locator("#jobSearch").fill("CTF Estimation")
+        page.wait_for_timeout(300)
+        # has_text does a substring match, and "CTF Estimation" is also a
+        # prefix of TomoCtffind's own display name "CTF Estimation (Tomo)"
+        # -- anchor to the start of the item's own text and require a
+        # newline right after (the item's title line, before its
+        # description paragraph) to land on the plain SPA job specifically.
+        page.locator(".job-item:visible", has_text=re.compile(r"^CTF Estimation\s*\n")).first.click()
+        page.wait_for_selector(".winbox", timeout=5000)
+        ctf_win = page.locator(".winbox").first
+        ctf_cmd = ctf_win.locator(".command-box").input_value()
+        ctf_m = re.search(r"--(?:o|output-directory)\s+(\S+)", ctf_cmd)
+        ctf_subdir = (ctf_m.group(1).rstrip("/") if ctf_m else "CtfFind/job001").strip("'\"")
+        ctf_win.locator(".command-box").fill(f"sleep 2 && python3 fake_ctffind_job.py {ctf_subdir}")
+        ctf_win.locator('[data-role="run-btn"]').click()
+        page.wait_for_timeout(800)
+
+        ctf_tab = ctf_win.locator('.tab-btn[data-tab="ctfqc"]')
+        check("CTF QC tab appears for Ctffind", ctf_tab.is_visible())
+        ctf_tab.click()
+        page.wait_for_timeout(500)
+        check("CTF QC tab shows not-yet-available while the job is still running (sleep 2 hasn't finished)",
+              "not available" in ctf_win.locator('[data-tab-content="ctfqc"]').inner_text().lower())
+
+        # Not wait_for_selector(...status-line...completed), state="visible"
+        # by default -- the CTF QC tab is the active one now, so the Inputs
+        # tab's own status-line (a sibling tab-content) is CSS-hidden even
+        # though its text already says "completed". Check the text content
+        # directly instead, regardless of which tab happens to be visible.
+        page.wait_for_function(
+            """() => {
+                 const el = document.querySelector('[data-role="status-line"]');
+                 return el && el.textContent.includes("completed");
+               }""",
+            timeout=10000)
+        page.wait_for_timeout(1000)
+        ctf_status = ctf_win.locator('[data-role="ctfqc-status"]').inner_text()
+        check(f"CTF QC tab picks up the results after the job completes ({ctf_status!r})",
+              "5 micrograph" in ctf_status)
+        check("CTF QC charts render", ctf_win.locator('[data-tab-content="ctfqc"] .progress-chart').count() >= 1)
+        check("CTF QC worst-fit thumbnails render", ctf_win.locator('[data-tab-content="ctfqc"] .thumb img').count() >= 1)
+        check("CTF QC thumbnails actually load",
+              ctf_win.locator('[data-tab-content="ctfqc"] .thumb img').evaluate_all(
+                  "els => els.length > 0 && els.every(e => e.naturalWidth > 0)"))
+
+        ctf_win.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
 
         # ==== visualizer Browse buttons ==========================================
         # Fixture tree so the picker has folders + files to walk. Overwrites the

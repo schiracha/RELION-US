@@ -263,20 +263,21 @@ stop_backend() {
   BACKEND_PID=""
 }
 
-# A project as RELION's own GUI leaves one: a default_pipeline.star with a job
-# counter and a process list, real job directories, and a job.star holding the
-# options one of them ran with. The `legacy` suite opens this instead of an
-# empty project.
-make_legacy_project() {
-  local proj="$1"
-  mkdir -p "$proj"
-  cat > "$proj/default_pipeline.star" <<'STAR'
+# Shared by make_legacy_project and make_legacy_branchy_project below: both
+# build a default_pipeline.star with the exact same four-block shape (job
+# counter, then processes/output_edges/input_edges loop_ tables) -- only the
+# counter and the actual data rows differ between the two fixtures. Each of
+# processes/output_edges/input_edges is one pre-formatted row per line (no
+# trailing newline needed).
+_write_pipeline_star() {
+  local proj="$1" counter="$2" processes="$3" output_edges="$4" input_edges="$5"
+  cat > "$proj/default_pipeline.star" <<STAR
 
 # version 30001
 
 data_pipeline_general
 
-_rlnPipeLineJobCounter                      12
+_rlnPipeLineJobCounter                      $counter
 
 
 # version 30001
@@ -288,11 +289,7 @@ _rlnPipeLineProcessName #1
 _rlnPipeLineProcessAlias #2
 _rlnPipeLineProcessTypeLabel #3
 _rlnPipeLineProcessStatusLabel #4
-Import/job001/       None            relion.import.movies     Succeeded
-MotionCorr/job002/   my_motioncorr   relion.motioncorr.own    Succeeded
-CtfFind/job003/      None            relion.ctffind.ctffind4  Succeeded
-Class2D/job005/      None            relion.class2d.em        Failed
-Refine3D/job011/     None            relion.refine3d          Succeeded
+$processes
 
 
 # version 30001
@@ -302,10 +299,7 @@ data_pipeline_output_edges
 loop_
 _rlnPipeLineEdgeProcess #1
 _rlnPipeLineEdgeToNode #2
-Import/job001/ Import/job001/movies.star
-MotionCorr/job002/ MotionCorr/job002/corrected.star
-CtfFind/job003/ CtfFind/job003/ctf.star
-Class2D/job005/ Class2D/job005/particles.star
+$output_edges
 
 
 # version 30001
@@ -315,11 +309,31 @@ data_pipeline_input_edges
 loop_
 _rlnPipeLineEdgeFromNode #1
 _rlnPipeLineEdgeProcess #2
-Import/job001/movies.star MotionCorr/job002/
+$input_edges
+STAR
+}
+
+# A project as RELION's own GUI leaves one: a default_pipeline.star with a job
+# counter and a process list, real job directories, and a job.star holding the
+# options one of them ran with. The `legacy` suite opens this instead of an
+# empty project.
+make_legacy_project() {
+  local proj="$1"
+  mkdir -p "$proj"
+  _write_pipeline_star "$proj" 12 \
+"Import/job001/       None            relion.import.movies     Succeeded
+MotionCorr/job002/   my_motioncorr   relion.motioncorr.own    Succeeded
+CtfFind/job003/      None            relion.ctffind.ctffind4  Succeeded
+Class2D/job005/      None            relion.class2d.em        Failed
+Refine3D/job011/     None            relion.refine3d          Succeeded" \
+"Import/job001/ Import/job001/movies.star
+MotionCorr/job002/ MotionCorr/job002/corrected.star
+CtfFind/job003/ CtfFind/job003/ctf.star
+Class2D/job005/ Class2D/job005/particles.star" \
+"Import/job001/movies.star MotionCorr/job002/
 MotionCorr/job002/corrected.star CtfFind/job003/
 CtfFind/job003/ctf.star Class2D/job005/
-Class2D/job005/particles.star Refine3D/job011/
-STAR
+Class2D/job005/particles.star Refine3D/job011/"
   mkdir -p "$proj/Import/job001" "$proj/MotionCorr/job002" \
            "$proj/CtfFind/job003" "$proj/Class2D/job005" "$proj/Refine3D/job011"
   cat > "$proj/Class2D/job005/job.star" <<'STAR'
@@ -381,25 +395,8 @@ PY
 make_legacy_branchy_project() {
   local proj="$1"
   mkdir -p "$proj"
-  cat > "$proj/default_pipeline.star" <<'STAR'
-
-# version 30001
-
-data_pipeline_general
-
-_rlnPipeLineJobCounter                      22
-
-
-# version 30001
-
-data_pipeline_processes
-
-loop_
-_rlnPipeLineProcessName #1
-_rlnPipeLineProcessAlias #2
-_rlnPipeLineProcessTypeLabel #3
-_rlnPipeLineProcessStatusLabel #4
-TomoExcludeTilt/job004/       None            relion.excludetilts          Succeeded
+  _write_pipeline_star "$proj" 22 \
+"TomoExcludeTilt/job004/       None            relion.excludetilts          Succeeded
 TomoAlign/job005/             None            relion.aligntiltseries       Succeeded
 TomoRecon/job010/             None            relion.reconstructtomograms  Succeeded
 TomoSubtomo/job011/           None            relion.pseudosubtomo         Succeeded
@@ -407,17 +404,8 @@ TomoRecon/job015/             None            relion.reconstructtomograms  Succe
 TomoAlign/job013/             None            relion.aligntiltseries       Succeeded
 TomoExcludeTilt/job014/       None            relion.excludetilts          Succeeded
 TomoSubtomo/job018/           None            relion.pseudosubtomo         Succeeded
-TomoRecon/job021/             None            relion.reconstructtomograms  Succeeded
-
-
-# version 30001
-
-data_pipeline_output_edges
-
-loop_
-_rlnPipeLineEdgeProcess #1
-_rlnPipeLineEdgeToNode #2
-TomoExcludeTilt/job004/ TomoExcludeTilt/job004/tilts.star
+TomoRecon/job021/             None            relion.reconstructtomograms  Succeeded" \
+"TomoExcludeTilt/job004/ TomoExcludeTilt/job004/tilts.star
 TomoAlign/job005/       TomoAlign/job005/aligned.star
 TomoRecon/job010/       TomoRecon/job010/tomograms.star
 TomoSubtomo/job011/     TomoSubtomo/job011/subtomo.star
@@ -425,25 +413,15 @@ TomoRecon/job015/       TomoRecon/job015/tomograms.star
 TomoAlign/job013/       TomoAlign/job013/aligned.star
 TomoExcludeTilt/job014/ TomoExcludeTilt/job014/tilts.star
 TomoSubtomo/job018/     TomoSubtomo/job018/subtomo.star
-TomoRecon/job021/       TomoRecon/job021/tomograms.star
-
-
-# version 30001
-
-data_pipeline_input_edges
-
-loop_
-_rlnPipeLineEdgeFromNode #1
-_rlnPipeLineEdgeProcess #2
-TomoExcludeTilt/job004/tilts.star   TomoAlign/job005/
+TomoRecon/job021/       TomoRecon/job021/tomograms.star" \
+"TomoExcludeTilt/job004/tilts.star   TomoAlign/job005/
 TomoAlign/job005/aligned.star       TomoRecon/job010/
 TomoRecon/job010/tomograms.star     TomoSubtomo/job011/
 TomoRecon/job010/tomograms.star     TomoRecon/job015/
 TomoRecon/job010/tomograms.star     TomoAlign/job013/
 TomoRecon/job010/tomograms.star     TomoExcludeTilt/job014/
 TomoExcludeTilt/job014/tilts.star   TomoSubtomo/job018/
-TomoExcludeTilt/job014/tilts.star   TomoRecon/job021/
-STAR
+TomoExcludeTilt/job014/tilts.star   TomoRecon/job021/"
   mkdir -p "$proj/TomoExcludeTilt/job004" "$proj/TomoAlign/job005" \
            "$proj/TomoRecon/job010" "$proj/TomoSubtomo/job011" \
            "$proj/TomoRecon/job015" "$proj/TomoAlign/job013" \
@@ -465,7 +443,7 @@ STAR
 # so its corrected_micrographs.star gets merged in). STAR shapes match real
 # RELION output (list blocks for model_general/optimiser_general, loop_ for
 # model_classes/model_class_N/micrographs) -- same discipline
-# test_progress.py's own fixtures use.
+# test_viz_and_progress.py's own fixtures use.
 add_analyze_classification_run() {
   local proj="$1"
   local job2d="$proj/Class2D/job022"
@@ -632,6 +610,26 @@ run_browser_suite() {
 TIERS=("$@")
 [[ ${#TIERS[@]} -eq 0 ]] && TIERS=(fast)
 
+# A typo'd tier name (e.g. "vewer") used to just silently match nothing --
+# wants() would never fire, only backend pytest would run, and the script
+# would still print "All selected suites passed.", indistinguishable from a
+# real pass of the tier the caller actually meant to run. Validate up front
+# instead. "fast" is the internal default-with-no-args sentinel (see wants()
+# below), not something a caller passes explicitly, but it's harmless either
+# way so it's allowed here too.
+KNOWN_TIERS=(fast viewer progress options jobs project legacy auth analyze ui all)
+for t in "${TIERS[@]}"; do
+  known=0
+  for k in "${KNOWN_TIERS[@]}"; do
+    [[ "$t" == "$k" ]] && { known=1; break; }
+  done
+  if [[ "$known" -eq 0 ]]; then
+    echo "Unknown tier: '$t'" >&2
+    echo "Known tiers: ${KNOWN_TIERS[*]/fast/}" >&2
+    exit 1
+  fi
+done
+
 wants() {
   local tier="$1"
   for t in "${TIERS[@]}"; do
@@ -659,7 +657,7 @@ wants options  && run_browser_suite test_job_options_panel.py
 wants jobs     && run_browser_suite test_jobs.py
 wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
-wants legacy   && run_browser_suite test_network_branching.py yes
+wants legacy   && run_browser_suite test_network_branching.py
 wants auth     && run_browser_suite test_auth.py
 wants analyze  && run_browser_suite test_analyze.py yes
 

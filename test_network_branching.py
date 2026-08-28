@@ -14,10 +14,11 @@ root cause (the overlay SVG's coordinate space losing sync with the node
 grid's) and its fix.
 
 Needs a live backend already pointed at the fixture project (run_tests.sh
-builds one via make_legacy_branchy_project); pass the project directory as
-the second argument.
+builds one via make_legacy_branchy_project and starts the backend inside
+it) -- this script only ever talks to it over HTTP, so it takes no project
+path of its own.
 
-Usage: python3 test_network_branching.py [base_url] [project_dir]
+Usage: python3 test_network_branching.py [base_url]
 """
 import os
 import sys

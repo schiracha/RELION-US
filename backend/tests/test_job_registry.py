@@ -28,8 +28,9 @@ def test_every_relion_job_builds_without_error(internal_name):
     assert d["internal_name"] == internal_name
     assert d["program_guess"], f"{internal_name} has no program_guess"
     assert isinstance(d["options"], list) and len(d["options"]) > 0
-    assert isinstance(d["standard_groups"], list) and d["standard_groups"]
-    assert any(g["fields"] for g in d["standard_groups"])
+    assert isinstance(d["standard_groups"], list)
+    assert any(g["fields"] for g in d["standard_groups"]), \
+        f"{internal_name} has no standard_groups group with any fields"
 
 
 @pytest.mark.parametrize("internal_name", sorted(JOB_CATALOG.keys()))

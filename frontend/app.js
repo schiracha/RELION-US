@@ -1775,9 +1775,21 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   function refreshCtfQcTabVisibility() {
     const supported = ctfQcSupported();
     ctfQcTabBtn.hidden = !supported;
-    if (supported && !ctfQcContent.dataset.built) {
+    if (!supported) return;
+    if (!ctfQcContent.dataset.built) {
       ctfQcContent.dataset.built = "1";
       renderCtfQcShell();
+      refreshCtfQc();
+    } else if (!(ctfQcState.data && ctfQcState.data.available)) {
+      // RELION only writes its CTF summary once, at the very end (see
+      // ctf_qc.py's module docstring) -- there's no live polling loop here
+      // the way Progress has. If this tab first built while the job was
+      // still running (or hadn't started), the one-time build above never
+      // checks again on its own. refreshToolbarState() calls this on every
+      // status transition, including the websocket's "completed" message --
+      // that's a cheap opportunity to look again, since read_ctf_qc's
+      // not-yet-available path is just two Path.is_file() checks, not a
+      // real read.
       refreshCtfQc();
     }
   }

@@ -67,9 +67,20 @@ def pgrep_count(pattern):
 with sync_playwright() as p:
     browser = launch_browser(p)
     page = browser.new_page(viewport={"width": 1500, "height": 950})
-    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+    # 409 excluded from both listeners below: the browser's own devtools
+    # console additionally logs a "Failed to load resource" line for any
+    # non-2xx fetch, independent of the response listener -- same
+    # convention test_legacy_project.py's own deliberate-409 check uses.
+    page.on("console", lambda msg: errors.append(msg.text)
+            if msg.type == "error" and "409" not in msg.text else None)
     page.on("pageerror", lambda exc: errors.append(str(exc)))
-    page.on("response", lambda resp: errors.append(f"HTTP {resp.status} {resp.url}") if resp.status >= 400 else None)
+    # 409 excluded: the Overwrite-directory-mismatch section below deliberately
+    # provokes one (through the app's own UI flow, not page.request, since the
+    # point is checking the frontend's error surface end to end) and it's
+    # expected, not a bug -- same convention test_legacy_project.py's own
+    # deliberate-409 check uses.
+    page.on("response", lambda resp: errors.append(f"HTTP {resp.status} {resp.url}")
+            if resp.status >= 400 and resp.status != 409 else None)
 
     page.goto(BASE_URL + "/", wait_until="networkidle")
     page.wait_for_selector(".job-item", timeout=5000)
@@ -350,7 +361,98 @@ with sync_playwright() as p:
     page.wait_for_timeout(500)
     check("Outputs tab shows overwrite_out.txt", "overwrite_out.txt" in win6.locator('[data-tab-content="outputs"]').inner_text())
 
+    # ---- Overwrite refuses a command whose --o targets a different
+    # directory (job_runner.py's authoritative-subdir guard) -- the
+    # confirmed failure mode this blocks: this app's own tracking (and the
+    # --pipeline_control exit markers, if RELION sync were on) would stay
+    # pinned to the job being overwritten while the real output silently
+    # lands wherever the hand-edited --o says. Already unit-tested in
+    # backend/tests/test_job_runner.py; this checks the same guard is
+    # actually wired up end to end, including the frontend's error surface.
+    win6.locator('.tab-btn[data-tab="inputs"]').click()
+    page.wait_for_timeout(300)
+    mismatch_sub = f"{_sub}_WRONG"
+    win6.locator(".command-box").fill(f"echo nope > {mismatch_sub}/out.txt --o {mismatch_sub}/")
+    win6.locator('[data-action="overwrite"]').click()
+    page.wait_for_timeout(300)
+    ow_confirm2 = page.locator(".mini-dialog-actions button", has_text="overwrite").or_(
+        page.locator(".mini-dialog-actions button.danger")
+    )
+    if ow_confirm2.count():
+        ow_confirm2.first.click()
+    page.wait_for_timeout(500)
+    err_dialog = page.locator(".mini-dialog-overlay .mini-dialog p")
+    err_text = err_dialog.first.inner_text() if err_dialog.count() else "(no dialog appeared)"
+    check(f"Overwrite blocked when --o targets a different directory ({err_text!r})",
+          err_dialog.count() >= 1 and "doesn't match" in err_text)
+    if err_dialog.count():
+        page.locator('.mini-dialog-actions [data-role="confirm"]').first.click()
+        page.wait_for_timeout(200)
+    check("Popup still shows the original completed run after the blocked overwrite",
+          "completed" in win6.locator('[data-role="status-line"]').inner_text().lower())
+    check("Command Center still shows 2 rows (blocked overwrite started no new run)",
+          page.locator("#ccTableBody tr").count() == 2)
+
     win6.locator('[data-action="close"]').click()
+    page.wait_for_timeout(300)
+
+    # ==== Clone: a fresh, separately-numbered job of the same type =========
+    # Unlike Overwrite, Clone never touches the job it's cloning FROM -- it
+    # only reads that run's field_values and opens a brand-new, not-yet-run
+    # popup. Works even for a job that's still "running" or RELION-native
+    # (read-only here), which Overwrite explicitly can't -- see cloneBtn's
+    # own comment in app.js for why that's the point of the feature.
+    page.locator(".job-item", has_text="Import Tomo Tilt Series").first.click()
+    page.wait_for_selector(".winbox", timeout=5000)
+    win8 = page.locator(".winbox").first
+    win8.locator(".command-box").fill(f"echo clone-source > {out_subdir(win8)}/clone_source.txt")
+    win8.locator('[data-role="run-btn"]').click()
+    page.wait_for_selector('[data-role="status-line"]:has-text("completed")', timeout=10000)
+    page.wait_for_timeout(500)
+    clone_source_job_name = win8.locator('[data-role="job-name-display"]').inner_text().strip()
+    rows_before_clone = page.locator("#ccTableBody tr").count()
+
+    check("Clone button visible on a completed job", win8.locator('[data-action="clone"]').is_visible())
+    win8.locator('[data-action="clone"]').click()
+    page.wait_for_timeout(500)
+    check("Clicking Clone closes the source job's popup", page.locator(".winbox").count() == 1)
+    win9 = page.locator(".winbox").first
+    check("Clone opens a popup for the SAME job type",
+          "Import Tomo Tilt Series" in win9.locator(".wb-title").inner_text())
+    check("Cloned popup has not run yet (Run button visible, no status line, still showing the display name)",
+          win9.locator('[data-role="run-btn"]').is_visible()
+          and win9.locator('[data-role="status-line"]').inner_text().strip() == ""
+          and win9.locator('[data-role="job-name-display"]').inner_text().strip() == "Import Tomo Tilt Series")
+    check("Clone did not start a new Command Center row (nothing has run yet)",
+          page.locator("#ccTableBody tr").count() == rows_before_clone)
+
+    # Actually run the clone -- it should get its own, freshly-allocated job
+    # number, entirely separate from the job it was cloned from, and leave
+    # that original job untouched.
+    win9.locator(".command-box").fill(f"echo clone-run > {out_subdir(win9)}/clone_run.txt")
+    win9.locator('[data-role="run-btn"]').click()
+    page.wait_for_selector('[data-role="status-line"]:has-text("completed")', timeout=10000)
+    page.wait_for_timeout(500)
+    clone_job_name = win9.locator('[data-role="job-name-display"]').inner_text().strip()
+    check(f"Clone got its own, different job number ({clone_source_job_name!r} vs {clone_job_name!r})",
+          clone_job_name != clone_source_job_name)
+    check("Command Center gained a new row for the cloned run",
+          page.locator("#ccTableBody tr").count() == rows_before_clone + 1)
+
+    win9.locator('[data-action="close"]').click()
+    page.wait_for_timeout(300)
+
+    # Reopen the ORIGINAL (cloned-from) job by its own job name and confirm
+    # running the clone touched nothing about it.
+    page.locator("#ccTableBody tr", has_text=clone_source_job_name).first.click()
+    page.wait_for_selector(".winbox", timeout=5000)
+    win10 = page.locator(".winbox").first
+    win10.locator('.tab-btn[data-tab="outputs"]').click()
+    page.wait_for_timeout(500)
+    source_outputs = win10.locator('[data-tab-content="outputs"]').inner_text()
+    check("Original cloned-from job still only has its own output file",
+          "clone_source.txt" in source_outputs and "clone_run.txt" not in source_outputs)
+    win10.locator('[data-action="close"]').click()
     page.wait_for_timeout(300)
 
     # ==== Mark Finished / Mark Failed manual overrides ======================

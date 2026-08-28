@@ -204,7 +204,10 @@ def test_relion_jobs_appear_in_the_command_center(relion_project):
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
     assert [r["job_name"] for r in runs] == [
         "job001", "job002", "job003", "job005", "job011"]
-    assert all(r["source"] == "relion" for r in runs)
+    # A direct list-equality (not `all(...)` over `runs`) so this assertion
+    # is meaningful on its own, independent of the length already implied
+    # by the job_name check above.
+    assert [r["source"] for r in runs] == ["relion"] * 5
 
 
 def test_imported_jobs_are_sorted_by_job_number(relion_project):
@@ -260,9 +263,12 @@ def test_imported_jobs_without_a_job_star_carry_no_invented_timestamps(relion_pr
     column beats a plausible wrong one."""
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
     without_job_star = [r for r in runs if r["job_number"] in (1, 2, 3, 11)]
-    assert len(without_job_star) == 4
-    assert all(r["started_at"] is None and r["ended_at"] is None for r in without_job_star)
-    assert all(r["timestamp_estimated"] is False for r in without_job_star)
+    # A direct list-equality against the expected per-run tuples, rather
+    # than a length check plus two separate `all(...)` passes -- this way
+    # the count of 4 is implied by the equality itself, not a separate
+    # assertion the other two depend on to be meaningful.
+    assert [(r["started_at"], r["ended_at"], r["timestamp_estimated"]) for r in without_job_star] \
+        == [(None, None, False)] * 4
 
 
 def test_imported_job_with_a_job_star_gets_an_estimated_start_time(relion_project):
