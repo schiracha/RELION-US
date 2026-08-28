@@ -3328,34 +3328,38 @@ function wireScatterInteraction(canvas, selrectEl, geometry, tip, { xLabel, yLab
   };
 }
 
-// Particles tab -- unlike the classification tabs, not tied to a specific
-// job's own run: the user points this at any particles STAR directly
-// (Extract's particles.star, a Select job's output, an optimisation set,
-// ...), same "type a path or Browse" input the tomogram viewer already uses
-// for its own STAR fields. Drag a rectangle on the plot to select particles,
-// then export the selection (or everything else) to a new STAR file in the
-// same folder -- this app's first STAR-*writing* feature.
-function renderAnalyzeParticlesTab(content) {
+// Shared by the Particles and Micrographs tabs -- unlike the classification
+// tabs, neither is tied to a specific job's own run: the user points this
+// at any STAR directly (Extract's particles.star, a CTFFind job's
+// micrographs_ctf.star, ...), same "type a path or Browse" input the
+// tomogram viewer already uses for its own STAR fields. Drag a rectangle on
+// the plot to select rows, then export the selection (or everything else)
+// to a new STAR file in the same folder -- this app's first STAR-*writing*
+// feature. `data-role` names are reused identically by both tabs (safe:
+// every query below is scoped to `content`, this tab's own subtree, never
+// to `document`/`body`) rather than parameterized per entity, since that
+// would just be string-templating noise with no functional difference.
+function renderAnalyzeScatterTab(content, { entityLabel, entityPlural, pathPlaceholder, scatterEndpoint, block }) {
   content.innerHTML = `
     <div class="analyze-run-picker">
       <label class="viz-field">
-        <span class="viz-field-label">Particles STAR</span>
+        <span class="viz-field-label">${escapeHtml(entityLabel)} STAR</span>
         <span class="viz-input-row">
-          <input type="text" class="viz-input-sm" data-role="an-particles-path" placeholder="Extract/job010/particles.star">
-          <button type="button" class="btn btn-icon" data-role="an-particles-browse" title="Browse for a particles STAR file">…</button>
+          <input type="text" class="viz-input-sm" data-role="an-scatter-path" placeholder="${escapeHtml(pathPlaceholder)}">
+          <button type="button" class="btn btn-icon" data-role="an-scatter-browse" title="Browse for a ${escapeHtml(entityLabel.toLowerCase())} STAR file">…</button>
         </span>
       </label>
-      <button class="btn primary" data-role="an-particles-load" style="margin-top:8px">Load</button>
-      <span class="progress-status" data-role="an-particles-status"></span>
+      <button class="btn primary" data-role="an-scatter-load" style="margin-top:8px">Load</button>
+      <span class="progress-status" data-role="an-scatter-status"></span>
     </div>
-    <div data-role="an-particles-body"></div>
+    <div data-role="an-scatter-body"></div>
   `;
-  const pathInput = content.querySelector('[data-role="an-particles-path"]');
-  const status = content.querySelector('[data-role="an-particles-status"]');
-  const body = content.querySelector('[data-role="an-particles-body"]');
+  const pathInput = content.querySelector('[data-role="an-scatter-path"]');
+  const status = content.querySelector('[data-role="an-scatter-status"]');
+  const body = content.querySelector('[data-role="an-scatter-body"]');
 
-  content.querySelector('[data-role="an-particles-browse"]').addEventListener("click", async () => {
-    const picked = await pickFileDialog({ title: "Select a particles STAR file", extensions: [".star"] });
+  content.querySelector('[data-role="an-scatter-browse"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({ title: `Select a ${entityLabel.toLowerCase()} STAR file`, extensions: [".star"] });
     if (picked) pathInput.value = picked;
   });
 
@@ -3369,7 +3373,7 @@ function renderAnalyzeParticlesTab(content) {
     status.textContent = "Loading…";
     body.innerHTML = "";
     try {
-      currentData = await api("/api/analyze/particle-scatter", {
+      currentData = await api(scatterEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
@@ -3383,31 +3387,31 @@ function renderAnalyzeParticlesTab(content) {
     selectedIndices = new Set();
     if (!currentData.available || currentData.columns.length < 2) {
       status.textContent = "";
-      body.innerHTML = '<p class="analyze-coming-soon">No numeric particle columns to plot (needs a particles STAR with at least two).</p>';
+      body.innerHTML = `<p class="analyze-coming-soon">No numeric ${escapeHtml(entityLabel.toLowerCase())} columns to plot (needs a STAR with at least two).</p>`;
       return;
     }
-    status.textContent = `${currentData.rows.length.toLocaleString()} particles · ${currentData.columns.length} numeric columns`;
+    status.textContent = `${currentData.rows.length.toLocaleString()} ${escapeHtml(entityPlural)} · ${currentData.columns.length} numeric columns`;
     body.innerHTML = `
       <div class="analyze-chart-head">
-        <label>X <select data-role="an-particles-x"></select></label>
-        <label>Y <select data-role="an-particles-y"></select></label>
+        <label>X <select data-role="an-scatter-x"></select></label>
+        <label>Y <select data-role="an-scatter-y"></select></label>
       </div>
-      <p class="analyze-scatter-hint">Drag a rectangle on the plot to select particles.</p>
+      <p class="analyze-scatter-hint">Drag a rectangle on the plot to select ${escapeHtml(entityPlural)}.</p>
       <div class="analyze-scatter-wrap">
-        <canvas data-role="an-particles-canvas"></canvas>
-        <div class="analyze-scatter-selrect hidden" data-role="an-particles-selrect"></div>
-        <div class="progress-tooltip hidden" data-role="an-particles-tip"></div>
+        <canvas data-role="an-scatter-canvas"></canvas>
+        <div class="analyze-scatter-selrect hidden" data-role="an-scatter-selrect"></div>
+        <div class="progress-tooltip hidden" data-role="an-scatter-tip"></div>
       </div>
       <div class="analyze-export-row">
-        <span data-role="an-particles-selcount">No selection</span>
-        <input type="text" class="viz-input-sm" data-role="an-particles-export-name" placeholder="selected_particles.star">
-        <button class="btn" data-role="an-particles-export-selected" disabled>Export selected</button>
-        <button class="btn" data-role="an-particles-export-rest" disabled>Export unselected</button>
+        <span data-role="an-scatter-selcount">No selection</span>
+        <input type="text" class="viz-input-sm" data-role="an-scatter-export-name" placeholder="selected_${escapeHtml(entityPlural)}.star">
+        <button class="btn" data-role="an-scatter-export-selected" disabled>Export selected</button>
+        <button class="btn" data-role="an-scatter-export-rest" disabled>Export unselected</button>
       </div>
-      <div class="progress-status" data-role="an-particles-export-status"></div>
+      <div class="progress-status" data-role="an-scatter-export-status"></div>
     `;
-    const xSelect = body.querySelector('[data-role="an-particles-x"]');
-    const ySelect = body.querySelector('[data-role="an-particles-y"]');
+    const xSelect = body.querySelector('[data-role="an-scatter-x"]');
+    const ySelect = body.querySelector('[data-role="an-scatter-y"]');
     currentData.columns.forEach((col) => {
       xSelect.appendChild(new Option(col, col));
       ySelect.appendChild(new Option(col, col));
@@ -3415,14 +3419,14 @@ function renderAnalyzeParticlesTab(content) {
     xSelect.value = currentData.columns[0];
     ySelect.value = currentData.columns[1];
 
-    const canvas = body.querySelector('[data-role="an-particles-canvas"]');
-    const selrect = body.querySelector('[data-role="an-particles-selrect"]');
-    const tip = body.querySelector('[data-role="an-particles-tip"]');
-    const selCount = body.querySelector('[data-role="an-particles-selcount"]');
-    const exportName = body.querySelector('[data-role="an-particles-export-name"]');
-    const exportSelectedBtn = body.querySelector('[data-role="an-particles-export-selected"]');
-    const exportRestBtn = body.querySelector('[data-role="an-particles-export-rest"]');
-    const exportStatus = body.querySelector('[data-role="an-particles-export-status"]');
+    const canvas = body.querySelector('[data-role="an-scatter-canvas"]');
+    const selrect = body.querySelector('[data-role="an-scatter-selrect"]');
+    const tip = body.querySelector('[data-role="an-scatter-tip"]');
+    const selCount = body.querySelector('[data-role="an-scatter-selcount"]');
+    const exportName = body.querySelector('[data-role="an-scatter-export-name"]');
+    const exportSelectedBtn = body.querySelector('[data-role="an-scatter-export-selected"]');
+    const exportRestBtn = body.querySelector('[data-role="an-scatter-export-rest"]');
+    const exportStatus = body.querySelector('[data-role="an-scatter-export-status"]');
 
     function updateSelectionUi() {
       const n = selectedIndices.size;
@@ -3446,13 +3450,15 @@ function renderAnalyzeParticlesTab(content) {
     updateSelectionUi();
 
     async function doExport(complement) {
-      const filename = exportName.value.trim() || (complement ? "unselected_particles.star" : "selected_particles.star");
+      const filename = exportName.value.trim() || `${complement ? "unselected" : "selected"}_${entityPlural}.star`;
       exportStatus.textContent = "Writing…";
       try {
         const result = await api("/api/analyze/export-star", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: currentPath, row_indices: Array.from(selectedIndices), complement, filename }),
+          body: JSON.stringify({
+            path: currentPath, row_indices: Array.from(selectedIndices), complement, filename, block,
+          }),
         });
         exportStatus.textContent = `Wrote ${result.rows.toLocaleString()} rows to ${result.path}`;
       } catch (err) {
@@ -3462,8 +3468,24 @@ function renderAnalyzeParticlesTab(content) {
     exportSelectedBtn.addEventListener("click", () => doExport(false));
     exportRestBtn.addEventListener("click", () => doExport(true));
   }
-  content.querySelector('[data-role="an-particles-load"]').addEventListener("click", load);
+  content.querySelector('[data-role="an-scatter-load"]').addEventListener("click", load);
   pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+}
+
+function renderAnalyzeParticlesTab(content) {
+  renderAnalyzeScatterTab(content, {
+    entityLabel: "Particles", entityPlural: "particles",
+    pathPlaceholder: "Extract/job010/particles.star",
+    scatterEndpoint: "/api/analyze/particle-scatter", block: "particles",
+  });
+}
+
+function renderAnalyzeMicrographsTab(content) {
+  renderAnalyzeScatterTab(content, {
+    entityLabel: "Micrographs", entityPlural: "micrographs",
+    pathPlaceholder: "CtfFind/job003/micrographs_ctf.star",
+    scatterEndpoint: "/api/analyze/micrograph-scatter", block: "micrographs",
+  });
 }
 
 async function openAnalyzePopup() {
@@ -3498,7 +3520,7 @@ async function openAnalyzePopup() {
       </div>
       ${ANALYZE_TABS.slice(1).map((t) => `
       <div class="tab-content" data-tab-content="${t}">
-        ${ANALYZE_CLASSIFICATION_TABS[t] || t === "particles" ? "" : `<p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>`}
+        ${ANALYZE_CLASSIFICATION_TABS[t] || t === "particles" || t === "micrographs" ? "" : `<p class="analyze-coming-soon">${ANALYZE_TAB_LABELS[t]} is coming soon.</p>`}
       </div>`).join("")}
     </div>
   `;
@@ -3510,12 +3532,10 @@ async function openAnalyzePopup() {
     loadedTabs.add(tab);
     if (tab === "pipeline") renderAnalyzePipelineTab(pipelineContent);
     else if (tab === "particles") renderAnalyzeParticlesTab(body.querySelector('[data-tab-content="particles"]'));
+    else if (tab === "micrographs") renderAnalyzeMicrographsTab(body.querySelector('[data-tab-content="micrographs"]'));
     else if (ANALYZE_CLASSIFICATION_TABS[tab]) {
       renderAnalyzeClassificationTab(body.querySelector(`[data-tab-content="${tab}"]`), ANALYZE_CLASSIFICATION_TABS[tab]);
     }
-    // micrographs: no dynamic content yet (static "coming soon" markup
-    // above) -- a later increment adds a loader here, same
-    // lazy-on-first-click pattern as every other tab.
   }
   body.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {

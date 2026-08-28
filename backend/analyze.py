@@ -268,13 +268,20 @@ def read_particle_scatter_columns(project_dir: Path, raw_path: str) -> dict:
 
 def export_star_subset(
     project_dir: Path, source_raw_path: str, row_indices: list[int],
-    complement: bool, out_filename: str,
+    complement: bool, out_filename: str, block: str = "particles",
 ) -> dict:
     """Writes selected (or, if complement=True, everything EXCEPT selected)
-    particle rows to a new STAR file, optics block (and anything else in
-    the source file) carried over unchanged. This is the first STAR-
-    *writing* code in this repo -- everything else here, and in viz.py/
-    progress.py, is read-only.
+    rows of `block` (the "particles" or "micrographs" loop_ table) to a new
+    STAR file, optics block (and anything else in the source file) carried
+    over unchanged. This is the first STAR-*writing* code in this repo --
+    everything else here, and in viz.py/progress.py, is read-only.
+
+    Row indices are always positions in the SOURCE file's own `block` table,
+    re-read fresh here -- for the Micrographs tab specifically, that's the
+    picked STAR's own row order, not the wider merged-with-corrected_
+    micrographs.star view read_micrograph_scatter_columns plots (see that
+    function's own _row_index handling for why the two line up correctly
+    without this function needing to redo any merge itself).
 
     The destination is deliberately never a caller-supplied path the way
     the source is: out_filename is constrained to a bare filename (no `/`,
@@ -304,21 +311,106 @@ def export_star_subset(
         raw = starfile.read(source_path, always_dict=True)
     except Exception as exc:
         raise AnalyzeError(f"cannot read {source_path.name}: {exc}") from exc
-    particles = raw.get("particles")
-    if particles is None or not len(particles):
-        raise AnalyzeError("no particles block to export from")
+    table = raw.get(block)
+    if table is None or not len(table):
+        raise AnalyzeError(f"no {block} block to export from")
 
-    all_indices = set(range(len(particles)))
+    all_indices = set(range(len(table)))
     selected = set(row_indices) & all_indices
     keep = (all_indices - selected) if complement else selected
     if not keep:
         raise AnalyzeError("selection is empty -- nothing to export")
 
-    subset = particles.iloc[sorted(keep)].reset_index(drop=True)
+    subset = table.iloc[sorted(keep)].reset_index(drop=True)
     out_blocks = dict(raw)
-    out_blocks["particles"] = subset
+    out_blocks[block] = subset
     try:
         starfile.write(out_blocks, out_path, overwrite=False)
     except Exception as exc:
         raise AnalyzeError(f"could not write {out_filename}: {exc}") from exc
     return {"path": str(out_path.relative_to(project_dir)), "rows": len(subset)}
+
+
+# --------------------------------------------------------------------------
+# Micrograph scatter plot (Analyze popup's Micrographs tab -- rest of C4).
+# Same "type a path or Browse" input as the Particles tab, but the STAR
+# picked here (typically CTFFind's own micrographs_ctf.star) is joined with
+# each producing MotionCorr job's own corrected_micrographs.star, so
+# CTF-derived and motion-correction-derived columns can be plotted against
+# each other -- same technique CNIO's relion_analyse.py uses
+# (pd.merge(ctf_df, motion_df)), ported here as a plain pandas merge since
+# starfile already returns DataFrames for loop_ blocks.
+# --------------------------------------------------------------------------
+
+# "MotionCorr/job002" out of "MotionCorr/job002/Micrographs/mic_0001.mrc" --
+# RELION's own <JobTypeDir>/job<NNN>/ convention (job_registry.py and
+# progress.py both already rely on the same shape elsewhere in this repo).
+_JOB_DIR_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*/job\d+)/")
+
+
+def read_micrograph_scatter_columns(project_dir: Path, raw_path: str) -> dict:
+    """A picked micrographs STAR's own `micrographs` block, left-joined with
+    every producing MotionCorr job's corrected_micrographs.star (motion
+    columns rlnAccumMotionTotal/Early/Late -- confirmed against
+    MotionCorr::run(), src/motioncorr_runner.cpp ~980-1022) on
+    rlnMicrographName. `_row_index` is stamped onto the picked file's own
+    rows BEFORE the merge, so it survives regardless of how pandas orders
+    the joined result -- export_star_subset re-reads the picked file's own
+    `micrographs` block directly and never sees the merge at all, so the
+    indices this returns must mean "row N of the picked file", not "row N
+    of this merged view"."""
+    import pandas as pd
+    import starfile
+
+    try:
+        path = viz._safe(project_dir, raw_path)
+    except viz.VizError as exc:
+        raise AnalyzeError(str(exc)) from exc
+    try:
+        raw = starfile.read(path, always_dict=True)
+    except Exception as exc:
+        raise AnalyzeError(f"cannot read {path.name}: {exc}") from exc
+
+    micrographs = raw.get("micrographs")
+    if micrographs is None or not len(micrographs) or "rlnMicrographName" not in micrographs.columns:
+        return {"available": False, "columns": [], "rows": []}
+
+    merged = micrographs.copy()
+    merged["_row_index"] = range(len(merged))
+
+    job_dirs: set = set()
+    for name in merged["rlnMicrographName"].astype(str):
+        m = _JOB_DIR_RE.match(name)
+        if m:
+            job_dirs.add(m.group(1))
+    for job_dir in sorted(job_dirs):
+        motion_path = project_dir / job_dir / "corrected_micrographs.star"
+        if not motion_path.is_file():
+            continue
+        try:
+            motion_raw = starfile.read(motion_path, always_dict=True)
+        except Exception:
+            continue
+        motion = motion_raw.get("micrographs")
+        if motion is None or "rlnMicrographName" not in motion.columns:
+            continue
+        # The picked file's own columns always win -- only pull in columns
+        # not already present, besides the join key itself.
+        extra_cols = [c for c in motion.columns if c == "rlnMicrographName" or c not in merged.columns]
+        if len(extra_cols) <= 1:
+            continue  # nothing new to add from this job
+        merged = merged.merge(motion[extra_cols], on="rlnMicrographName", how="left")
+
+    numeric_cols = [
+        c for c in merged.columns
+        if c != "_row_index" and "Name" not in c and pd.api.types.is_numeric_dtype(merged[c])
+    ]
+    if not numeric_cols:
+        return {"available": False, "columns": [], "rows": []}
+
+    rows = []
+    for _, row in merged.iterrows():
+        entry = {c: (None if pd.isna(row[c]) else float(row[c])) for c in numeric_cols}
+        entry["_row_index"] = int(row["_row_index"])
+        rows.append(entry)
+    return {"available": True, "columns": numeric_cols, "rows": rows}

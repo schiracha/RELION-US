@@ -361,3 +361,147 @@ def test_export_writes_into_the_sources_own_directory(tmp_path):
     result = analyze.export_star_subset(tmp_path, "Extract/job010/particles.star", [0, 1], False, "out.star")
     assert result["path"] == "Extract/job010/out.star"
     assert (sub / "out.star").exists()
+
+
+# --------------------------------------------------------------------------
+# read_micrograph_scatter_columns
+# --------------------------------------------------------------------------
+
+
+def _write_ctf_star(path, mic_names, n=None):
+    n = n if n is not None else len(mic_names)
+    starfile.write({
+        "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+        "micrographs": pd.DataFrame({
+            "rlnMicrographName": mic_names,
+            "rlnDefocusU": [10000.0 + i * 50 for i in range(n)],
+            "rlnCtfFigureOfMerit": [0.05 + i * 0.001 for i in range(n)],
+            "rlnOpticsGroup": [1] * n,
+        }),
+    }, path, overwrite=True)
+
+
+def _write_corrected_micrographs_star(path, mic_names):
+    starfile.write({
+        "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+        "micrographs": pd.DataFrame({
+            "rlnMicrographName": mic_names,
+            "rlnAccumMotionTotal": [5.0 + i for i in range(len(mic_names))],
+            "rlnAccumMotionEarly": [1.0] * len(mic_names),
+            "rlnAccumMotionLate": [4.0] * len(mic_names),
+        }),
+    }, path, overwrite=True)
+
+
+def test_micrograph_scatter_missing_file_raises_analyze_error(tmp_path):
+    # Same convention as read_particle_scatter_columns: a genuinely
+    # missing/unreadable file is an AnalyzeError (-> HTTP 400), not a soft
+    # {"available": False} -- that shape is reserved for "the file exists
+    # but has no micrographs block/no rlnMicrographName column".
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.read_micrograph_scatter_columns(tmp_path, "does_not_exist.star")
+
+
+def test_micrograph_scatter_works_without_a_matching_motioncorr_job(tmp_path):
+    # No MotionCorr/jobNNN/corrected_micrographs.star on disk at all -- the
+    # picked file's own columns are still plottable on their own.
+    star = tmp_path / "picked.star"
+    _write_ctf_star(star, ["MotionCorr/job002/Micrographs/mic_0.mrc", "MotionCorr/job002/Micrographs/mic_1.mrc"])
+    result = analyze.read_micrograph_scatter_columns(tmp_path, "picked.star")
+    assert result["available"] is True
+    assert "rlnDefocusU" in result["columns"]
+    assert "rlnAccumMotionTotal" not in result["columns"]
+    assert len(result["rows"]) == 2
+
+
+def test_micrograph_scatter_merges_in_motion_correction_columns(tmp_path):
+    names = [f"MotionCorr/job002/Micrographs/mic_{i}.mrc" for i in range(3)]
+    ctf_star = tmp_path / "CtfFind" / "job003" / "micrographs_ctf.star"
+    ctf_star.parent.mkdir(parents=True)
+    _write_ctf_star(ctf_star, names)
+
+    motion_dir = tmp_path / "MotionCorr" / "job002"
+    motion_dir.mkdir(parents=True)
+    _write_corrected_micrographs_star(motion_dir / "corrected_micrographs.star", names)
+
+    result = analyze.read_micrograph_scatter_columns(tmp_path, "CtfFind/job003/micrographs_ctf.star")
+    assert result["available"] is True
+    assert set(result["columns"]) >= {
+        "rlnDefocusU", "rlnCtfFigureOfMerit", "rlnAccumMotionTotal", "rlnAccumMotionEarly", "rlnAccumMotionLate",
+    }
+    assert len(result["rows"]) == 3
+    row0 = next(r for r in result["rows"] if r["_row_index"] == 0)
+    assert row0["rlnDefocusU"] == 10000.0
+    assert row0["rlnAccumMotionTotal"] == 5.0
+
+
+def test_micrograph_scatter_row_index_survives_the_merge(tmp_path):
+    # A merge can reorder rows -- _row_index must still point back at the
+    # PICKED file's own original row position, since that's what
+    # export_star_subset re-reads and indexes into directly.
+    names = [f"MotionCorr/job002/Micrographs/mic_{i}.mrc" for i in range(5)]
+    ctf_star = tmp_path / "picked.star"
+    _write_ctf_star(ctf_star, names)
+    motion_dir = tmp_path / "MotionCorr" / "job002"
+    motion_dir.mkdir(parents=True)
+    _write_corrected_micrographs_star(motion_dir / "corrected_micrographs.star", names)
+
+    result = analyze.read_micrograph_scatter_columns(tmp_path, "picked.star")
+    by_index = {r["_row_index"]: r for r in result["rows"]}
+    assert set(by_index.keys()) == {0, 1, 2, 3, 4}
+    # picked.star's own row 3 -> rlnDefocusU 10150 (10000 + 3*50)
+    assert by_index[3]["rlnDefocusU"] == 10150.0
+
+
+def test_micrograph_scatter_picked_columns_win_over_merge(tmp_path):
+    # If both files somehow shared a column name, the picked file's own
+    # value must survive, not get silently overwritten by the merge.
+    names = ["MotionCorr/job002/Micrographs/mic_0.mrc"]
+    ctf_star = tmp_path / "picked.star"
+    _write_ctf_star(ctf_star, names)
+    motion_dir = tmp_path / "MotionCorr" / "job002"
+    motion_dir.mkdir(parents=True)
+    starfile.write({
+        "micrographs": pd.DataFrame({
+            "rlnMicrographName": names,
+            "rlnDefocusU": [99999.0],  # collides with the picked file's own column
+            "rlnAccumMotionTotal": [7.0],
+        }),
+    }, motion_dir / "corrected_micrographs.star", overwrite=True)
+
+    result = analyze.read_micrograph_scatter_columns(tmp_path, "picked.star")
+    row = result["rows"][0]
+    assert row["rlnDefocusU"] == 10000.0  # picked file's own value, not 99999.0
+    assert row["rlnAccumMotionTotal"] == 7.0  # still merged in
+
+
+def test_micrograph_scatter_unmatched_micrograph_gets_none_not_dropped(tmp_path):
+    names = ["MotionCorr/job002/Micrographs/mic_only_here.mrc"]
+    ctf_star = tmp_path / "picked.star"
+    _write_ctf_star(ctf_star, names)
+    motion_dir = tmp_path / "MotionCorr" / "job002"
+    motion_dir.mkdir(parents=True)
+    # corrected_micrographs.star exists but has a DIFFERENT micrograph --
+    # a real "this job's history doesn't cover this micrograph" case.
+    _write_corrected_micrographs_star(motion_dir / "corrected_micrographs.star", ["MotionCorr/job002/Micrographs/other.mrc"])
+
+    result = analyze.read_micrograph_scatter_columns(tmp_path, "picked.star")
+    assert len(result["rows"]) == 1  # left join -- the picked row is kept, not dropped
+    assert result["rows"][0]["rlnAccumMotionTotal"] is None
+
+
+def test_micrograph_scatter_path_escaping_project_dir_raises(tmp_path):
+    outside = tmp_path.parent / "outside_mics.star"
+    _write_ctf_star(outside, ["mic_0.mrc"])
+    with pytest.raises(analyze.AnalyzeError):
+        analyze.read_micrograph_scatter_columns(tmp_path, str(outside))
+
+
+def test_export_micrographs_block_round_trips(tmp_path):
+    star = tmp_path / "picked.star"
+    _write_ctf_star(star, [f"mic_{i}.mrc" for i in range(4)])
+    result = analyze.export_star_subset(tmp_path, "picked.star", [1, 3], False, "mic_subset.star", block="micrographs")
+    assert result["rows"] == 2
+    reread = starfile.read(tmp_path / "mic_subset.star", always_dict=True)
+    assert len(reread["micrographs"]) == 2
+    assert sorted(reread["micrographs"]["rlnDefocusU"].tolist()) == [10050.0, 10150.0]

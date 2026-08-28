@@ -1077,21 +1077,37 @@ def analyze_particle_scatter(req: AnalyzeScatterRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/analyze/micrograph-scatter")
+def analyze_micrograph_scatter(req: AnalyzeScatterRequest):
+    """Same request shape as particle-scatter above; see
+    analyze.read_micrograph_scatter_columns for the corrected_micrographs.star
+    merge this one does that the particle version doesn't need."""
+    try:
+        return analyze.read_micrograph_scatter_columns(run_manager.project_dir, req.path)
+    except analyze.AnalyzeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class AnalyzeExportRequest(BaseModel):
     path: str
     row_indices: list[int]
     complement: bool = False
     filename: str
+    block: str = "particles"
 
 
 @app.post("/api/analyze/export-star")
 def analyze_export_star(req: AnalyzeExportRequest):
     """This app's first STAR-*writing* endpoint -- see
     analyze.export_star_subset's own docstring for why the destination is
-    a bare filename, never a path."""
+    a bare filename, never a path. `block` is "particles" (default) or
+    "micrographs" -- which loop_ table in the source file row_indices
+    refer to."""
+    if req.block not in ("particles", "micrographs"):
+        raise HTTPException(status_code=400, detail="block must be 'particles' or 'micrographs'")
     try:
         return analyze.export_star_subset(
-            run_manager.project_dir, req.path, req.row_indices, req.complement, req.filename,
+            run_manager.project_dir, req.path, req.row_indices, req.complement, req.filename, req.block,
         )
     except analyze.AnalyzeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -3,23 +3,27 @@ Playwright test for the Analyze popup (Menu > Tools > Analyze) -- not a job
 (never appears in the Command Center, nothing here polls or streams output),
 inspired by CNIO_Relion_Tools' relion_analyse.py (see NOTICE.md). Pipeline
 (C1), 2D/3D Classification + 3D Refine (C2), the FSC chart + viewing-
-direction heatmap (C3), and the Particles tab's scatter plot with rectangle-
-select + STAR export (C4) are wired; only the Micrographs tab is still a
-placeholder. This suite covers: the popup shell (all six tabs present), the
-Pipeline tab reusing Command Center's own lineage-graph renderer plus the
-click-for-job-summary panel, the Particles tab's path input + axis pickers +
-canvas scatter + drag-to-select + export (this repo's first STAR-*writing*
-code, plus its path/filename-traversal guards), the 2D Classification tab's
-run picker + convergence/class-distribution charts, and the 3D
-Classification tab's additional FSC chart (with its FSC/SSNR metric picker)
-and on-demand viewing-direction heatmap (reusing the Progress tab's own
-drawOrientationHeatmap and /orientation-distribution endpoint).
+direction heatmap (C3), and the Micrographs and Particles tabs' scatter
+plots with rectangle-select + STAR export (C4) are all wired -- every tab
+has real content now. This suite covers: the popup shell (all six tabs
+present), the Pipeline tab reusing Command Center's own lineage-graph
+renderer plus the click-for-job-summary panel, the Particles and
+Micrographs tabs' shared scatter widget (path input + axis pickers + canvas
+scatter + drag-to-select + export -- this repo's first STAR-*writing* code,
+plus its path/filename-traversal guards; Micrographs additionally checks
+that MotionCorr's motion-tracking columns get merged in), the 2D
+Classification tab's run picker + convergence/class-distribution charts,
+and the 3D Classification tab's additional FSC chart (with its FSC/SSNR
+metric picker) and on-demand viewing-direction heatmap (reusing the
+Progress tab's own drawOrientationHeatmap and /orientation-distribution
+endpoint).
 
 Needs a live backend already pointed at run_tests.sh's branching fixture
 project (same one test_network_branching.py uses -- make_legacy_branchy_project)
-plus a real Class2D run, a real Class3D run, and a real particles.star
-(add_analyze_classification_run), so the Pipeline tab's node/edge shape and
-every wired tab's own data have known-correct fixtures to check against.
+plus a real Class2D run, a real Class3D run, a real particles.star, and a
+CtfFind+MotionCorr micrographs pair (add_analyze_classification_run), so the
+Pipeline tab's node/edge shape and every wired tab's own data have
+known-correct fixtures to check against.
 
 Usage: python3 test_analyze.py [base_url] [project_dir]
 """
@@ -113,39 +117,37 @@ def main():
         page.wait_for_timeout(200)
         check("Close button hides the summary panel again", not summary.is_visible())
 
-        # ---- unimplemented tabs say so plainly rather than showing nothing ----
         win.locator('.tab-btn[data-tab="micrographs"]').click()
         page.wait_for_timeout(200)
-        check("Micrographs tab shows a coming-soon placeholder",
-              "coming soon" in win.locator('[data-tab-content="micrographs"]').inner_text().lower())
-        check("Pipeline tab content is no longer the active one",
+        check("Pipeline tab content is no longer the active one after switching tabs",
               "active" not in (win.locator('[data-tab-content="pipeline"]').get_attribute("class") or ""))
 
-        # ---- Particles tab: path input (not a run picker -- see
-        # renderAnalyzeParticlesTab's own docstring) + canvas scatter, against
-        # run_tests.sh's real particles.star fixture (Extract/job024) ----
+        # ---- Particles tab: path input (not a run picker -- both scatter
+        # tabs share renderAnalyzeScatterTab, see its own docstring) + canvas
+        # scatter, against run_tests.sh's real particles.star fixture
+        # (Extract/job024) ----
         win.locator('.tab-btn[data-tab="particles"]').click()
         page.wait_for_timeout(300)
         particles_tab = win.locator('[data-tab-content="particles"]')
-        particles_tab.locator('[data-role="an-particles-path"]').fill("Extract/job024/particles.star")
-        particles_tab.locator('[data-role="an-particles-load"]').click()
+        particles_tab.locator('[data-role="an-scatter-path"]').fill("Extract/job024/particles.star")
+        particles_tab.locator('[data-role="an-scatter-load"]').click()
         page.wait_for_timeout(700)
-        p_status = particles_tab.locator('[data-role="an-particles-status"]').inner_text()
+        p_status = particles_tab.locator('[data-role="an-scatter-status"]').inner_text()
         check(f"Particles tab loads the fixture STAR ({p_status!r})", "40 particles" in p_status)
-        x_options = particles_tab.locator('[data-role="an-particles-x"] option').all_inner_texts()
+        x_options = particles_tab.locator('[data-role="an-scatter-x"] option').all_inner_texts()
         check(f"Axis pickers exclude Name columns ({x_options})",
               "rlnMicrographName" not in x_options and "rlnImageName" not in x_options
               and "rlnCoordinateX" in x_options)
         check("Scatter canvas renders",
-              particles_tab.locator('[data-role="an-particles-canvas"]').count() == 1)
-        canvas_box = particles_tab.locator('[data-role="an-particles-canvas"]').bounding_box()
+              particles_tab.locator('[data-role="an-scatter-canvas"]').count() == 1)
+        canvas_box = particles_tab.locator('[data-role="an-scatter-canvas"]').bounding_box()
         check(f"Canvas has real drawn dimensions ({canvas_box})",
               canvas_box is not None and canvas_box["width"] > 100 and canvas_box["height"] > 100)
 
         # ---- rectangle-select + export (C4's write path) ----
-        sel_count = particles_tab.locator('[data-role="an-particles-selcount"]')
-        export_selected_btn = particles_tab.locator('[data-role="an-particles-export-selected"]')
-        export_rest_btn = particles_tab.locator('[data-role="an-particles-export-rest"]')
+        sel_count = particles_tab.locator('[data-role="an-scatter-selcount"]')
+        export_selected_btn = particles_tab.locator('[data-role="an-scatter-export-selected"]')
+        export_rest_btn = particles_tab.locator('[data-role="an-scatter-export-rest"]')
         check("No selection at first", sel_count.inner_text() == "No selection")
         check("Export buttons start disabled", export_selected_btn.is_disabled() and export_rest_btn.is_disabled())
 
@@ -163,11 +165,11 @@ def main():
               "selected" in sel_text and "No selection" not in sel_text)
         check("Export selected becomes enabled once something is selected", not export_selected_btn.is_disabled())
 
-        name_input = particles_tab.locator('[data-role="an-particles-export-name"]')
+        name_input = particles_tab.locator('[data-role="an-scatter-export-name"]')
         name_input.fill("browser_test_export.star")
         export_selected_btn.click()
         page.wait_for_timeout(500)
-        export_status = particles_tab.locator('[data-role="an-particles-export-status"]').inner_text()
+        export_status = particles_tab.locator('[data-role="an-scatter-export-status"]').inner_text()
         check(f"Export writes a real file and reports it ({export_status!r})",
               "Wrote" in export_status and "browser_test_export.star" in export_status)
 
@@ -186,7 +188,7 @@ def main():
             f"{BASE_URL}/api/analyze/export-star",
             data=json.dumps({
                 "path": "Extract/job024/particles.star", "row_indices": [0, 1],
-                "complement": False, "filename": "browser_test_export.star",
+                "complement": False, "filename": "browser_test_export.star", "block": "particles",
             }),
             headers={"Content-Type": "application/json"},
         )
@@ -201,7 +203,7 @@ def main():
             f"{BASE_URL}/api/analyze/export-star",
             data=json.dumps({
                 "path": "Extract/job024/particles.star", "row_indices": [0],
-                "complement": False, "filename": "../escape.star",
+                "complement": False, "filename": "../escape.star", "block": "particles",
             }),
             headers={"Content-Type": "application/json"},
         )
@@ -221,6 +223,64 @@ def main():
         )
         check(f"A path outside the project is refused, not read (HTTP {escape_resp.status})",
               escape_resp.status == 400)
+
+        # ---- Micrographs tab: same shared scatter widget, against
+        # run_tests.sh's CtfFind/job003 fixture -- its rlnMicrographName
+        # values point back at MotionCorr/job002/, so the merged column
+        # list should include MotionCorr's own motion-tracking fields on
+        # top of CtfFind's own (add_analyze_classification_run) ----
+        win.locator('.tab-btn[data-tab="micrographs"]').click()
+        page.wait_for_timeout(300)
+        mics_tab = win.locator('[data-tab-content="micrographs"]')
+        mics_tab.locator('[data-role="an-scatter-path"]').fill("CtfFind/job003/micrographs_ctf.star")
+        mics_tab.locator('[data-role="an-scatter-load"]').click()
+        page.wait_for_timeout(700)
+        m_status = mics_tab.locator('[data-role="an-scatter-status"]').inner_text()
+        check(f"Micrographs tab loads the fixture STAR ({m_status!r})", "6 micrographs" in m_status)
+        m_x_options = mics_tab.locator('[data-role="an-scatter-x"] option').all_inner_texts()
+        check(f"Axis pickers exclude Name columns and include CtfFind's own columns ({m_x_options})",
+              "rlnMicrographName" not in m_x_options and "rlnDefocusU" in m_x_options)
+        check(f"Merged-in MotionCorr columns appear too ({m_x_options})",
+              "rlnAccumMotionTotal" in m_x_options and "rlnAccumMotionEarly" in m_x_options)
+        check("Micrographs scatter canvas renders",
+              mics_tab.locator('[data-role="an-scatter-canvas"]').count() == 1)
+        m_canvas_box = mics_tab.locator('[data-role="an-scatter-canvas"]').bounding_box()
+        check(f"Micrographs canvas has real drawn dimensions ({m_canvas_box})",
+              m_canvas_box is not None and m_canvas_box["width"] > 100 and m_canvas_box["height"] > 100)
+
+        m_sel_count = mics_tab.locator('[data-role="an-scatter-selcount"]')
+        m_export_selected_btn = mics_tab.locator('[data-role="an-scatter-export-selected"]')
+        mcx, mcy = m_canvas_box["x"], m_canvas_box["y"]
+        page.mouse.move(mcx + 5, mcy + 5)
+        page.mouse.down()
+        page.mouse.move(mcx + m_canvas_box["width"] - 5, mcy + m_canvas_box["height"] - 5, steps=5)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        m_sel_text = m_sel_count.inner_text()
+        check(f"Dragging a rectangle over the whole plot selects micrographs ({m_sel_text!r})",
+              "selected" in m_sel_text and "No selection" not in m_sel_text)
+
+        m_name_input = mics_tab.locator('[data-role="an-scatter-export-name"]')
+        m_name_input.fill("browser_test_mic_export.star")
+        m_export_selected_btn.click()
+        page.wait_for_timeout(500)
+        m_export_status = mics_tab.locator('[data-role="an-scatter-export-status"]').inner_text()
+        check(f"Micrographs export writes a real file and reports it ({m_export_status!r})",
+              "Wrote" in m_export_status and "browser_test_mic_export.star" in m_export_status)
+
+        # export-star validates block against an allowlist -- neither
+        # "particles" nor "micrographs" trusts a caller-supplied arbitrary
+        # string for which STAR block to read/write.
+        bad_block_resp = page.request.post(
+            f"{BASE_URL}/api/analyze/export-star",
+            data=json.dumps({
+                "path": "CtfFind/job003/micrographs_ctf.star", "row_indices": [0],
+                "complement": False, "filename": "bad_block.star", "block": "optics",
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        check(f"An unrecognized export block is refused (HTTP {bad_block_resp.status})",
+              bad_block_resp.status == 400)
 
         # ---- 2D Classification tab: run picker + convergence + distribution
         # charts, against job022's 3 real iterations (add_analyze_classification_run) ----

@@ -459,15 +459,21 @@ STAR
 # Classification tab's convergence/class-distribution charts), and a
 # Class3D job additionally carrying model_class_N FSC/SSNR sub-blocks and a
 # run_it###_data.star (3D Classification tab's FSC chart + viewing-
-# direction heatmap). STAR shapes match real RELION output (list blocks for
-# model_general/optimiser_general, loop_ for model_classes/model_class_N)
-# -- same discipline test_progress.py's own fixtures use.
+# direction heatmap), plus an Extract/job024/particles.star (Particles tab)
+# and a CtfFind/job003 + MotionCorr/job002 pair (Micrographs tab -- the
+# picked file's rlnMicrographName values point back at MotionCorr/job002/
+# so its corrected_micrographs.star gets merged in). STAR shapes match real
+# RELION output (list blocks for model_general/optimiser_general, loop_ for
+# model_classes/model_class_N/micrographs) -- same discipline
+# test_progress.py's own fixtures use.
 add_analyze_classification_run() {
   local proj="$1"
   local job2d="$proj/Class2D/job022"
   local job3d="$proj/Class3D/job023"
   local job_extract="$proj/Extract/job024"
-  mkdir -p "$job2d" "$job3d" "$job_extract" "$proj/.relion_us"
+  local job_motioncorr="$proj/MotionCorr/job002"
+  local job_ctffind="$proj/CtfFind/job003"
+  mkdir -p "$job2d" "$job3d" "$job_extract" "$job_motioncorr" "$job_ctffind" "$proj/.relion_us"
   cat > "$proj/.relion_us/run_history.json" <<JSON
 [{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
   "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
@@ -480,13 +486,13 @@ add_analyze_classification_run() {
   "started_at": 1700000200.0, "ended_at": 1700000300.0, "field_values": {},
   "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
 JSON
-  "$PYTHON" - "$job2d" "$job3d" "$job_extract" <<'PY'
+  "$PYTHON" - "$job2d" "$job3d" "$job_extract" "$job_motioncorr" "$job_ctffind" <<'PY'
 import sys
 import numpy as np
 import pandas as pd
 import starfile
 
-job2d, job3d, job_extract = sys.argv[1], sys.argv[2], sys.argv[3]
+job2d, job3d, job_extract, job_motioncorr, job_ctffind = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 
 nc = 3
 for it in range(1, 4):
@@ -572,6 +578,30 @@ starfile.write({
         "rlnOpticsGroup": [1] * n_p,
     }),
 }, f"{job_extract}/particles.star", overwrite=True)
+
+# For the Micrographs tab (C4) -- a CtfFind-style picked STAR whose
+# rlnMicrographName values point back at MotionCorr/job002/, so
+# read_micrograph_scatter_columns' job-dir regex finds and merges in
+# corrected_micrographs.star's own motion-tracking columns.
+n_m = 6
+mic_names = [f"MotionCorr/job002/mic_{i}.mrc" for i in range(n_m)]
+starfile.write({
+    "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+    "micrographs": pd.DataFrame({
+        "rlnMicrographName": mic_names,
+        "rlnDefocusU": rng.normal(15000, 2000, n_m),
+        "rlnCtfMaxResolution": rng.uniform(3.0, 8.0, n_m),
+        "rlnOpticsGroup": [1] * n_m,
+    }),
+}, f"{job_ctffind}/micrographs_ctf.star", overwrite=True)
+starfile.write({
+    "micrographs": pd.DataFrame({
+        "rlnMicrographName": mic_names,
+        "rlnAccumMotionTotal": rng.uniform(10.0, 60.0, n_m),
+        "rlnAccumMotionEarly": rng.uniform(2.0, 10.0, n_m),
+        "rlnAccumMotionLate": rng.uniform(5.0, 50.0, n_m),
+    }),
+}, f"{job_motioncorr}/corrected_micrographs.star", overwrite=True)
 PY
 }
 
