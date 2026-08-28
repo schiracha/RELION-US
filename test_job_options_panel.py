@@ -331,6 +331,65 @@ def main():
 
         put_settings({"job_defaults.nr_mpi": None})  # leave clean for any later suite
 
+        # ---- Settings popup driven through the real DOM ----
+        # Everything above uses put_settings() (a raw fetch PUT) deliberately,
+        # to set up state without exercising the popup's own UI. This section
+        # is the other half: open it via the actual menu, fill a field, click
+        # Save, and confirm the value round-trips through the real Save
+        # button -- not just the API.
+        def open_settings_popup():
+            page.locator("#menuBtn").click()
+            page.wait_for_timeout(200)
+            page.locator("#menuSettingsBtn").click()
+            page.wait_for_selector(".settings-winbox", timeout=5000)
+            return page.locator(".settings-winbox")
+
+        settings = open_settings_popup()
+        mpi_field = settings.locator('input[data-key="job_defaults.nr_mpi"]')
+        check("Settings popup opens with the MPI field empty (cleaned up above)",
+              mpi_field.input_value() == "")
+        mpi_field.fill("6")
+        settings.locator('[data-role="save"]').click()
+        # openSettingsPopup()'s save handler awaits the PUT then calls
+        # win.close() synchronously, and WinBox.close() removes the popup's
+        # DOM node immediately (no animation/setTimeout) -- so wait for that
+        # removal rather than a guessed sleep.
+        page.wait_for_selector(".settings-winbox", state="detached", timeout=5000)
+        check("Settings popup closes itself after a successful Save",
+              page.locator(".settings-winbox").count() == 0)
+
+        settings = open_settings_popup()
+        mpi_field = settings.locator('input[data-key="job_defaults.nr_mpi"]')
+        check("Reopened Settings popup shows the value saved via the real Save button (6)",
+              mpi_field.input_value() == "6")
+
+        settings.locator('[data-role="cancel"]').click()
+        page.wait_for_selector(".settings-winbox", state="detached", timeout=5000)
+
+        # Cancel must not persist an unsaved change (a different field, so
+        # this doesn't disturb the nr_mpi value just verified above). Pin the
+        # baseline via put_settings() first -- reading whatever value happens
+        # to already be in the field wouldn't distinguish "Cancel worked"
+        # from "Cancel is broken but the field already held the new value".
+        put_settings({"job_defaults.nr_threads": 3})
+        settings = open_settings_popup()
+        threads_field = settings.locator('input[data-key="job_defaults.nr_threads"]')
+        check("Threads field shows the known baseline before the Cancel check (3)",
+              threads_field.input_value() == "3")
+        threads_field.fill("99")
+        settings.locator('[data-role="cancel"]').click()
+        page.wait_for_selector(".settings-winbox", state="detached", timeout=5000)
+
+        settings = open_settings_popup()
+        threads_field = settings.locator('input[data-key="job_defaults.nr_threads"]')
+        check("Cancel does not persist an unsaved change (still the baseline 3, not 99)",
+              threads_field.input_value() == "3")
+        settings.locator('[data-role="cancel"]').click()
+        page.wait_for_selector(".settings-winbox", state="detached", timeout=5000)
+        put_settings({"job_defaults.nr_threads": None})  # leave clean for any later suite
+
+        put_settings({"job_defaults.nr_mpi": None})  # leave clean for any later suite
+
         browser.close()
 
     print()
