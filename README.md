@@ -771,7 +771,13 @@ the tab layout and technique — not source — of `relion_analyse.py` from
 [CNIO_Relion_Tools](https://github.com/cryoEM-CNIO/CNIO_Relion_Tools)
 (cryoEM-CNIO organization, GPL-3.0); every chart in it is this app's own
 hand-rolled SVG/canvas rendering, built on none of that project's Dash/
-Plotly/Cytoscape stack.
+Plotly/Cytoscape stack. The tomogram/particle-pick visualizer likewise ports
+the interaction model — tri-view slice layout, pick-overlay sizing rule,
+percentile contrast stretch — of
+[DeepETPicker](https://github.com/cbmi-group/DeepETPicker)'s own picker GUI
+(cbmi-group, GPL-3.0), reimplemented for the browser instead of its desktop
+Qt/pyqtgraph app; see "Tomogram / particle-pick visualizer" in
+`docs/ARCHITECTURE.md` for the point-by-point correspondence.
 
 `NOTICE.md` has the full attribution, what was taken from where, and the
 third-party format/dependency situation. RELION-US is an independent project,

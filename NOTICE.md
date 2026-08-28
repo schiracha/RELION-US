@@ -76,6 +76,39 @@ file-write technique. See the in-code comments in `backend/analyze.py` and
 RELION-US is not produced, endorsed, or supported by CNIO or the authors of
 CNIO_Relion_Tools.
 
+## Tomogram/particle-pick visualizer, design and technique (DeepETPicker, GPL-3.0)
+
+The tomogram/particle-pick visualizer ("🔍 Visualize" in the top bar)
+reproduces the *interaction model* of DeepETPicker's own picker GUI —
+three linked orthogonal slice views, click/wheel navigation, and the
+pick-overlay sizing rule — in a browser rather than a desktop Qt/pyqtgraph
+app, so it works on a remote HPC login node with only a browser tab. It is
+part of
+
+    DeepETPicker
+    cbmi-group organization
+    https://github.com/cbmi-group/DeepETPicker
+    Licensed under the GNU General Public License, version 3.0
+
+No source from that project is copied into this repository; `backend/viz.py`
+and `frontend/app.js`'s viewer code are this app's own implementation,
+verified against `github.com/cbmi-group/DeepETPicker`'s `main.py` /
+`utils/utils.py`. What was ported is the *technique*: the tri-view layout
+(XY main panel, ZY/XZ side panels sharing one crosshair), the
+particle-overlay rule (a pick appears on every slice within ±(diameter/2)
+of its centre, with radius `√(r² − Δ²)`), and the default percentile-based
+contrast stretch. See `docs/ARCHITECTURE.md`'s "Tomogram / particle-pick
+visualizer" section and the in-code comments at the top of `backend/viz.py`
+for the specific correspondence, and citation:
+
+    Liu G, Niu T, Qiu M, Zhu Y, Sun F, Yang G. DeepETPicker: Fast and
+    accurate 3D particle picking for cryo-electron tomography using weakly
+    supervised deep learning. Nat Commun. 2024;15:2090.
+    DOI: 10.1038/s41467-024-46041-0
+
+RELION-US is not produced, endorsed, or supported by the cbmi-group or the
+authors of DeepETPicker.
+
 ## Third-party file formats
 
 The import bridges read and write file formats belonging to other packages —
