@@ -405,10 +405,17 @@ class StartRunRequest(BaseModel):
 
 @app.post("/api/runs")
 async def start_run(req: StartRunRequest):
-    if req.overwrite_run_id:
-        # Overwriting means re-running into that job's own directory. For a job
-        # RELION owns, that would silently replace results its pipeline still
-        # describes, with no way for this app to update RELION's record.
+    if req.overwrite_run_id and not run_manager.pipeline_sync_enabled():
+        # Overwriting means re-running into that job's own directory. For a
+        # job RELION owns, that used to always mean silently replacing
+        # results its pipeline still describes -- but with sync on,
+        # start_subprocess_job's overwrite branch (job_runner.py) re-uses
+        # the SAME process row via pipeline_bridge.set_process_status
+        # (matched by directory path, not by who originally registered the
+        # row), the same mechanism that already keeps this app's own jobs'
+        # RELION-recorded status correct across an Overwrite. Only block
+        # when sync is off, since then there really is no way for this app
+        # to update RELION's record, same reasoning as before.
         _reject_relion_run(req.overwrite_run_id, "overwritten")
 
     if req.internal_name in CUSTOM_JOB_DEFINITIONS:
@@ -460,20 +467,26 @@ async def start_run(req: StartRunRequest):
 
 
 def _reject_relion_run(run_id: str, action: str) -> None:
-    """Imported RELION jobs are read-only here.
-
-    RELION-US never writes `default_pipeline.star`, so it cannot keep RELION's
-    own record straight if it aborts, re-runs or deletes a job RELION owns.
-    Refusing is better than half-doing it and leaving the project's pipeline
-    describing something that is no longer true.
+    """Imported RELION jobs are read-only here, for actions this app has no
+    safe way to make RELION's own pipeline record agree with: abort (a
+    still-running job's real completion status), resume, and delete (its
+    process row and node/edge tables would be gone from disk but still
+    describe something once true, with no relion_pipeliner verb to remove
+    a process cleanly). Overwrite is the one exception to this whole
+    function -- see start_run's own comment for why it's only gated on
+    pipeline sync being on, not blocked outright, and calls this only when
+    sync is off. alias/note edits don't call this at all (see the PATCH
+    handler below) -- both are this app's own local metadata, stored in
+    .relion_us/, never written into RELION's pipeline file, so there is
+    nothing here for them to leave inconsistent.
     """
     if JobRunManager.is_relion_run(run_id):
         raise HTTPException(
             status_code=409,
             detail=(
                 f"This job was run in RELION itself, not in RELION-US, so it "
-                f"cannot be {action} from here — RELION-US doesn't write "
-                f"RELION's pipeline file and can't keep its record consistent. "
+                f"cannot be {action} from here — this app has no safe way to "
+                f"keep RELION's own pipeline record consistent with that. "
                 f"Use RELION's own GUI for that, or re-run the job here as a "
                 f"new job."
             ),
@@ -537,7 +550,19 @@ async def update_run(run_id: str, req: RunUpdateRequest):
     one call; each is applied in turn.
 
     Everything is validated before anything is written, so a rejected status
-    can't leave the alias/note edits from the same call partially applied."""
+    can't leave the alias/note edits from the same call partially applied.
+
+    alias/note are exempt from the RELION-native read-only gate that status
+    is not: both are purely this app's own local metadata
+    (job_runner.JobRunManager.set_alias/set_note, "Real RELION 'X' job
+    action" only in the sense of matching what that button does, not in
+    writing anything into RELION's own pipeline file) -- renaming or
+    annotating a job here can never leave RELION's record describing
+    something untrue, because RELION's record never gets touched by it.
+    status is different: RELION's own pipeline still considers itself the
+    authority on THIS job's real completion state, so this app manually
+    overriding it here would be exactly the kind of inconsistency the gate
+    exists to prevent."""
     if req.alias is None and req.note is None and req.status is None:
         raise HTTPException(
             status_code=400,
@@ -551,8 +576,9 @@ async def update_run(run_id: str, req: RunUpdateRequest):
                 f"(got {req.status!r})"
             ),
         )
+    if req.status is not None:
+        _reject_relion_run(run_id, "marked finished or failed")
 
-    _reject_relion_run(run_id, "edited")
     updated: dict | None = None
     if req.alias is not None:
         updated = run_manager.set_alias(run_id, req.alias)

@@ -214,8 +214,25 @@ start_backend() {
   # subshell leaves uvicorn itself running -- the port stays busy and the next
   # run silently talks to a backend pointed at the wrong project.
   local stub_path=""
+  local sanitized_path="$PATH"
   if [[ -z "${RELION_US_REAL_BINARIES:-}" ]]; then
     stub_path="$(make_stub_bin)"
+    # project_manager.pipeline_sync_setting now defaults to True -- without
+    # this, a REAL relion_pipeliner elsewhere on PATH (this dev machine has
+    # one installed) would make every job a browser test runs actually
+    # attempt real pipeline registration: different job numbering (RELION's
+    # own counter, not this app's), real default_pipeline.star writes, and
+    # the "close any native RELION GUI" confirm dialog popping up mid-test.
+    # The stub bin dir above never includes a relion_pipeliner, so this only
+    # ever strips a REAL one found further down PATH. Not done in
+    # RELION_US_REAL_BINARIES mode -- testing sync against genuine RELION
+    # there is the whole point.
+    local real_pipeliner; real_pipeliner="$(command -v relion_pipeliner 2>/dev/null || true)"
+    if [[ -n "$real_pipeliner" ]]; then
+      local real_dir; real_dir="$(dirname "$real_pipeliner")"
+      sanitized_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vFx "$real_dir" | tr '\n' ':')"
+      sanitized_path="${sanitized_path%:}"
+    fi
   else
     stub_path="$RELION_US_REAL_BINARIES"
   fi
@@ -223,7 +240,7 @@ start_backend() {
   (
     cd "$proj" || exit 1
     export XDG_CONFIG_HOME="$TMPROOT/$name-config"
-    export PATH="$stub_path:$PATH"
+    export PATH="$stub_path:$sanitized_path"
     exec "$PYTHON" -m uvicorn main:app --host 127.0.0.1 --port "$port" \
       --app-dir "$PWD_APP/backend" > "$TMPROOT/$name.log" 2>&1
   ) &

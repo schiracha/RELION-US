@@ -620,3 +620,77 @@ def test_global_settings_unwritable_config_dir_does_not_raise(recents_home, monk
     monkeypatch.setattr(project_manager.Path, "write_text", boom)
     result = project_manager.save_global_settings({"job_defaults.nr_mpi": 4})   # must not raise
     assert result["job_defaults.nr_mpi"] == 4   # returns the merged value even though the write failed
+
+
+# --------------------------------------------------------------------------
+# Two-way pipeline sync setting
+# --------------------------------------------------------------------------
+
+
+def test_pipeline_sync_defaults_on(tmp_path):
+    assert project_manager.pipeline_sync_setting(tmp_path) is True
+
+
+def test_pipeline_sync_can_be_turned_off_explicitly(tmp_path):
+    project_manager.set_pipeline_sync(tmp_path, False)
+    assert project_manager.pipeline_sync_setting(tmp_path) is False
+
+
+def test_pipeline_sync_setting_is_per_project(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    project_manager.set_pipeline_sync(a, False)
+    assert project_manager.pipeline_sync_setting(a) is False
+    assert project_manager.pipeline_sync_setting(b) is True   # untouched, still the default
+
+
+# --------------------------------------------------------------------------
+# Local alias/note overlay for a RELION-native job (see set_relion_overlay's
+# own module comment for why this stays local rather than writing into
+# RELION's own files/symlinks).
+# --------------------------------------------------------------------------
+
+
+def test_relion_overlay_starts_empty(tmp_path):
+    assert project_manager.load_relion_overlays(tmp_path) == {}
+
+
+def test_relion_overlay_set_then_load_round_trips(tmp_path):
+    project_manager.set_relion_overlay(tmp_path, "relion:job001", alias="my_alias")
+    assert project_manager.load_relion_overlays(tmp_path) == {
+        "relion:job001": {"alias": "my_alias"}}
+
+
+def test_relion_overlay_setting_one_field_does_not_clobber_the_other(tmp_path):
+    project_manager.set_relion_overlay(tmp_path, "relion:job001", alias="my_alias")
+    project_manager.set_relion_overlay(tmp_path, "relion:job001", note="a note")
+    assert project_manager.load_relion_overlays(tmp_path) == {
+        "relion:job001": {"alias": "my_alias", "note": "a note"}}
+
+
+def test_relion_overlay_is_keyed_per_run_id(tmp_path):
+    project_manager.set_relion_overlay(tmp_path, "relion:job001", alias="first")
+    project_manager.set_relion_overlay(tmp_path, "relion:job002", alias="second")
+    overlays = project_manager.load_relion_overlays(tmp_path)
+    assert overlays["relion:job001"]["alias"] == "first"
+    assert overlays["relion:job002"]["alias"] == "second"
+
+
+def test_relion_overlay_explicit_empty_alias_is_stored_as_a_present_key(tmp_path):
+    """An explicitly-cleared alias ("") must be distinguishable from a
+    run_id that was never touched at all -- job_runner._relion_pipeline_
+    entries relies on "alias" in overlay, not overlay["alias"], to know
+    which of the two it's looking at."""
+    project_manager.set_relion_overlay(tmp_path, "relion:job001", alias="")
+    overlays = project_manager.load_relion_overlays(tmp_path)
+    assert "alias" in overlays["relion:job001"]
+    assert overlays["relion:job001"]["alias"] == ""
+
+
+def test_relion_overlay_corrupt_file_does_not_raise(tmp_path):
+    marker = tmp_path / project_manager.MARKER_DIRNAME
+    marker.mkdir()
+    (marker / project_manager.RELION_OVERLAY_FILENAME).write_text("not json")
+    assert project_manager.load_relion_overlays(tmp_path) == {}

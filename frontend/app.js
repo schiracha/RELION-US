@@ -1036,10 +1036,14 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   function refreshToolbarState() {
     const hasRun = !!currentRun;
     const status = hasRun ? currentRun.status : null;
-    // A job imported from RELION's own pipeline: this app didn't run it and
-    // doesn't write RELION's pipeline file, so it can't abort, re-run into,
-    // rename or delete it without leaving RELION's record describing
-    // something untrue. Browsing its outputs and settings is fine.
+    // A job imported from RELION's own pipeline: this app didn't run it,
+    // so abort/delete stay blocked outright (no safe way to keep RELION's
+    // own record consistent with either), and Overwrite only works with
+    // RELION sync on (see overwriteBlockedByRelion below). Rename/note are
+    // NOT blocked -- both are a purely local overlay for these jobs (see
+    // job_runner.set_alias/set_note), never written into RELION's own
+    // files, so they can never leave its record describing something
+    // untrue. Browsing outputs/settings is always fine regardless.
     const fromRelion = hasRun && currentRun.source === "relion";
     jobNameDisplay.textContent = hasRun ? currentRun.job_name : displayName;
     // Open Picker is always available once the job exists, regardless of
@@ -1059,7 +1063,23 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // clean session in the same slot" (see custom_jobs.run_manual_pick),
     // meaningful at any point.
     const overwriteBlockedByStatus = status === "running" && !def.is_picker;
-    overwriteBtn.hidden = !hasRun || fromRelion || overwriteBlockedByStatus;
+    // A RELION-native job can be overwritten too, but only with sync on --
+    // start_subprocess_job's overwrite branch (job_runner.py) re-uses the
+    // SAME process row via pipeline_bridge.set_process_status, matched by
+    // directory path regardless of who originally registered the row, the
+    // same mechanism that already keeps this app's own jobs' RELION-
+    // recorded status correct across an Overwrite. Without sync there's no
+    // way to update RELION's own record, so it stays blocked (matches
+    // main.py's start_run, which applies the identical gate server-side).
+    // .enabled alone isn't enough -- it reflects the per-project SETTING,
+    // which defaults to true regardless of whether relion_pipeliner is
+    // even installed (see project_manager.pipeline_sync_setting); .available
+    // is whether the binary genuinely exists. Both must hold, same as the
+    // backend's own pipeline_sync_enabled() ANDs them (see
+    // maybeWarnAboutOpenRelionGuis's identical fix, above).
+    const overwriteBlockedByRelion = fromRelion
+      && !(pipelineSyncState.enabled && pipelineSyncState.available);
+    overwriteBtn.hidden = !hasRun || overwriteBlockedByRelion || overwriteBlockedByStatus;
     // Clone never touches the job it's cloning FROM -- it only reads its
     // field_values and opens a fresh, separately-numbered job -- so unlike
     // Overwrite it's safe even for a RELION-native (read-only) job or one
@@ -1069,10 +1089,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     markFinishedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "completed";
     markFailedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "failed";
     deleteBtn.hidden = !hasRun || fromRelion || status === "running";
-    noteBtn.hidden = fromRelion;
-    jobNameDisplay.style.cursor = fromRelion ? "default" : "";
+    // Alias/note are exempt from the RELION-native read-only treatment
+    // everything else on this toolbar gets -- both are kept as a purely
+    // local overlay for a RELION-native job (see job_runner.set_alias/
+    // set_note, project_manager.set_relion_overlay), never written into
+    // RELION's own files, so renaming or annotating one here can never
+    // leave RELION's own record describing something untrue.
+    noteBtn.hidden = false;
+    jobNameDisplay.style.cursor = "";
     jobNameDisplay.title = fromRelion
-      ? "Run in RELION itself — rename it there"
+      ? "Click to rename (RELION-US's own display name -- doesn't change RELION's own alias or job directory)"
       : "Click to rename (RELION's 'Alias' job action)";
     outputsTabBtn.hidden = !hasRun;
     // Run/Done (the bottom command-row) for a picking job: purely status
@@ -2471,7 +2497,14 @@ async function refreshPipelineSync() {
 // native GUI open is easy to forget about across sessions -- same reasoning
 // as this app's own "ask about the login password every startup" choice.
 function maybeWarnAboutOpenRelionGuis() {
-  if (!pipelineSyncState.enabled) return Promise.resolve();
+  // .enabled reflects the SETTING alone (defaults to true now -- see
+  // project_manager.pipeline_sync_setting's own comment), which on a
+  // machine with no relion_pipeliner installed at all would otherwise
+  // still trigger this warning for a sync that can never actually do
+  // anything. .available is whether the binary genuinely exists; both
+  // must hold for sync to be doing anything real (see backend's own
+  // pipeline_sync_enabled, which ANDs the same two things).
+  if (!pipelineSyncState.enabled || !pipelineSyncState.available) return Promise.resolve();
   return errorDialog(
     "RELION sync is on for this project: RELION-US now updates this project's " +
     "default_pipeline.star directly (job status only), not just through " +

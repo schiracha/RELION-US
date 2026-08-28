@@ -723,10 +723,18 @@ def save_global_settings(values: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # Two-way pipeline sync, per project
 #
-# Opt-in per project rather than globally: whether RELION-US should add entries
-# to `default_pipeline.star` is a property of the project, not of the machine.
-# A colleague's project you were asked to look at should not gain rows in
-# RELION's own record because you ran one job in it.
+# Default ON (changed from off): registration goes through RELION's own
+# relion_pipeliner binary (pipeline_bridge.py), not a hand-written STAR
+# file, and Overwrite of a RELION-native job now depends on this being on
+# (see main.py's start_run) -- both GUIs staying interoperable out of the
+# box is more valuable than the narrow "opened a colleague's project,
+# didn't mean to touch its pipeline" case the old default was guarding
+# against. Still a per-project SETTING, not a global one -- a project that
+# genuinely shouldn't gain RELION-US rows in its pipeline (the colleague's-
+# project case) can still turn this off explicitly; it just isn't the
+# default anymore. relion_pipeliner not being on PATH at all (`available`
+# in GET /api/project/pipeline-sync) independently keeps this a no-op
+# regardless of the setting.
 # --------------------------------------------------------------------------
 
 SETTINGS_FILENAME = "settings.json"
@@ -762,9 +770,9 @@ def save_settings(project_dir: Path, settings: dict[str, Any]) -> None:
 
 def pipeline_sync_setting(project_dir: Path) -> bool:
     """Whether this project wants RELION-US's runs recorded in RELION's own
-    pipeline. Default off: writing another tool's state file is something to
-    ask for, not something to inherit."""
-    return bool(load_settings(project_dir).get(PIPELINE_SYNC_KEY, False))
+    pipeline. Default on -- see this section's own header comment above for
+    why, and set_pipeline_sync for how a project opts back out."""
+    return bool(load_settings(project_dir).get(PIPELINE_SYNC_KEY, True))
 
 
 def set_pipeline_sync(project_dir: Path, enabled: bool) -> bool:
@@ -797,6 +805,70 @@ def save_history(project_dir: Path, entries: list[dict[str, Any]]) -> None:
     marker = project_dir / MARKER_DIRNAME
     marker.mkdir(exist_ok=True)
     _history_path(project_dir).write_text(json.dumps(entries, indent=2))
+
+
+# --------------------------------------------------------------------------
+# Local-only alias/note overlay for a RELION-native job (source: "relion",
+# run_id "relion:jobNNN" -- see job_runner.JobRunManager._relion_pipeline_
+# entries). Real RELION's own "Alias" job action validates the new name,
+# rewrites it with a trailing slash, and creates/moves an actual symlink
+# (PipeLine::setAliasJob, src/pipeliner.cpp ~1281-1360); its own "Edit Note"
+# action opens job_dir/note.txt directly in a raw text editor, the SAME
+# file RELION appends each run's real command to (see
+# read_relion_last_command above) -- editing it from here risks clobbering
+# that history RELION-US itself depends on to show a re-opened job's real
+# settings. Reimplementing either safely is a bigger, riskier undertaking
+# than what this is for (see pipeline_bridge.py's own module docstring on
+# why this app avoids reimplementing RELION's file-writing logic in
+# general). So: alias/note for a RELION-native job are kept as a purely
+# local overlay instead, keyed by run_id, holding ONLY the two fields being
+# overridden -- exactly how alias/note already work for a job this app ran
+# itself (job_runner.JobRunManager.set_alias/set_note write to run_history.
+# json, never into RELION's own files, even when pipeline sync is on).
+# _relion_pipeline_entries merges this on top of RELION's own freshly-read
+# alias for display; RELION's own GUI is never told about it, matching the
+# "purely a display label" framing this app already applies to its own
+# jobs' alias/note.
+RELION_OVERLAY_FILENAME = "relion_overlays.json"
+
+
+def _relion_overlay_path(project_dir: Path) -> Path:
+    return project_dir / MARKER_DIRNAME / RELION_OVERLAY_FILENAME
+
+
+def load_relion_overlays(project_dir: Path) -> dict[str, dict[str, str]]:
+    """{run_id: {"alias": ..., "note": ...}}, only for run_ids that have
+    actually been touched from here -- a key present but empty means
+    "explicitly cleared from here," distinct from a run_id absent
+    entirely ("never touched, show RELION's own real value")."""
+    p = _relion_overlay_path(project_dir)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def set_relion_overlay(project_dir: Path, run_id: str, **fields: str) -> dict[str, str]:
+    """Set one or more of this run_id's overlay fields (alias/note),
+    leaving any other already-stored field (or the other of the pair)
+    untouched. Returns the resulting per-run_id overlay dict."""
+    overlays = load_relion_overlays(project_dir)
+    entry = dict(overlays.get(run_id, {}))
+    entry.update(fields)
+    overlays[run_id] = entry
+    marker = project_dir / MARKER_DIRNAME
+    try:
+        marker.mkdir(exist_ok=True)
+        _relion_overlay_path(project_dir).write_text(json.dumps(overlays, indent=2))
+    except OSError:
+        # A read-only project must still be usable; the edit simply won't
+        # persist past this backend session -- same tolerance save_settings
+        # above already has.
+        pass
+    return entry
 
 
 def list_dir(path: Path) -> dict[str, Any]:

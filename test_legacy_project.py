@@ -224,6 +224,59 @@ def main():
         check("Outputs tab is still available (browsing is fine)",
               not win.locator('.tab-btn[data-tab="outputs"]').is_hidden())
 
+        # ---- ...except alias/note, which stay editable even for a job RELION
+        # owns -- both are a purely local overlay here, never written into
+        # RELION's own files, so they can't leave its record describing
+        # something untrue the way abort/overwrite/delete could. ----
+        name_title = win.locator('[data-role="job-name-display"]').get_attribute("title") or ""
+        check(f"Rename is NOT blocked for a job RELION owns ({name_title!r})",
+              "Click to rename" in name_title)
+        win.locator('[data-role="job-name-display"]').click()
+        page.wait_for_timeout(300)
+        rename_input = page.locator(".mini-dialog input, .mini-dialog textarea")
+        check("Rename prompt opens for a job RELION owns", rename_input.count() >= 1)
+        if rename_input.count():
+            rename_input.first.fill("renamed_from_relion_us")
+            page.locator(".mini-dialog-actions button", has_text="OK").or_(
+                page.locator(".mini-dialog-actions button.primary")
+            ).first.click()
+            page.wait_for_timeout(500)
+            check("Job name display now shows the new alias",
+                  win.locator('[data-role="job-name-display"]').inner_text().strip()
+                  == "renamed_from_relion_us")
+            check("Command Center reflects the rename too",
+                  "renamed_from_relion_us" in page.locator("#ccTableBody").inner_text())
+
+        note_btn = win.locator('[data-action="note"]')
+        check("Note button is NOT hidden for a job RELION owns", not note_btn.is_hidden())
+        note_btn.click()
+        page.wait_for_timeout(300)
+        note_input = page.locator(".mini-dialog input, .mini-dialog textarea")
+        check("Note prompt opens for a job RELION owns", note_input.count() >= 1)
+        if note_input.count():
+            note_input.first.fill("a note from RELION-US")
+            page.locator(".mini-dialog-actions button", has_text="OK").or_(
+                page.locator(".mini-dialog-actions button.primary")
+            ).first.click()
+            page.wait_for_timeout(500)
+            check("Note row shows the saved note",
+                  "a note from RELION-US" in win.locator('[data-role="note-row"]').inner_text())
+
+        # Reopening from a fresh Command Center refresh must still show
+        # both -- confirms they actually persisted (project_manager.
+        # set_relion_overlay), not just updated in-memory for this popup.
+        win.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
+        page.locator("#ccTableBody tr", has_text="renamed_from_relion_us").first.click()
+        page.wait_for_selector(".winbox", timeout=5000)
+        win = page.locator(".winbox").last   # reassigned: the rest of this test keeps using `win`
+        page.wait_for_timeout(500)
+        check("Rename survived reopening the job",
+              win.locator('[data-role="job-name-display"]').inner_text().strip()
+              == "renamed_from_relion_us")
+        check("Note survived reopening the job too",
+              "a note from RELION-US" in win.locator('[data-role="note-row"]').inner_text())
+
         # An old classification's own per-iteration output is still on disk, so
         # the Progress tab works on it the same as on a job run here.
         prog_tab = win.locator('.tab-btn[data-tab="progress"]')

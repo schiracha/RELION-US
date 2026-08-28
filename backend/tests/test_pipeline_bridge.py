@@ -354,20 +354,27 @@ def test_the_flag_is_not_added_twice():
 # --------------------------------------------------------------------------
 
 
-def test_sync_is_off_until_asked_for(project):
-    """Writing another tool's state file is something to opt into, not to
-    inherit by opening a folder."""
-    assert project_manager.pipeline_sync_setting(project) is False
-    assert job_runner.JobRunManager(project).pipeline_sync_enabled(project) is False
+def test_sync_is_on_by_default(project):
+    """Registration goes through RELION's own relion_pipeliner binary, not
+    a hand-written STAR file, and Overwrite of a RELION-native job depends
+    on this being on -- both GUIs staying interoperable out of the box is
+    the default now (see project_manager's own module comment on this
+    section). `project`'s own fixture puts a real (stub) relion_pipeliner
+    on PATH, so is_available() is also true here."""
+    assert project_manager.pipeline_sync_setting(project) is True
+    assert job_runner.JobRunManager(project).pipeline_sync_enabled(project) is True
 
 
 def test_setting_persists_per_project(project, tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     project_manager.init_new_project(other)
-    project_manager.set_pipeline_sync(project, True)
-    assert project_manager.pipeline_sync_setting(project) is True
-    assert project_manager.pipeline_sync_setting(other) is False
+    # Still a genuinely per-project setting even though both default to the
+    # same value now -- explicitly diverge them and confirm neither leaks
+    # into the other.
+    project_manager.set_pipeline_sync(project, False)
+    assert project_manager.pipeline_sync_setting(project) is False
+    assert project_manager.pipeline_sync_setting(other) is True
 
 
 def test_enabled_needs_both_the_setting_and_the_binary(project, monkeypatch, tmp_path):
@@ -665,8 +672,10 @@ def test_overwrite_appends_pipeline_control_when_sync_is_on(project):
 
 
 def test_overwrite_leaves_command_alone_when_sync_is_off(project):
-    """Sync stays opt-in: an Overwrite run in a project that hasn't turned
-    it on must not gain a --pipeline_control flag."""
+    """Sync can still be turned off explicitly (default is on now -- see
+    project_manager's own module comment): an Overwrite run in a project
+    that has it off must not gain a --pipeline_control flag."""
+    project_manager.set_pipeline_sync(project, False)
     m = job_runner.JobRunManager(project)
 
     async def go():
@@ -688,6 +697,83 @@ def test_overwrite_leaves_command_alone_when_sync_is_off(project):
 
     second = asyncio.run(go())
     assert "--pipeline_control" not in second.command
+
+
+def test_overwrite_of_a_relion_native_job_works_with_sync_on(project):
+    """The core new behavior: Overwriting a job RELION itself registered
+    (never touched by this app before) now works as long as sync is on --
+    set_process_status (matched by directory path, not by who originally
+    registered the row) is what makes this safe: it doesn't care whether
+    THIS app or RELION's own GUI created the process row it's updating."""
+    (project / "default_pipeline.star").write_text(
+        "\ndata_pipeline_general\n\n_rlnPipeLineJobCounter                      2\n"
+        "\ndata_pipeline_processes\n\nloop_\n"
+        "_rlnPipeLineProcessName #1\n_rlnPipeLineProcessAlias #2\n"
+        "_rlnPipeLineProcessTypeLabel #3\n_rlnPipeLineProcessStatusLabel #4\n"
+        "Import/job001/       None            relion.import.movies     Succeeded\n"
+    )
+    (project / "Import" / "job001").mkdir(parents=True)
+    m = job_runner.JobRunManager(project)
+    assert m.is_relion_run("relion:job001")
+
+    async def go():
+        run = await m.start_subprocess_job(
+            "Import", "Import", "echo overwritten > Import/job001/new.txt",
+            subdir="Import/job001", overwrite_run_id="relion:job001",
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status in (job_runner.STATUS_COMPLETED, job_runner.STATUS_FAILED):
+                break
+        return run
+
+    run = asyncio.run(go())
+    # Same job number / directory -- an Overwrite, not a fresh registration.
+    assert run.run_id == "relion:job001"
+    assert Path(run.cwd) == project / "Import" / "job001"
+    assert run.pipeline_registered is True
+    assert run.status == job_runner.STATUS_COMPLETED, run.stderr_lines
+    assert (project / "Import" / "job001" / "new.txt").read_text().strip() == "overwritten"
+    # set_process_status already flipped the SAME row to "Running" when
+    # real work started (job_runner._mark_pipeline_running) -- confirming
+    # it's still exactly the one original row, not a second one registered
+    # alongside it.
+    info = project_manager.read_relion_pipeline(project)
+    matching = [p for p in info["processes"] if p["name"] == "Import/job001"]
+    assert len(matching) == 1
+    assert matching[0]["status_label"] == "Running"
+
+
+def test_overwrite_of_a_relion_native_job_still_blocked_with_sync_off(project):
+    """The gate that actually prevents this (main.py's start_run) is
+    server-side, one layer up from JobRunManager -- but nothing down here
+    should silently make it moot: the underlying mechanics run the same
+    with sync off, this just confirms this level still lets it through and
+    that the API layer is genuinely the only thing standing in the way,
+    matching main.py's own comment on why the gate lives there."""
+    project_manager.set_pipeline_sync(project, False)
+    (project / "default_pipeline.star").write_text(
+        "\ndata_pipeline_general\n\n_rlnPipeLineJobCounter                      2\n"
+        "\ndata_pipeline_processes\n\nloop_\n"
+        "_rlnPipeLineProcessName #1\n_rlnPipeLineProcessAlias #2\n"
+        "_rlnPipeLineProcessTypeLabel #3\n_rlnPipeLineProcessStatusLabel #4\n"
+        "Import/job001/       None            relion.import.movies     Succeeded\n"
+    )
+    (project / "Import" / "job001").mkdir(parents=True)
+    m = job_runner.JobRunManager(project)
+    assert m.pipeline_sync_enabled(project) is False
+
+    async def go():
+        return await m.start_subprocess_job(
+            "Import", "Import", "echo hi", subdir="Import/job001",
+            overwrite_run_id="relion:job001",
+        )
+
+    # JobRunManager itself doesn't reject a RELION-native overwrite_run_id
+    # -- that's deliberately main.py's job (see _reject_relion_run) -- so
+    # this still runs; pipeline_registered stays False since sync is off.
+    run = asyncio.run(go())
+    assert run.pipeline_registered is False
 
 
 # --------------------------------------------------------------------------

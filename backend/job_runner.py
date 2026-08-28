@@ -317,9 +317,13 @@ class JobRunManager:
     @classmethod
     def is_relion_run(cls, run_id: str) -> bool:
         """A Command Center row imported from RELION's own pipeline rather
-        than started here. This app does not own those jobs and does not write
-        RELION's pipeline state, so abort / overwrite / delete / status edits
-        are refused on them."""
+        than started here. This app does not own those jobs, so abort /
+        delete / status edits are refused outright on them (see main.py's
+        _reject_relion_run), and Overwrite is refused unless pipeline sync
+        is on (see start_run). alias/note are never refused -- they're
+        kept as a purely local overlay for these (see set_alias/set_note,
+        project_manager.set_relion_overlay), never written into RELION's
+        own files, so there's nothing for them to leave inconsistent."""
         return str(run_id).startswith(cls.RELION_RUN_PREFIX)
 
     def relion_run_detail(self, run_id: str, project_dir: Optional[Path] = None) -> Optional[dict]:
@@ -435,10 +439,14 @@ class JobRunManager:
         it in this app's own file, so without this the Command Center is empty
         in exactly the project where it would be most useful.
 
-        These are **read-only**: `source: "relion"` marks them, and the API
-        refuses abort/overwrite/delete on them. This app does not write
-        RELION's pipeline state, so it must not offer actions that imply it
-        owns these jobs. Reopening one still works -- the options come from the
+        These are read-only for anything that would need this app to keep
+        RELION's own pipeline record consistent with a change it made:
+        `source: "relion"` marks them, and the API refuses abort/delete on
+        them outright, and Overwrite unless pipeline sync is on (see
+        is_relion_run's own docstring for the full breakdown). alias/note
+        are the exception -- a purely local overlay (see set_alias/
+        set_note, merged in below), never written into RELION's own files
+        either way. Reopening one still works -- the options come from the
         job's own `job.star` (see get_run_detail).
 
         Timestamps: RELION's own pipeline file records none. Best-effort
@@ -450,6 +458,11 @@ class JobRunManager:
         be when a project's files were copied after the jobs actually ran.
         """
         info = project_manager.read_relion_pipeline(project_dir)
+        # Local-only alias/note edits made from here (see project_manager.
+        # set_relion_overlay's own module comment for why they're kept
+        # local rather than written into RELION's own files) -- applied
+        # per-entry below, only for the two fields an overlay actually has.
+        overlays = project_manager.load_relion_overlays(project_dir)
         out: list[dict] = []
         by_process_name: dict[str, dict] = {}
         for proc in info["processes"]:
@@ -502,13 +515,33 @@ class JobRunManager:
                 "job_number": proc["job_number"],
                 "alias": proc["alias"],
                 "note": "",
-                "job_name": name.split("/")[-1],
+                # This app's own runs already compute job_name as "alias or
+                # job{number}" (see JobRun.job_name) -- the frontend only
+                # ever reads job_name, never .alias directly, so a
+                # RELION-native job's REAL alias (set in RELION's own GUI,
+                # proc["alias"]) needs to land here too, not just an
+                # overlay set from here, or it would never actually be
+                # shown despite genuinely being there.
+                "job_name": proc["alias"] or name.split("/")[-1],
                 "field_values": {},
                 "detected_inputs": [],
                 "abortable": False,
                 "relion_type_label": proc["type_label"],
                 "exists_on_disk": exists,
             }
+            overlay = overlays.get(entry["run_id"])
+            if overlay:
+                if "alias" in overlay:
+                    # An empty override means "explicitly cleared from
+                    # here" (see set_alias's own docstring: reverts to the
+                    # plain job number) -- falls back to the bare directory
+                    # name, NOT proc["alias"], so clearing actually clears
+                    # rather than just re-exposing RELION's own real alias
+                    # underneath it.
+                    entry["alias"] = overlay["alias"]
+                    entry["job_name"] = overlay["alias"] or name.split("/")[-1]
+                if "note" in overlay:
+                    entry["note"] = overlay["note"]
             out.append(entry)
             by_process_name[name] = entry
 
@@ -1617,9 +1650,28 @@ class JobRunManager:
 
     def set_alias(self, run_id: str, alias: str) -> Optional[dict]:
         """Real RELION 'Alias' job action (gui_mainwindow.cpp's
-        cb_set_alias). An empty string clears the alias, reverting display
-        to the plain job number."""
+        cb_set_alias) for a run this app tracks itself. An empty string
+        clears the alias, reverting display to the plain job number. A
+        RELION-native run_id (source: "relion") goes through
+        set_relion_overlay instead -- see project_manager.set_relion_
+        overlay's own module comment for why alias/note stay a purely
+        local overlay for those rather than touching RELION's own files."""
         alias = alias.strip()
+        if self.is_relion_run(run_id):
+            entry = next(
+                (e for e in self._relion_pipeline_entries(self.project_dir) if e["run_id"] == run_id),
+                None,
+            )
+            if entry is None:
+                return None
+            project_manager.set_relion_overlay(self.project_dir, run_id, alias=alias)
+            entry["alias"] = alias
+            # An empty alias clears back to the plain job number (Path(cwd).name,
+            # e.g. "job042"), NOT whatever RELION's own real alias underneath
+            # it says -- same "explicitly cleared" semantic _relion_pipeline_
+            # entries' own overlay merge uses.
+            entry["job_name"] = alias or Path(entry["cwd"]).name
+            return entry
         run = self.get(run_id)
         if run is None:
             history = project_manager.load_history(self.project_dir)
@@ -1631,7 +1683,19 @@ class JobRunManager:
         return run.to_summary()
 
     def set_note(self, run_id: str, note: str) -> Optional[dict]:
-        """Real RELION 'Edit Note' job action."""
+        """Real RELION 'Edit Note' job action for a run this app tracks
+        itself. A RELION-native run_id goes through set_relion_overlay
+        instead -- see set_alias's own docstring for why."""
+        if self.is_relion_run(run_id):
+            entry = next(
+                (e for e in self._relion_pipeline_entries(self.project_dir) if e["run_id"] == run_id),
+                None,
+            )
+            if entry is None:
+                return None
+            project_manager.set_relion_overlay(self.project_dir, run_id, note=note)
+            entry["note"] = note
+            return entry
         run = self.get(run_id)
         if run is None:
             return self._update_persisted_only(run_id, note=note)

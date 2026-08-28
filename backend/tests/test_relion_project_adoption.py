@@ -201,9 +201,15 @@ def test_a_fresh_project_still_starts_at_job001(tmp_path):
 
 
 def test_relion_jobs_appear_in_the_command_center(relion_project):
+    """job002's real alias ("my_motioncorr", set in RELION's own GUI --
+    see this fixture's default_pipeline.star) shows up as its job_name,
+    the same way an alias set from this app's own side already did for
+    this app's own runs (JobRun.job_name: "alias or job{number}") -- the
+    frontend only ever reads job_name, never .alias directly, so a
+    RELION-native job's real alias has to land here to be visible at all."""
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
     assert [r["job_name"] for r in runs] == [
-        "job001", "job002", "job003", "job005", "job011"]
+        "job001", "my_motioncorr", "job003", "job005", "job011"]
     # A direct list-equality (not `all(...)` over `runs`) so this assertion
     # is meaningful on its own, independent of the length already implied
     # by the job_name check above.
@@ -224,8 +230,10 @@ def test_relions_own_edges_become_command_center_lineage(relion_project):
     runs = {r["job_name"]: r for r in
             job_runner.JobRunManager(relion_project).list_runs(relion_project)}
     assert runs["job001"].get("input_links", []) == []   # nothing feeds Import
-    assert [l["job_name"] for l in runs["job002"]["input_links"]] == ["job001"]
-    assert runs["job002"]["input_links"][0]["run_id"] == runs["job001"]["run_id"]
+    # job002 is keyed by its real alias here ("my_motioncorr") -- see
+    # test_relion_jobs_appear_in_the_command_center's own comment.
+    assert [l["job_name"] for l in runs["my_motioncorr"]["input_links"]] == ["job001"]
+    assert runs["my_motioncorr"]["input_links"][0]["run_id"] == runs["job001"]["run_id"]
     assert [l["job_name"] for l in runs["job005"]["input_links"]] == ["job003"]
     assert [l["job_name"] for l in runs["job011"]["input_links"]] == ["job005"]
 
@@ -332,9 +340,9 @@ def test_overwrite_target_resolves_a_relion_native_run(relion_project):
     job used to 409 with "Unknown run_id to overwrite" (it only ever
     looked in this app's OWN history, which never has these) instead of
     showing a real draft built from the job's own job.star values. The
-    actual Overwrite ACTION stays blocked for these jobs regardless (see
-    main.py's _reject_relion_run, checked before start_subprocess_job is
-    ever reached) -- this only makes the read-only preview work."""
+    actual Overwrite ACTION is blocked for these jobs unless pipeline sync
+    is on (see main.py's start_run) -- this makes the read-only preview
+    work regardless of that, same as it always has."""
     m = job_runner.JobRunManager(relion_project)
     subdir = m.overwrite_target_subdir("relion:job005", relion_project)
     assert subdir == "Class2D/job005"
@@ -369,6 +377,80 @@ def test_job_whose_directory_is_gone_says_so(relion_project):
 def test_unknown_run_id_returns_none(relion_project):
     assert job_runner.JobRunManager(relion_project).relion_run_detail(
         "relion:job999", relion_project) is None
+
+
+# --------------------------------------------------------------------------
+# Local alias/note overlay for a RELION-native job -- kept purely local
+# (project_manager.set_relion_overlay) rather than written into RELION's
+# own files, unlike everything else RELION-native jobs are read-only for.
+# --------------------------------------------------------------------------
+
+
+def test_set_alias_on_a_relion_native_job_shows_up_in_list_runs(relion_project):
+    m = job_runner.JobRunManager(relion_project)
+    updated = m.set_alias("relion:job001", "renamed_here")
+    assert updated["alias"] == "renamed_here"
+    assert updated["job_name"] == "renamed_here"
+
+    runs = {r["run_id"]: r for r in m.list_runs(relion_project)}
+    assert runs["relion:job001"]["job_name"] == "renamed_here"
+
+
+def test_set_alias_overrides_relions_own_real_alias(relion_project):
+    """job002 already has a real alias RELION's own GUI set
+    ("my_motioncorr", see this fixture's default_pipeline.star) -- setting
+    one from here must win over it, the same "explicit override" semantic
+    as a fresh alias for a job that had none."""
+    m = job_runner.JobRunManager(relion_project)
+    m.set_alias("relion:job002", "renamed_from_here")
+    runs = {r["run_id"]: r for r in m.list_runs(relion_project)}
+    assert runs["relion:job002"]["job_name"] == "renamed_from_here"
+    assert runs["relion:job002"]["alias"] == "renamed_from_here"
+
+
+def test_clearing_alias_reverts_to_the_plain_job_number_not_relions_real_alias(relion_project):
+    """An empty alias set from here means "show the plain job number,
+    period" -- NOT "fall back to whatever RELION's own real alias
+    underneath it says." Matches set_alias's own docstring for a job this
+    app runs itself ("An empty string clears the alias, reverting display
+    to the plain job number")."""
+    m = job_runner.JobRunManager(relion_project)
+    m.set_alias("relion:job002", "")
+    runs = {r["run_id"]: r for r in m.list_runs(relion_project)}
+    assert runs["relion:job002"]["job_name"] == "job002"
+    assert runs["relion:job002"]["alias"] == ""
+
+
+def test_set_note_on_a_relion_native_job_shows_up_in_list_runs(relion_project):
+    m = job_runner.JobRunManager(relion_project)
+    m.set_note("relion:job001", "a note added from RELION-US")
+    runs = {r["run_id"]: r for r in m.list_runs(relion_project)}
+    assert runs["relion:job001"]["note"] == "a note added from RELION-US"
+
+
+def test_alias_and_note_on_the_same_job_are_independent(relion_project):
+    m = job_runner.JobRunManager(relion_project)
+    m.set_alias("relion:job001", "renamed")
+    m.set_note("relion:job001", "noted")
+    runs = {r["run_id"]: r for r in m.list_runs(relion_project)}
+    assert runs["relion:job001"]["job_name"] == "renamed"
+    assert runs["relion:job001"]["note"] == "noted"
+
+
+def test_set_alias_on_an_unknown_relion_run_id_returns_none(relion_project):
+    m = job_runner.JobRunManager(relion_project)
+    assert m.set_alias("relion:job999", "x") is None
+
+
+def test_alias_and_note_are_never_blocked_by_is_relion_run(relion_project):
+    """Unlike abort/delete/status, alias/note have no read-only gate at
+    all for a RELION-native job -- confirmed here at the job_runner level
+    (main.py's own gate, checked separately, only ever applies to status;
+    see update_run's own docstring)."""
+    m = job_runner.JobRunManager(relion_project)
+    assert job_runner.JobRunManager.is_relion_run("relion:job001") is True
+    assert m.set_alias("relion:job001", "still works") is not None
+    assert m.set_note("relion:job001", "still works too") is not None
 
 
 # --------------------------------------------------------------------------
