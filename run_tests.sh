@@ -446,48 +446,17 @@ TomoExcludeTilt/job014/tilts.star   TomoRecon/job021/"
            "$proj/TomoRecon/job021"
 }
 
-# add_analyze_classification_run <project_dir>
-# Two completed runs of THIS app's own (not RELION-native, so no job.star/
-# pipeline entry needed -- .relion_us/run_history.json is enough for
-# run_manager._resolve_run_cwd to find them): a Class2D job with 3 real
-# iterations of run_it###_model.star + run_it###_optimiser.star (2D
-# Classification tab's convergence/class-distribution charts), and a
-# Class3D job additionally carrying model_class_N FSC/SSNR sub-blocks and a
-# run_it###_data.star (3D Classification tab's FSC chart + viewing-
-# direction heatmap), plus an Extract/job024/particles.star (Particles tab)
-# and a CtfFind/job003 + MotionCorr/job002 pair (Micrographs tab -- the
-# picked file's rlnMicrographName values point back at MotionCorr/job002/
-# so its corrected_micrographs.star gets merged in). STAR shapes match real
-# RELION output (list blocks for model_general/optimiser_general, loop_ for
-# model_classes/model_class_N/micrographs) -- same discipline
-# test_viz_and_progress.py's own fixtures use.
-add_analyze_classification_run() {
-  local proj="$1"
-  local job2d="$proj/Class2D/job022"
-  local job3d="$proj/Class3D/job023"
-  local job_extract="$proj/Extract/job024"
-  local job_motioncorr="$proj/MotionCorr/job002"
-  local job_ctffind="$proj/CtfFind/job003"
-  mkdir -p "$job2d" "$job3d" "$job_extract" "$job_motioncorr" "$job_ctffind" "$proj/.relion_us"
-  cat > "$proj/.relion_us/run_history.json" <<JSON
-[{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
-  "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
-  "command": "true", "cwd": "$job2d", "status": "completed", "exit_code": 0,
-  "started_at": 1700000000.0, "ended_at": 1700000100.0, "field_values": {},
-  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false},
- {"run_id": "analyze-fixture-c3d", "source": null, "internal_name": "Class3D",
-  "display_name": "3D Classification", "job_name": "job023", "job_number": 23,
-  "command": "true", "cwd": "$job3d", "status": "completed", "exit_code": 0,
-  "started_at": 1700000200.0, "ended_at": 1700000300.0, "field_values": {},
-  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
-JSON
-  "$PYTHON" - "$job2d" "$job3d" "$job_extract" "$job_motioncorr" "$job_ctffind" <<'PY'
+# _add_class2d_fixture <job2d_dir>
+# 3 real iterations of run_it###_model.star + run_it###_optimiser.star (2D
+# Classification tab's convergence/class-distribution charts). Fully
+# deterministic -- no randomness involved.
+_add_class2d_fixture() {
+  "$PYTHON" - "$1" <<'PY'
 import sys
-import numpy as np
 import pandas as pd
 import starfile
 
-job2d, job3d, job_extract, job_motioncorr, job_ctffind = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+job2d = sys.argv[1]
 
 nc = 3
 for it in range(1, 4):
@@ -514,6 +483,23 @@ for it in range(1, 4):
             "rlnChangesOptimalClasses": 50.0 / it,
         }
     }, f"{job2d}/run_it{it:03d}_optimiser.star", overwrite=True)
+PY
+}
+
+# _add_class3d_fixture <job3d_dir>
+# 2 iterations additionally carrying model_class_N FSC/SSNR sub-blocks
+# (3D Classification tab's FSC chart) and a run_it###_data.star of
+# particle orientations (viewing-direction heatmap). Reseeds rng
+# identically to the original single shared heredoc so the data.star
+# orientations this generates are the same as before the split.
+_add_class3d_fixture() {
+  "$PYTHON" - "$1" <<'PY'
+import sys
+import numpy as np
+import pandas as pd
+import starfile
+
+job3d = sys.argv[1]
 
 nc3 = 2
 shells = list(range(20))
@@ -558,9 +544,28 @@ particles = pd.DataFrame({
     "rlnAngleTilt": rng.uniform(0, 180, n),
 })
 starfile.write({"particles": particles}, f"{job3d}/run_it002_data.star", overwrite=True)
+PY
+}
 
+# _add_extract_particles_fixture <job_extract_dir>
 # For the Particles tab (C4) -- not tied to a run, just a real particles
 # STAR somewhere under the project for its own path input/Browse button.
+# Reseeds rng with the same seed (0) the original shared heredoc used --
+# note that since this now runs in its own process rather than continuing
+# the class3d fixture's already-advanced rng stream, the specific random
+# values differ from the pre-split output; nothing asserts exact values
+# here (test_analyze.py only checks column presence/counts), so this is
+# safe, just not byte-identical to the old combined heredoc.
+_add_extract_particles_fixture() {
+  "$PYTHON" - "$1" <<'PY'
+import sys
+import numpy as np
+import pandas as pd
+import starfile
+
+job_extract = sys.argv[1]
+
+rng = np.random.default_rng(0)
 n_p = 40
 starfile.write({
     "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
@@ -573,11 +578,28 @@ starfile.write({
         "rlnOpticsGroup": [1] * n_p,
     }),
 }, f"{job_extract}/particles.star", overwrite=True)
+PY
+}
 
+# _add_ctffind_motioncorr_fixture <job_ctffind_dir> <job_motioncorr_dir>
 # For the Micrographs tab (C4) -- a CtfFind-style picked STAR whose
 # rlnMicrographName values point back at MotionCorr/job002/, so
 # read_micrograph_scatter_columns' job-dir regex finds and merges in
-# corrected_micrographs.star's own motion-tracking columns.
+# corrected_micrographs.star's own motion-tracking columns. Reseeds rng
+# with the same seed (0) the original shared heredoc used -- as with
+# _add_extract_particles_fixture, running in its own process means the
+# specific random values differ from the pre-split combined-heredoc
+# output, but no test asserts exact values here.
+_add_ctffind_motioncorr_fixture() {
+  "$PYTHON" - "$1" "$2" <<'PY'
+import sys
+import numpy as np
+import pandas as pd
+import starfile
+
+job_ctffind, job_motioncorr = sys.argv[1], sys.argv[2]
+
+rng = np.random.default_rng(0)
 n_m = 6
 mic_names = [f"MotionCorr/job002/mic_{i}.mrc" for i in range(n_m)]
 starfile.write({
@@ -598,6 +620,49 @@ starfile.write({
     }),
 }, f"{job_motioncorr}/corrected_micrographs.star", overwrite=True)
 PY
+}
+
+# add_analyze_classification_run <project_dir>
+# Two completed runs of THIS app's own (not RELION-native, so no job.star/
+# pipeline entry needed -- .relion_us/run_history.json is enough for
+# run_manager._resolve_run_cwd to find them): a Class2D job with 3 real
+# iterations of run_it###_model.star + run_it###_optimiser.star (2D
+# Classification tab's convergence/class-distribution charts), and a
+# Class3D job additionally carrying model_class_N FSC/SSNR sub-blocks and a
+# run_it###_data.star (3D Classification tab's FSC chart + viewing-
+# direction heatmap), plus an Extract/job024/particles.star (Particles tab)
+# and a CtfFind/job003 + MotionCorr/job002 pair (Micrographs tab -- the
+# picked file's rlnMicrographName values point back at MotionCorr/job002/
+# so its corrected_micrographs.star gets merged in). STAR shapes match real
+# RELION output (list blocks for model_general/optimiser_general, loop_ for
+# model_classes/model_class_N/micrographs) -- same discipline
+# test_viz_and_progress.py's own fixtures use. Each fixture area is written
+# by its own small, focused Python heredoc (see the _add_*_fixture helpers
+# above) rather than one giant shared process.
+add_analyze_classification_run() {
+  local proj="$1"
+  local job2d="$proj/Class2D/job022"
+  local job3d="$proj/Class3D/job023"
+  local job_extract="$proj/Extract/job024"
+  local job_motioncorr="$proj/MotionCorr/job002"
+  local job_ctffind="$proj/CtfFind/job003"
+  mkdir -p "$job2d" "$job3d" "$job_extract" "$job_motioncorr" "$job_ctffind" "$proj/.relion_us"
+  cat > "$proj/.relion_us/run_history.json" <<JSON
+[{"run_id": "analyze-fixture-c2d", "source": null, "internal_name": "Class2D",
+  "display_name": "2D Classification", "job_name": "job022", "job_number": 22,
+  "command": "true", "cwd": "$job2d", "status": "completed", "exit_code": 0,
+  "started_at": 1700000000.0, "ended_at": 1700000100.0, "field_values": {},
+  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false},
+ {"run_id": "analyze-fixture-c3d", "source": null, "internal_name": "Class3D",
+  "display_name": "3D Classification", "job_name": "job023", "job_number": 23,
+  "command": "true", "cwd": "$job3d", "status": "completed", "exit_code": 0,
+  "started_at": 1700000200.0, "ended_at": 1700000300.0, "field_values": {},
+  "detected_inputs": [], "note": "", "alias": "", "pid": null, "abortable": false}]
+JSON
+  _add_class2d_fixture "$job2d"
+  _add_class3d_fixture "$job3d"
+  _add_extract_particles_fixture "$job_extract"
+  _add_ctffind_motioncorr_fixture "$job_ctffind" "$job_motioncorr"
 }
 
 # run_browser_suite <script> [pass_project_dir]
