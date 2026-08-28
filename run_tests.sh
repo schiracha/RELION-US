@@ -59,6 +59,11 @@
 #   RELION_US_PYTHON    python to use (default: python3)
 #   RELION_US_CHROMIUM  chromium binary, if Playwright's own is not usable
 #   RELION_US_PORT_BASE first port to allocate from (default: 8500)
+#
+# Not run by any tier here: backend/tests/verify_draft_flags_against_relion.py
+# checks DRAFT_OVERRIDES's flags against a real, locally-installed RELION
+# (RELION_BIN_DIR, RELION_SRC_DIR) -- run it by hand after a RELION upgrade:
+#   python3 backend/tests/verify_draft_flags_against_relion.py
 
 set -uo pipefail
 
