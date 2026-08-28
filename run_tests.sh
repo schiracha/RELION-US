@@ -95,6 +95,28 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 
 free_port() {
+  # KNOWN RACE (check-then-bind, not fixed here -- see issue #44):
+  # this probes each candidate port by binding then immediately closing it,
+  # so the port is free again the instant this function returns. The real
+  # bind doesn't happen until start_backend() execs uvicorn, which is well
+  # after this returns -- project-fixture setup, stub-bin creation, etc. --
+  # a real gap of dozens of lines and meaningful wall-clock time, not a
+  # tight race window. Two run_tests.sh invocations on the same host,
+  # started close enough together, could both see the same port as
+  # momentarily free and race to claim it.
+  #
+  # This is accepted as low-risk for now because run_tests.sh is used
+  # sequentially/locally (one dev, one invocation at a time) and is not
+  # part of any concurrent CI matrix on a shared host; a losing uvicorn
+  # would just fail to bind and start_backend()'s readiness poll would
+  # time out with a clear log, not corrupt state silently.
+  #
+  # A real fix can't be done inside this function alone: it would need
+  # start_backend() (the caller, defined later in this file) to either
+  # hold this same socket open (e.g. via SO_REUSEADDR/SO_REUSEPORT) until
+  # right before the `exec uvicorn ...` call, or retry free_port() when
+  # the uvicorn exec itself fails to bind -- both require changes on the
+  # caller side, which is out of scope for this fix.
   local port=$PORT_BASE
   while "$PYTHON" - "$port" <<'PY' 2>/dev/null
 import socket, sys
