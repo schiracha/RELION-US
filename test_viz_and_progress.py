@@ -80,24 +80,32 @@ def make_viewer_fixtures():
 FAKE_JOB = '''
 import sys, time, numpy as np, mrcfile, starfile, pandas as pd
 from pathlib import Path
-out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
+# argv[1] is an OUTPUT PREFIX in RELION's own --o convention (e.g.
+# "Class2D/job001/run"), not a directory to create -- "run" is a filename
+# prefix, and the iteration files (run_it001_model.star, ...) live directly
+# in the job's own directory (prefix.parent), never in a nested "run/"
+# subdirectory. progress.py's _iteration_files() does a non-recursive
+# job_dir.iterdir(), so getting this wrong means it silently finds nothing,
+# forever -- not a timing issue, a permanently empty Progress tab.
+prefix = Path(sys.argv[1])
+prefix.parent.mkdir(parents=True, exist_ok=True)
 NC = 4
 for it in range(1, 13):
     stack = np.random.rand(NC, 48, 48).astype(np.float32) * 0.3
     yy, xx = np.mgrid[0:48, 0:48]
     for k in range(NC):
         stack[k] += np.exp(-(((xx-24)**2 + (yy-24)**2) / (40.0 + 30*k)))
-    with mrcfile.new(out/f"run_it{it:03d}_classes.mrcs", overwrite=True) as m:
+    with mrcfile.new(f"{prefix}_it{it:03d}_classes.mrcs", overwrite=True) as m:
         m.set_data(stack)
     dist = np.array([0.4, 0.3, 0.2, 0.1])
     starfile.write({
       "model_general": pd.DataFrame({"rlnCurrentResolution":[1/(20.0-it*1.5)],
           "rlnNrClasses":[NC], "rlnReferenceDimensionality":[2], "rlnPixelSize":[1.4]}),
       "model_classes": pd.DataFrame({
-          "rlnReferenceImage":[f"{k+1:06d}@run_it{it:03d}_classes.mrcs" for k in range(NC)],
+          "rlnReferenceImage":[f"{k+1:06d}@{prefix.name}_it{it:03d}_classes.mrcs" for k in range(NC)],
           "rlnClassDistribution": dist,
           "rlnEstimatedResolution":[22.0-it + k for k in range(NC)]})},
-      out/f"run_it{it:03d}_model.star", overwrite=True)
+      f"{prefix}_it{it:03d}_model.star", overwrite=True)
     print(f"Iteration {it}/12", flush=True)
     time.sleep(1.5)
 print("done")
@@ -297,9 +305,9 @@ def main():
 
         check("Live-progress toggle present", win.locator('[data-role="prog-enabled"]').count() == 1)
         check("Thumbnail-interval control present", win.locator('[data-role="prog-every"]').count() == 1)
-        check("Keep-all toggle present (off by default)",
-              win.locator('[data-role="prog-keepall"]').count() == 1
-              and not win.locator('[data-role="prog-keepall"]').is_checked())
+        check("Iteration picker present, defaulting to Latest",
+              win.locator('[data-role="prog-iter-select"]').count() == 1
+              and win.locator('[data-role="prog-iter-select"]').input_value() == "latest")
         check("Both charts drawn", win.locator(".progress-chart").count() == 2)
         check("Legend present for the 2-series chart", win.locator(".progress-legend").count() == 1)
         check("Class thumbnails rendered", win.locator(".thumb img").count() >= 1)
@@ -342,10 +350,17 @@ def main():
         page.wait_for_timeout(2500)
         check("Re-enabling restores the charts", win.locator(".progress-chart").count() == 2)
 
-        # keep-all groups thumbnails by iteration
-        win.locator('[data-role="prog-keepall"]').check()
-        page.wait_for_timeout(2500)
-        check("Keep-all groups thumbnails by iteration", win.locator(".thumb-iter").count() >= 1)
+        # picking an earlier iteration swaps the thumbnails/status to that
+        # iteration instead of following the latest
+        options = win.locator('[data-role="prog-iter-select"] option').all_inner_texts()
+        check(f"Iteration picker lists more than just Latest ({options})", len(options) > 1)
+        earlier_value = win.locator('[data-role="prog-iter-select"] option').nth(1).get_attribute("value")
+        win.locator('[data-role="prog-iter-select"]').select_option(earlier_value)
+        page.wait_for_timeout(700)
+        status_after_pick = win.locator('[data-role="prog-status"]').inner_text()
+        check(f"Status line reflects the picked iteration ({status_after_pick!r})",
+              f"iteration {earlier_value}" in status_after_pick)
+        check("Thumbnails still render for the picked iteration", win.locator(".thumb img").count() >= 1)
 
         # ==== visualizer Browse buttons ==========================================
         # Fixture tree so the picker has folders + files to walk. Overwrites the

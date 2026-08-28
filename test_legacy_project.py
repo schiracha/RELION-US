@@ -69,9 +69,19 @@ def main():
         check("A failed job keeps its status",
               "failed" in " ".join(
                   rows.locator("td:nth-child(3)").all_inner_texts()).lower())
-        check("No invented timestamps",
-              all(t.strip() in ("", "—", "-") for t in
-                  rows.locator("td:nth-child(4)").all_inner_texts()))
+        # Only Class2D/job005 has a job.star (make_legacy_project writes one
+        # for it alone, to give the Progress tab something real to plot) --
+        # project_manager.estimate_job_timestamps reads that file's own
+        # mtime as a best-effort start-time signal for a RELION-native job
+        # with no recorded timing, and app.js's formatTimestamp marks it
+        # with a leading "~" so it never reads as a recorded fact. The other
+        # four jobs have no marker files at all, so they stay blank. Neither
+        # is an "invented" (fabricated, unmarked) timestamp -- that's what
+        # this check actually guards against.
+        ts_texts = rows.locator("td:nth-child(4)").all_inner_texts()
+        non_blank = [t for t in ts_texts if t.strip() not in ("", "—", "-")]
+        check(f"No invented (unmarked, fabricated) timestamps ({ts_texts})",
+              len(non_blank) == 1 and non_blank[0].strip().startswith("~"))
 
         # ---- network view: RELION's own edges, not a directory-path guess ----
         # The fixture chains Import -> MotionCorr -> CtfFind -> Class2D ->

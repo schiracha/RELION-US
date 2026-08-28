@@ -1653,8 +1653,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       const host = progressContent.querySelector('[data-role="prog-body"]');
       if (host) host.innerHTML = `<div class="progress-empty">Could not read progress: ${escapeHtml(err.message)}</div>`;
     }
-    // Keep polling only while the job is actually running.
-    if (currentRun && currentRun.status === "running" && progressState.enabled) {
+    // Keep polling until the job reaches a terminal status. Checking only
+    // for "running" here used to stall polling for good: a fresh run's
+    // very first poll can land while currentRun.status is still "pending"
+    // -- start_subprocess_job returns (and this poll fires right after)
+    // before its asyncio.create_task(_run_subprocess(...)) gets to flip
+    // status to "running" (job_runner.py) -- and that one poll (0 files
+    // yet) would render empty and never get scheduled again. "pending" is
+    // just as much "still going" as "running" for polling purposes.
+    if (currentRun && !["completed", "failed", "aborted"].includes(currentRun.status)
+        && progressState.enabled) {
       progressTimer = setTimeout(refreshProgress, PROGRESS_POLL_MS);
     }
   }
@@ -4279,7 +4287,7 @@ async function openVisualizer(pickingContext = null) {
   setTimeout(layoutStage, 0);
 }
 
-document.getElementById("visualizeBtn").addEventListener("click", openVisualizer);
+document.getElementById("visualizeBtn").addEventListener("click", () => openVisualizer());
 
 // ==========================================================================
 // Server-side FILE picker.
