@@ -401,6 +401,13 @@ class StartRunRequest(BaseModel):
     # SAME output directory + job number as an earlier run, instead of
     # allocating a new one.
     overwrite_run_id: str | None = None
+    # "Submit to SLURM cluster" (see job_runner.start_subprocess_job's
+    # slurm_options param / _run_slurm_job). Only meaningful for a real
+    # RELION job (never a custom job -- see the branch below); left None
+    # (the default, most common case) runs the command locally exactly as
+    # before. Shape: {"account", "partition", "time_limit", "mem"}, all
+    # optional strings.
+    slurm: dict | None = None
 
 
 @app.post("/api/runs")
@@ -460,6 +467,7 @@ async def start_run(req: StartRunRequest):
             req.internal_name, display_name, req.command,
             subdir=req.subdir, field_values=req.field_values,
             overwrite_run_id=req.overwrite_run_id,
+            slurm_options=req.slurm,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

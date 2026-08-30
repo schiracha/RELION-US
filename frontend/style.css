@@ -285,6 +285,7 @@ html, body {
 .cc-status-badge.status-failed { background: rgba(226, 88, 77, .15); color: var(--err); }
 .cc-status-badge.status-aborted { background: rgba(226, 88, 77, .15); color: var(--err); }
 .cc-status-badge.status-pending { background: rgba(154, 164, 178, .15); color: var(--text-dim); }
+.cc-status-badge.status-queued { background: rgba(79, 140, 255, .15); color: var(--accent); }
 
 /* A started_at/ended_at/duration inferred from file mtimes rather than
    recorded by RELION-US itself (see formatTimestamp/formatDuration in

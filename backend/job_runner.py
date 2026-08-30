@@ -45,12 +45,24 @@ from typing import Any, Optional
 import job_catalog
 import pipeline_bridge
 import project_manager
+import slurm_bridge
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_ABORTED = "aborted"
+# Submitted to SLURM but not yet running there (sbatch succeeded, job is
+# sitting in the scheduler's queue) -- see _run_slurm_job. Distinct from
+# STATUS_PENDING (the short local window between start_subprocess_job()
+# creating the run and its own task actually beginning) since "queued in
+# SLURM" can legitimately last hours, not milliseconds.
+STATUS_QUEUED = "queued"
+
+# How often _run_slurm_job polls squeue/sacct for a status change. Not
+# configurable via Settings (yet) -- a module-level constant so tests can
+# monkeypatch it down for a fast poll loop rather than actually sleeping.
+SLURM_POLL_INTERVAL_S = 15
 
 # Manual status overrides a user can apply via "Mark as finished"/"Mark as
 # failed" (real RELION job actions, see gui_mainwindow.cpp's
@@ -219,6 +231,17 @@ class JobRun:
     # run for why this alone isn't treated as sufficient without a plausible
     # -match check first (PIDs get reused by the OS).
     pid: Optional[int] = None
+    # Set once _run_slurm_job's sbatch submission succeeds -- persisted
+    # (to_summary() includes it) the same way pid is, so it survives a
+    # backend restart: abort_run/poll logic key off THIS, not pid (a SLURM
+    # job has no local pid at all -- see the module docstring's note on
+    # start_subprocess_job's slurm_options param).
+    slurm_job_id: Optional[str] = None
+    # Last raw SLURM state string seen by the poll loop (e.g. "RUNNING",
+    # "COMPLETED") -- diagnostic only, not used for any status-mapping
+    # decision (that's slurm_bridge.SLURM_STATE_TO_STATUS, applied fresh
+    # each poll); surfaced in to_summary() for the Command Center to show.
+    slurm_state: Optional[str] = None
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
     subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
@@ -285,6 +308,8 @@ class JobRun:
             "status": self.status,
             "exit_code": self.exit_code,
             "pid": self.pid,
+            "slurm_job_id": self.slurm_job_id,
+            "slurm_state": self.slurm_state,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "project_dir": self.project_dir,
@@ -295,7 +320,9 @@ class JobRun:
             "job_name": self.job_name,
             "field_values": self.field_values,
             "detected_inputs": self.detected_inputs,
-            "abortable": self.status == STATUS_RUNNING and (self.proc is not None or self.task is not None),
+            "abortable": self.status in (STATUS_RUNNING, STATUS_QUEUED) and (
+                self.proc is not None or self.task is not None or self.slurm_job_id is not None
+            ),
             "pipeline_registered": self.pipeline_registered,
         }
 
@@ -817,7 +844,7 @@ class JobRunManager:
                 "cwd": entry.get("cwd"), "job_number": entry.get("job_number", 0),
                 "alias": entry.get("alias", ""), "note": entry.get("note", ""),
             }
-        if info["status"] == STATUS_RUNNING and not allow_running:
+        if info["status"] in (STATUS_RUNNING, STATUS_QUEUED) and not allow_running:
             raise ValueError("Cannot overwrite a job that is still running")
         if info["project_dir"] != str(project_dir):
             raise ValueError("Cannot overwrite a job from a different/inactive project")
@@ -865,6 +892,7 @@ class JobRunManager:
         subdir: Optional[str] = None,
         field_values: Optional[dict] = None,
         overwrite_run_id: Optional[str] = None,
+        slurm_options: Optional[dict] = None,
     ) -> JobRun:
         """
         Launch `command` (the exact, user-edited string) via the shell,
@@ -895,6 +923,17 @@ class JobRunManager:
         its history just resets and starts again. Raises ValueError if
         that run can't be found, is still running, or belongs to a
         different project than the one currently active.
+
+        slurm_options: when given (shape: {"account", "partition",
+        "time_limit", "mem"}, all optional strings), this run is submitted
+        to SLURM (_run_slurm_job) instead of launched as a local subprocess
+        (_run_subprocess) -- everything ABOVE this docstring's own concerns
+        (job numbering, Overwrite, RELION pipeline registration) is
+        identical either way; only the actual execution mechanism differs,
+        at the single branch point where `run.task` is created below. See
+        _run_slurm_job's own docstring for why local-subprocess abort/
+        status-polling logic (deeply PID/process-group-based) isn't reused
+        for this path at all.
         """
         project_dir = self.project_dir
         rewrite_note = None
@@ -1049,7 +1088,10 @@ class JobRunManager:
         run.pipeline_sync_error = pipeline_sync_error
         self.runs[run_id] = run
         self._persist(run)
-        run.task = asyncio.create_task(self._run_subprocess(run))
+        if slurm_options is not None:
+            run.task = asyncio.create_task(self._run_slurm_job(run, slurm_options))
+        else:
+            run.task = asyncio.create_task(self._run_subprocess(run))
         return run
 
     async def _run_subprocess(self, run: JobRun) -> None:
@@ -1198,32 +1240,262 @@ class JobRunManager:
                     exit_code = await proc.wait()
                 except Exception:  # noqa: BLE001
                     exit_code = proc.returncode
-            run.exit_code = exit_code
-            # abort_run() may already have set this to STATUS_ABORTED (and
-            # requested termination) -- don't let the process's exit code
-            # (non-zero after a SIGTERM) overwrite that with STATUS_FAILED.
-            if run.status != STATUS_ABORTED:
-                run.status = STATUS_COMPLETED if exit_code == 0 else STATUS_FAILED
-            run.ended_at = time.time()
             run.proc = None
-            self._persist(run)
-            # Let RELION update its own record of this job, if two-way sync is
-            # on. Off the event loop: relion_pipeliner takes the pipeline lock
-            # and can wait on an open RELION GUI for up to a minute, which would
-            # otherwise stall every other websocket in the app.
-            if self.pipeline_sync_enabled(Path(run.project_dir)):
-                synced = await asyncio.to_thread(
-                    self.sync_completion_to_relion, Path(run.project_dir))
-                if not synced:
-                    note = ("[RELION-US] Could not update RELION's pipeline with this "
-                            "job's final status. The job itself is unaffected; run "
-                            "`relion_pipeliner --check_job_completion` in the project, "
-                            "or open RELION's GUI, to refresh it.")
-                    run.stdout_lines.append(note)
-                    await run.broadcast({"type": "stdout", "line": note})
-            await run.broadcast(
-                {"type": "status", "status": run.status, "exit_code": exit_code}
+            await self._finalize_run(run, exit_code)
+
+    async def _finalize_run(self, run: JobRun, exit_code: Optional[int]) -> None:
+        """
+        The completion tail every execution path (local subprocess,
+        SLURM) shares once a run has genuinely reached a terminal state:
+        record the exit code/status/end time, persist, let RELION's own
+        pipeline catch up if two-way sync is on, and broadcast the final
+        status. Extracted from _run_subprocess's own finally-block so
+        _run_slurm_job gets the exact same RELION-pipeline-sync handshake
+        a local job already gets, without duplicating it.
+        """
+        run.exit_code = exit_code
+        # abort_run() may already have set this to STATUS_ABORTED (and
+        # requested termination) -- don't let the process's exit code
+        # (non-zero after a SIGTERM, or SLURM's CANCELLED-job exit code)
+        # overwrite that with STATUS_FAILED.
+        if run.status != STATUS_ABORTED:
+            run.status = STATUS_COMPLETED if exit_code == 0 else STATUS_FAILED
+        run.ended_at = time.time()
+        self._persist(run)
+        # Let RELION update its own record of this job, if two-way sync is
+        # on. Off the event loop: relion_pipeliner takes the pipeline lock
+        # and can wait on an open RELION GUI for up to a minute, which would
+        # otherwise stall every other websocket in the app.
+        if self.pipeline_sync_enabled(Path(run.project_dir)):
+            synced = await asyncio.to_thread(
+                self.sync_completion_to_relion, Path(run.project_dir))
+            if not synced:
+                note = ("[RELION-US] Could not update RELION's pipeline with this "
+                        "job's final status. The job itself is unaffected; run "
+                        "`relion_pipeliner --check_job_completion` in the project, "
+                        "or open RELION's GUI, to refresh it.")
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+        await run.broadcast(
+            {"type": "status", "status": run.status, "exit_code": exit_code}
+        )
+
+    SLURM_TEMPLATE = Path(__file__).resolve().parent.parent / "slurm" / "template_relion_job.sbatch"
+
+    async def _tail_new_lines(
+        self, run: JobRun, path: Path, pos: int, msg_type: str, flush_partial: bool = False
+    ) -> int:
+        """Append any bytes written to `path` since `pos`, broadcast each
+        new line, and return the new read position. `path` may not exist
+        yet (SLURM can take a moment to actually create the output file,
+        and a fast job can reach a terminal state without ever being
+        observed as RUNNING at all -- see _run_slurm_job) -- that's
+        normal, not an error.
+
+        Splits on the raw NEWLINE BYTE (0x0A) before ever decoding, not
+        by decoding the whole chunk first and re-encoding a leftover
+        remainder to figure out how many bytes to roll back: 0x0A can
+        never be a continuation byte of a multi-byte UTF-8 sequence, so
+        slicing at a real newline is always character-boundary-safe. The
+        earlier decode-then-reencode approach could permanently corrupt a
+        multi-byte character if a poll happened to land mid-character --
+        this can't.
+
+        flush_partial: when True (the caller's final pass once the job
+        has reached a terminal state, so no more data is coming), a
+        trailing chunk with NO newline at all is still emitted rather
+        than held back forever -- otherwise a job's last line (a common
+        case: a final status message with no trailing newline) would be
+        silently dropped, since no later poll will ever complete it.
+        """
+        try:
+            with open(path, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+                new_pos = f.tell()
+        except FileNotFoundError:
+            return pos
+        if not chunk:
+            return pos
+
+        nl_idx = chunk.rfind(b"\n")
+        if nl_idx == -1:
+            if not flush_partial:
+                return pos  # no complete line yet; wait for one
+            complete_bytes, end_pos = chunk, new_pos
+        else:
+            complete_bytes, end_pos = chunk[:nl_idx], pos + nl_idx + 1
+
+        sink = run.stdout_lines if msg_type == "stdout" else run.stderr_lines
+        for line in complete_bytes.decode(errors="replace").split("\n"):
+            sink.append(line)
+            await run.broadcast({"type": msg_type, "line": line})
+        return end_pos
+
+    async def _run_slurm_job(self, run: JobRun, slurm_options: dict) -> None:
+        """
+        SLURM counterpart to _run_subprocess -- a deliberately SEPARATE
+        execution path, not a variant of it. _run_subprocess's whole shape
+        (live PIPE streaming, a real local `proc` handle, signal-based
+        abort via process groups) assumes this app directly owns an OS
+        process; a SLURM job has none of that -- no local PID, no pipes
+        until the job actually starts on a compute node it was never told
+        about directly. This method instead: submits via sbatch, tracks
+        the job by SLURM's own job ID (run.slurm_job_id), polls
+        squeue/sacct on an interval instead of watching a process exit,
+        and tails the job's own output/error files (written into run.cwd
+        at deterministic, pre-chosen paths -- not SLURM's %x-%j pattern,
+        which this app can't resolve until AFTER submission and which
+        would also land in the submission cwd rather than the job's
+        tracked output directory, out of Delete's reach) rather than
+        reading a live pipe. Tailing starts from the moment a job ID
+        exists, not gated on ever observing the job reach RUNNING first --
+        a fast job can go queued -> completed between two polls, skipping
+        RUNNING entirely, and would otherwise lose 100% of its output.
+        Shares only JobRun's shape, run.broadcast()'s WebSocket interface
+        (so the frontend needs no changes to display either kind of run),
+        and _finalize_run's completion tail with _run_subprocess.
+
+        Exactly one call to _finalize_run happens per invocation of this
+        method -- via the try/except/finally structure below, mirroring
+        _run_subprocess's own try/except/finally shape, so an exception
+        raised BY _finalize_run's own body (pipeline sync, etc.) can never
+        trigger a second, contradictory call to it the way an inner
+        try/except around just the success path once did.
+
+        abort_run() cancels a SLURM run via `scancel` directly (not by
+        cancelling run.task, unlike a custom job) -- this loop just keeps
+        polling afterward and picks up the resulting CANCELLED state on
+        its own next iteration, finalizing through the normal path below.
+        The one gap that closes: abort_run() can only reach `scancel` once
+        run.slurm_job_id is set, so an abort click that lands DURING the
+        submit_sbatch() call below (the only real await point before that)
+        falls through to abort_run()'s "not spawned yet" branch instead,
+        setting run.status=ABORTED with nothing to cancel yet -- this
+        method checks for exactly that once submission returns, and
+        cancels the now-live job immediately rather than silently
+        overwriting ABORTED back to QUEUED and letting it run unmanaged.
+        """
+        exit_code = None
+        try:
+            field_values = run.field_values or {}
+            ntasks = int(float(field_values.get("nr_mpi", 1) or 1))
+            cpus_per_task = int(float(field_values.get("nr_threads", 1) or 1))
+            gres_line = ""
+            if field_values.get("use_gpu"):
+                gpu_ids = str(field_values.get("gpu_ids", "") or "")
+                # A concrete id list ("0,1") implies 2 devices; blank means
+                # "let RELION auto-allocate" (see job_registry.py's own
+                # --gpu "" convention) -- request 1 GPU as a sane default
+                # in that case, since SLURM (unlike RELION) has no
+                # equivalent "figure it out yourself" option.
+                n_gpus = len([g for g in gpu_ids.replace(":", ",").split(",") if g.strip()]) or 1
+                gres_line = f"#SBATCH --gres=gpu:{n_gpus}"
+
+            job_name = f"relion_us_job{run.job_number:03d}"
+            out_path = Path(run.cwd) / "run_submit.out"
+            err_path = Path(run.cwd) / "run_submit.err"
+            filled = slurm_bridge.fill_sbatch_template(
+                self.SLURM_TEMPLATE,
+                command=run.command,
+                job_name=job_name,
+                account=str(slurm_options.get("account", "") or ""),
+                partition=str(slurm_options.get("partition", "") or ""),
+                ntasks=ntasks,
+                cpus_per_task=cpus_per_task,
+                mem=str(slurm_options.get("mem", "") or "4G"),
+                time_limit=str(slurm_options.get("time_limit", "") or "24:00:00"),
+                gres_line=gres_line,
+                out_path=str(out_path),
+                err_path=str(err_path),
             )
+            script_path = Path(run.cwd) / "run_submit.sbatch"
+            script_path.write_text(filled)
+
+            # The only real await point before a job ID exists -- see this
+            # method's own docstring on the abort-during-submission race.
+            job_id = await asyncio.to_thread(
+                slurm_bridge.submit_sbatch, script_path, cwd=Path(run.project_dir))
+            run.slurm_job_id = job_id
+
+            if run.status == STATUS_ABORTED:
+                note = f"[RELION-US] Abort arrived during submission; cancelling SLURM job {job_id}."
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+                await asyncio.to_thread(slurm_bridge.cancel_job, job_id)
+                exit_code = 1
+            else:
+                run.status = STATUS_QUEUED
+                self._persist(run)
+                note = f"[RELION-US] Submitted to SLURM as job {job_id}."
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+                await run.broadcast({"type": "status", "status": run.status})
+
+                last_status = STATUS_QUEUED
+                out_pos = err_pos = 0
+                new_status = STATUS_QUEUED
+                info = {"exit_code": None}
+
+                while True:
+                    await asyncio.sleep(SLURM_POLL_INTERVAL_S)
+                    try:
+                        info = await asyncio.to_thread(slurm_bridge.poll_job_state, job_id)
+                    except Exception as exc:  # noqa: BLE001
+                        # Transient polling failure (scheduler momentarily
+                        # unreachable, etc.) -- log it but keep polling
+                        # rather than failing a job that may well still be
+                        # running.
+                        msg = f"[RELION-US] SLURM status check failed: {exc}"
+                        run.stderr_lines.append(msg)
+                        await run.broadcast({"type": "stderr", "line": msg})
+                        continue
+
+                    run.slurm_state = info["raw_state"]
+                    new_status = slurm_bridge.SLURM_STATE_TO_STATUS.get(info["raw_state"], STATUS_RUNNING)
+                    is_terminal = new_status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_ABORTED)
+
+                    if new_status != last_status:
+                        if run.status != STATUS_ABORTED:
+                            run.status = new_status
+                        self._persist(run)
+                        await run.broadcast({"type": "status", "status": run.status})
+                        last_status = new_status
+
+                    out_pos = await self._tail_new_lines(
+                        run, out_path, out_pos, "stdout", flush_partial=is_terminal)
+                    err_pos = await self._tail_new_lines(
+                        run, err_path, err_pos, "stderr", flush_partial=is_terminal)
+
+                    if is_terminal:
+                        break
+
+                exit_code = info.get("exit_code")
+                if exit_code is None:
+                    exit_code = 0 if new_status == STATUS_COMPLETED else 1
+            await self._finalize_run(run, exit_code)
+        except asyncio.CancelledError:
+            # This task being cancelled (app shutdown/reload -- abort_run()
+            # deliberately never cancels it, see this method's own
+            # docstring) has no effect on the actual SLURM job, which keeps
+            # existing on the scheduler independent of this app's process
+            # lifetime. Finalizing here with no real exit code would
+            # incorrectly mark a job that's still genuinely queued/running
+            # on the cluster as STATUS_FAILED. Just stop tracking it and
+            # let it be: a future abort_run() (including its persisted-
+            # history restart-recovery path, keyed on the already-set
+            # run.slurm_job_id) can still act on it correctly later.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Same guarantee _run_subprocess's try/finally gives: an
+            # unexpected error here must not strand the run "queued"/
+            # "running" forever with nothing tracking it.
+            msg = f"[RELION-US] error while managing SLURM job: {type(exc).__name__}: {exc}"
+            run.stderr_lines.append(msg)
+            await run.broadcast({"type": "stderr", "line": msg})
+            if exit_code is None:
+                exit_code = 1
+            await self._finalize_run(run, exit_code)
 
     async def start_custom_job(
         self,
@@ -1551,25 +1823,66 @@ class JobRunManager:
         if run is None:
             history = project_manager.load_history(self.project_dir)
             entry = next((h for h in history if h.get("run_id") == run_id), None)
-            if entry is None or entry.get("status") not in (STATUS_PENDING, STATUS_RUNNING):
+            if entry is None or entry.get("status") not in (STATUS_PENDING, STATUS_RUNNING, STATUS_QUEUED):
                 return False
-            pid = entry.get("pid")
-            if pid is not None and self._pid_matches_persisted_run(pid, entry):
-                self._kill_session(pid, signal.SIGTERM)
+            slurm_job_id = entry.get("slurm_job_id")
+            if slurm_job_id is not None:
+                # Unlike a local PID (meaningless after a restart -- no live
+                # handle, no process-group membership to walk), a SLURM job
+                # ID is still directly actionable: the scheduler tracks it
+                # independently of this app's own process lifetime.
+                # Best-effort, same as the PID path below: scancel raises
+                # if the job already finished naturally (a real race --
+                # nothing stops that between the last poll and this click)
+                # or the scheduler is briefly unreachable; either way, the
+                # persisted status is reconciled to aborted regardless, so
+                # a raised RuntimeError here must not propagate and leave
+                # this run stuck un-reconciled (or 500 the HTTP endpoint).
+                try:
+                    await asyncio.to_thread(slurm_bridge.cancel_job, slurm_job_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                pid = entry.get("pid")
+                if pid is not None and self._pid_matches_persisted_run(pid, entry):
+                    self._kill_session(pid, signal.SIGTERM)
             self._update_persisted_only(run_id, status=STATUS_ABORTED, ended_at=time.time())
             return True
         # PENDING counts: there is a real window between start_*_job() creating
         # the run and its task setting status to RUNNING, so a click landing in
         # that window must still abort cleanly. The abort_requested flag below
-        # covers the process handle not existing yet.
-        if run.status not in (STATUS_PENDING, STATUS_RUNNING):
+        # covers the process handle not existing yet. QUEUED (SLURM, sitting
+        # in the scheduler) is abortable too -- see the slurm_job_id branch.
+        if run.status not in (STATUS_PENDING, STATUS_RUNNING, STATUS_QUEUED):
             return False
         run.status = STATUS_ABORTED
         run.ended_at = time.time()
         self._persist(run)
         await run.broadcast({"type": "stderr", "line": "Aborted by user."})
         await run.broadcast({"type": "status", "status": run.status})
-        if run.proc is not None:
+        if run.slurm_job_id is not None:
+            # _run_slurm_job's poll loop is still running as run.task -- it
+            # is NOT cancelled here (unlike the custom-job branch below):
+            # scancel is fire-and-forget from SLURM's side, so the loop's
+            # own next poll is what confirms the cancellation actually
+            # landed (via squeue/sacct reporting CANCELLED) and finalizes
+            # through the normal path, exit code included. This preserves
+            # STATUS_ABORTED (just set above) rather than letting a later
+            # poll overwrite it -- see _run_slurm_job's own status-update
+            # guard. Best-effort: scancel can raise (job already finished
+            # naturally, scheduler briefly unreachable) -- status was
+            # already optimistically set and broadcast above regardless,
+            # matching the local-subprocess path's own "reconcile either
+            # way" philosophy; must not 500 the abort HTTP endpoint over
+            # what's already, functionally, a successful abort from the
+            # user's perspective.
+            try:
+                await asyncio.to_thread(slurm_bridge.cancel_job, run.slurm_job_id)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"[RELION-US] scancel failed (job may have already finished): {exc}"
+                run.stderr_lines.append(msg)
+                await run.broadcast({"type": "stderr", "line": msg})
+        elif run.proc is not None:
             self._terminate_process_group(run)
         elif run.is_custom_job:
             # In-process converter job: the task IS the work, so cancelling it
@@ -1613,7 +1926,7 @@ class JobRunManager:
             needs_start = entry.get("started_at") is None
             needs_end = (
                 entry.get("ended_at") is None
-                and status not in (STATUS_PENDING, STATUS_RUNNING)
+                and status not in (STATUS_PENDING, STATUS_RUNNING, STATUS_QUEUED)
             )
             if not cwd or not (needs_start or needs_end):
                 continue
@@ -1836,7 +2149,7 @@ class JobRunManager:
                 return False, "Unknown run_id"
             status, cwd, project_dir = entry.get("status"), entry.get("cwd"), entry.get("project_dir")
 
-        if status == STATUS_RUNNING:
+        if status in (STATUS_RUNNING, STATUS_QUEUED):
             return False, "Cannot delete a job that is still running -- abort it first"
 
         if remove_files and cwd and project_dir:

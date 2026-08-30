@@ -11,17 +11,17 @@
 #
 # Usage: fill in the placeholders, then `sbatch template_relion_job.sbatch`
 
-#SBATCH --job-name=relion_us_job
+#SBATCH --job-name=JOB_NAME
 #SBATCH --account=ACCOUNT_NAME              # your allocation/account, if your cluster requires one
 #SBATCH --partition=PARTITION_NAME          # e.g. gpu, standard, batch -- see `sinfo` on your cluster
-#SBATCH --gres=gpu:1                        # remove this line for CPU-only jobs
+GRES_LINE
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=08:00:00
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --ntasks=NTASKS
+#SBATCH --cpus-per-task=CPUS_PER_TASK
+#SBATCH --mem=MEM_SIZE
+#SBATCH --time=TIME_LIMIT
+#SBATCH --output=OUT_PATH
+#SBATCH --error=ERR_PATH
 
 set -euo pipefail
 
@@ -34,15 +34,15 @@ module purge 2>/dev/null || true
 module load relion   # confirm the exact module name/version on your cluster
 # module load imod   # uncomment if this job also calls IMOD CLI tools
 
-# RELION job command goes here. Example (relion_tomo_reconstruct_particle
-# is illustrative — replace with the actual relion_tomo_* / relion_refine
-# invocation this job needs, matching what the RELION GUI would generate
-# for the equivalent interactive job):
+# RELION job command. Filled in automatically when submitted from the
+# RELION-US job popup's "Submit to SLURM cluster" option (the exact same
+# command that would run locally) -- when filling this template by hand,
+# replace the placeholder line below (all-caps, on its own) with the
+# actual relion_tomo_*/relion_refine invocation this job needs, e.g.:
 #
 # relion_tomo_reconstruct_particle \
 #     --i "${RELION_PROJECT_DIR}/optimisation_set.star" \
 #     --o "${RELION_PROJECT_DIR}/Reconstruct/job001/" \
-#     --j "${SLURM_CPUS_PER_TASK}"
+#     --j 8   # match the --cpus-per-task value requested above
 
-echo "Fill in the actual relion_* command above before submitting."
-exit 1
+RELION_COMMAND

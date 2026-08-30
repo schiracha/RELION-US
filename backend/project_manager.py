@@ -674,6 +674,14 @@ GLOBAL_SETTINGS_DEFAULTS: dict[str, Any] = {
     "progress.refresh_interval_s": None,
     "progress.images_every_n_default": None,
     "project_browse.default_folder": None,
+    # Prefill values for the job popup's "Submit to SLURM cluster" fields
+    # (see job_runner.start_subprocess_job's slurm_options param) -- same
+    # "None means no override, the field starts blank" convention as
+    # job_defaults.* above.
+    "slurm.account": None,
+    "slurm.partition": None,
+    "slurm.default_time": None,
+    "slurm.default_mem": None,
 }
 
 

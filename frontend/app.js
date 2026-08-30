@@ -673,6 +673,15 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
       </label>
       <textarea class="command-box" data-role="command-box"></textarea>
+      <div class="slurm-row" data-role="slurm-row">
+        <label class="slurm-toggle-label"><input type="checkbox" data-role="slurm-toggle"> Submit to SLURM cluster</label>
+        <div class="slurm-fields" data-role="slurm-fields" hidden>
+          <label>Account <input type="text" placeholder="e.g. mygroup" data-role="slurm-account"></label>
+          <label>Partition <input type="text" placeholder="e.g. gpu, standard" data-role="slurm-partition"></label>
+          <label>Time limit <input type="text" placeholder="24:00:00" data-role="slurm-time"></label>
+          <label>Memory <input type="text" placeholder="32G" data-role="slurm-mem"></label>
+        </div>
+      </div>
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
         <span class="status-line" data-role="status-line"></span>
@@ -991,6 +1000,38 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const runBtn = body.querySelector('[data-role="run-btn"]');
   const doneBtn = body.querySelector('[data-role="done-btn"]');
 
+  // --- "Submit to SLURM cluster" (only present for a non-custom job --
+  // see the command-row template above; def.is_custom jobs never render
+  // slurm-row at all). Mirrors real RELION's own do_queue toggle: fields
+  // are irrelevant/hidden until checked. Present (unchecked, prefilled
+  // from Settings) for a fresh job OR a reopened run that was itself a
+  // SLURM job (so Overwrite can consciously opt back in -- see the
+  // isReopen block below, which fully hides this row instead for a
+  // reopened LOCAL run, since offering it there would be meaningless).
+  // Original per-run SLURM options aren't persisted/recorded anywhere, so
+  // Settings' current defaults are the best available prefill either way
+  // -- same "only override if actually set" rule applicableJobDefaults()
+  // already uses for job_defaults.* above, just against raw DOM elements
+  // here rather than a field-values map.
+  const slurmRow = body.querySelector('[data-role="slurm-row"]');
+  if (slurmRow) {
+    const slurmToggle = slurmRow.querySelector('[data-role="slurm-toggle"]');
+    const slurmFields = slurmRow.querySelector('[data-role="slurm-fields"]');
+    const slurmAccount = slurmRow.querySelector('[data-role="slurm-account"]');
+    const slurmPartition = slurmRow.querySelector('[data-role="slurm-partition"]');
+    const slurmTime = slurmRow.querySelector('[data-role="slurm-time"]');
+    const slurmMem = slurmRow.querySelector('[data-role="slurm-mem"]');
+    if (!isReopen || currentRun.slurm_job_id) {
+      if (globalSettings["slurm.account"]) slurmAccount.value = globalSettings["slurm.account"];
+      if (globalSettings["slurm.partition"]) slurmPartition.value = globalSettings["slurm.partition"];
+      if (globalSettings["slurm.default_time"]) slurmTime.value = globalSettings["slurm.default_time"];
+      if (globalSettings["slurm.default_mem"]) slurmMem.value = globalSettings["slurm.default_mem"];
+    }
+    slurmToggle.addEventListener("change", () => {
+      slurmFields.hidden = !slurmToggle.checked;
+    });
+  }
+
   // --- Job actions toolbar --------------------------------------------
   const toolbar = body.querySelector('[data-role="actions-toolbar"]');
   const jobNameDisplay = toolbar.querySelector('[data-role="job-name-display"]');
@@ -1056,13 +1097,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     if (continueBtn) {
       continueBtn.hidden = !hasRun || fromRelion || !(status === "completed" || status === "failed");
     }
-    // Overwrite blocks on "running" for a normal job (nothing sensible to
-    // re-run into while it's still going) -- NOT for a picking job, whose
-    // "running" is a steady, long-lived state with no real computation to
-    // collide with; Overwrite there means "abandon these picks and start a
-    // clean session in the same slot" (see custom_jobs.run_manual_pick),
-    // meaningful at any point.
-    const overwriteBlockedByStatus = status === "running" && !def.is_picker;
+    // Overwrite blocks on "running" (or "queued" -- a SLURM job still
+    // sitting in the scheduler is just as live) for a normal job (nothing
+    // sensible to re-run into while it's still going) -- NOT for a
+    // picking job, whose "running" is a steady, long-lived state with no
+    // real computation to collide with (and which is never a SLURM job in
+    // the first place); Overwrite there means "abandon these picks and
+    // start a clean session in the same slot" (see custom_jobs.
+    // run_manual_pick), meaningful at any point.
+    const isActiveStatus = status === "running" || status === "queued";
+    const overwriteBlockedByStatus = isActiveStatus && !def.is_picker;
     // A RELION-native job can be overwritten too, but only with sync on --
     // start_subprocess_job's overwrite branch (job_runner.py) re-uses the
     // SAME process row via pipeline_bridge.set_process_status, matched by
@@ -1085,10 +1129,20 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // Overwrite it's safe even for a RELION-native (read-only) job or one
     // that's still running.
     cloneBtn.hidden = !hasRun;
-    abortBtn.hidden = !hasRun || fromRelion || status !== "running";
-    markFinishedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "completed";
-    markFailedBtn.hidden = !hasRun || fromRelion || status === "running" || status === "failed";
-    deleteBtn.hidden = !hasRun || fromRelion || status === "running";
+    // Abort must cover "queued" too -- a SLURM job can sit queued in the
+    // scheduler for hours (see job_runner.STATUS_QUEUED's own comment);
+    // hiding Abort until it happens to start running would leave no way
+    // to cancel it from the UI in the meantime.
+    abortBtn.hidden = !hasRun || fromRelion || !isActiveStatus;
+    // Mark Finished/Failed must ALSO block on "queued", not just
+    // "running" -- set_status() has no current-status guard on the
+    // backend at all (unlike Abort/Overwrite/Delete), so clicking either
+    // on a still-queued SLURM job would desync this app's tracking from a
+    // job that's actually still consuming allocation on the real cluster,
+    // with nothing left to scancel it.
+    markFinishedBtn.hidden = !hasRun || fromRelion || isActiveStatus || status === "completed";
+    markFailedBtn.hidden = !hasRun || fromRelion || isActiveStatus || status === "failed";
+    deleteBtn.hidden = !hasRun || fromRelion || isActiveStatus;
     // Alias/note are exempt from the RELION-native read-only treatment
     // everything else on this toolbar gets -- both are kept as a purely
     // local overlay for a RELION-native job (see job_runner.set_alias/
@@ -1265,6 +1319,14 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         // job being overwritten, or from a hand-edit -- rather than
         // silently running with whatever --o the text happens to say.
         payload.subdir = popupOutputSubdir;
+        if (slurmRow && slurmRow.querySelector('[data-role="slurm-toggle"]').checked) {
+          payload.slurm = {
+            account: slurmRow.querySelector('[data-role="slurm-account"]').value.trim(),
+            partition: slurmRow.querySelector('[data-role="slurm-partition"]').value.trim(),
+            time_limit: slurmRow.querySelector('[data-role="slurm-time"]').value.trim(),
+            mem: slurmRow.querySelector('[data-role="slurm-mem"]').value.trim(),
+          };
+        }
       }
       const run = await api("/api/runs", {
         method: "POST",
@@ -1926,6 +1988,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // Show status/output immediately instead.
     const commandRow = body.querySelector('[data-role="command-row"]');
     if (commandRow) commandRow.querySelector('[data-role="run-btn"]').style.display = "none";
+    // Keep the SLURM row available (unchecked, same as a fresh job) only
+    // if THIS run was originally submitted to SLURM -- otherwise Overwrite
+    // would offer an option that never applied to this job. Fully hide it
+    // for a run that ran locally. Without this, Overwrite (below) would
+    // silently rerun a SLURM job as a plain local subprocess with no
+    // indication the execution target changed.
+    if (slurmRow && !currentRun.slurm_job_id) slurmRow.style.display = "none";
     statusLine.textContent = `Status: ${currentRun.status}`;
     statusLine.className = statusLineClass(currentRun.status);
     connectWebSocket(currentRun.run_id);
@@ -1945,6 +2014,14 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           // Tell the backend which <JobDir>/jobNNN this command's --o targets,
           // so it creates/tracks that dir and can renumber if it was taken.
           payload.subdir = popupOutputSubdir;
+          if (slurmRow && slurmRow.querySelector('[data-role="slurm-toggle"]').checked) {
+            payload.slurm = {
+              account: slurmRow.querySelector('[data-role="slurm-account"]').value.trim(),
+              partition: slurmRow.querySelector('[data-role="slurm-partition"]').value.trim(),
+              time_limit: slurmRow.querySelector('[data-role="slurm-time"]').value.trim(),
+              mem: slurmRow.querySelector('[data-role="slurm-mem"]').value.trim(),
+            };
+          }
         }
         const run = await api("/api/runs", {
           method: "POST",
@@ -2923,6 +3000,16 @@ async function openSettingsPopup() {
       <label>Threads <input type="number" min="1" data-key="job_defaults.nr_threads"></label>
       <label>GPU IDs <input type="text" placeholder="e.g. 0 or 0:1" data-key="job_defaults.gpu_ids"></label>
       <label>Additional arguments <input type="text" data-key="job_defaults.other_args"></label>
+    </section>
+    <section class="settings-section">
+      <h3>SLURM cluster defaults</h3>
+      <p class="settings-hint">Pre-fills the job popup's "Submit to SLURM
+        cluster" fields. Leave blank for none -- these are just a
+        convenience so you don't retype your account/partition every time.</p>
+      <label>Account/allocation <input type="text" placeholder="e.g. mygroup" data-key="slurm.account"></label>
+      <label>Partition <input type="text" placeholder="e.g. gpu, standard" data-key="slurm.partition"></label>
+      <label>Default time limit <input type="text" placeholder="e.g. 24:00:00" data-key="slurm.default_time"></label>
+      <label>Default memory <input type="text" placeholder="e.g. 32G" data-key="slurm.default_mem"></label>
     </section>
     <section class="settings-section">
       <h3>App behavior</h3>

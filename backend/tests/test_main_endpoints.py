@@ -16,6 +16,8 @@ below for why `main.run_manager` -- a module-level singleton -- needs a
 dedicated per-test wiring trick, not just `tmp_path` on its own).
 """
 import asyncio
+import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -345,3 +347,55 @@ def test_get_settings_returns_a_settings_dict(client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     assert isinstance(resp.json()["settings"], dict)
+
+
+def test_post_runs_with_slurm_payload_submits_via_sbatch(client, tmp_path, monkeypatch):
+    """POST /api/runs with a `slurm` field must reach
+    JobRunManager.start_subprocess_job's slurm_options path (issue #1) --
+    end-to-end through the real HTTP layer, not just the job_runner unit
+    tests. Uses a stub sbatch on PATH, same technique
+    test_slurm_job_runner.py uses directly against JobRunManager.
+
+    Deliberately does NOT use the synchronous `client` fixture's TestClient
+    for the actual POST/GET calls (only for its project-directory setup) --
+    confirmed while writing this test: TestClient's own event-loop portal
+    doesn't let a background asyncio.create_task's asyncio.to_thread(...)
+    subprocess call make progress between separate synchronous client
+    calls (it hangs indefinitely, reproduced with a minimal FastAPI+
+    TestClient repro outside this codebase entirely -- a TestClient
+    threading limitation, not a bug in _run_slurm_job). Same
+    httpx2.AsyncClient/ASGITransport-on-one-asyncio.run() workaround
+    test_abort_a_running_job already uses above for the same class of
+    problem with a genuinely-concurrent background task."""
+    bindir = tmp_path / "slurm_bin"
+    bindir.mkdir()
+    sbatch = bindir / "sbatch"
+    sbatch.write_text("#!/usr/bin/env bash\necho \"424242\"\n")
+    sbatch.chmod(sbatch.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+
+    import job_runner as job_runner_module
+    monkeypatch.setattr(job_runner_module, "SLURM_POLL_INTERVAL_S", 3600)  # never poll during this test
+
+    async def go():
+        transport = httpx2.ASGITransport(app=main.app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://testserver") as ac:
+            resp = await ac.post("/api/runs", json={
+                "internal_name": "Import",
+                "command": "echo hello",
+                "subdir": "Import/job001",
+                "slurm": {"account": "mygroup", "partition": "batch"},
+            })
+            run_id = resp.json()["run_id"]
+            for _ in range(250):
+                run = main.run_manager.runs.get(run_id)
+                if run is not None and run.status in ("queued", "completed", "failed"):
+                    break
+                await asyncio.sleep(0.02)
+            detail_resp = await ac.get(f"/api/runs/{run_id}")
+            return resp, detail_resp.json()
+
+    post_resp, detail = asyncio.run(go())
+    assert post_resp.status_code == 200
+    assert detail["status"] == "queued"
+    assert detail["slurm_job_id"] == "424242"
