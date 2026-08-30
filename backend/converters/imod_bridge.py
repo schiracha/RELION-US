@@ -26,6 +26,12 @@ Scope, deliberately narrow:
 Everything that shells out checks the binary is on PATH first and raises a
 clear RuntimeError naming the missing tool, rather than a bare
 FileNotFoundError from subprocess.
+
+Re-verified 2026-08-30 against a real, locally-installed IMOD 5.1.12 CLI
+(`man model2point`, `man point2model`) rather than only the web docs: the
+axis-orientation ambiguity and the -0.5 half-pixel Z offset documented
+below are exactly what the real man pages describe, and this module's
+`model2point`/`point2model` invocations use valid, correctly-named flags.
 """
 from __future__ import annotations
 
@@ -209,6 +215,7 @@ def coordinates_to_model(
     df: pd.DataFrame,
     out_mod_path: PathLike,
     tomo_name: Optional[str] = None,
+    tomo_mrc_path: Optional[PathLike] = None,
 ) -> Path:
     """
     Write a RELION particles DataFrame (or a subset already filtered to one
@@ -218,6 +225,17 @@ def coordinates_to_model(
     If tomo_name is given, the DataFrame is filtered to
     df['rlnTomoName'] == tomo_name first; otherwise the whole DataFrame is
     assumed to already be single-tomogram.
+
+    tomo_mrc_path (optional): the tomogram volume this .mod was picked/QC'd
+    against. When given, passed to point2model's own `-image` flag so the
+    written .mod carries correct volume/pixel-dimension header info. Per
+    `man point2model` (confirmed against the real IMOD 5.1.12 install,
+    2026-08-30): "If you intend to take the model directly into a
+    processing program like Tiltalign, Beadtrack, or Ccderaser... you need
+    to use the -image option so that coordinates will be treated
+    correctly." Left as None by default (matching this function's prior
+    behavior exactly) since the primary documented use case here is visual
+    QC in 3dmod, which tolerates a .mod without it.
     """
     point2model = _require_binary("point2model")
     required = ("rlnCoordinateX", "rlnCoordinateY", "rlnCoordinateZ")
@@ -250,6 +268,8 @@ def coordinates_to_model(
         "-output",
         str(out_mod_path),
     ]
+    if tomo_mrc_path is not None:
+        cmd += ["-image", str(tomo_mrc_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(

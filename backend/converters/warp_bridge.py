@@ -51,6 +51,27 @@ operations, plus a *configurable* mapping step:
 Send me one real particles star file (or .tomostar) from your Warp/M
 project and I'll fill in DEFAULT_COLUMN_MAP with a verified, version
 -specific mapping instead of this placeholder.
+
+Re-verified 2026-08-30 against WarpTools' official docs
+(warpem.github.io/warp/reference/warptools/tomogram_particle_files/,
+verbatim loop_ block quoted, plus 3 corroborating community threads/gists
+citing real Warp/M column headers) — this confirms the two-path framing
+above is correct: real Warp/M particle exports use native `rln*` names,
+so DEFAULT_COLUMN_MAP staying empty is the right default, not a gap.
+Two further, narrower gaps this research did surface (both handled below,
+each labeled with its own confidence):
+
+  * The official WarpTools example for the older "RELION 3.0 single STAR
+    file" tomography format uses `rlnMicrographName` (holding the
+    .tomostar filename) as the tomogram-identity column, where the
+    RELION-5 `ts_export_particles` path uses `rlnTomoName` instead — see
+    TOMOGRAM_NAME_COL_ALTERNATES below. This is an official-source finding.
+  * Warp/RELION >=3.1 exports Angstrom-scale `rlnOriginXAngst`/
+    `rlnOriginYAngst`; M (older versions) expects pixel-scale
+    `rlnOriginX`/`rlnOriginY` — see angstrom_origin_to_pixel_origin()
+    below. This is community-sourced (a protocol gist), not from an
+    official Warp/RELION doc — treat it as a helper to opt into, not a
+    default behavior.
 """
 from __future__ import annotations
 
@@ -70,6 +91,46 @@ DEFAULT_COLUMN_MAP: dict[str, str] = {}
 
 RELION_REQUIRED_PARTICLE_COLUMNS = (TOMOGRAM_NAME_COL,) + COORD_COLS
 
+# Alternate names RELION/Warp have used for the tomogram-identity column
+# across versions — see the module docstring's WarpTools citation. Only
+# rlnMicrographName is confirmed from an official source; kept as its own
+# tuple (rather than folded into RELION_REQUIRED_PARTICLE_COLUMNS) so
+# diff_columns/harmonize_particle_star can treat it as "satisfies the
+# rlnTomoName requirement" without ever reporting BOTH as independently
+# required.
+TOMOGRAM_NAME_COL_ALTERNATES = (TOMOGRAM_NAME_COL, "rlnMicrographName")
+
+
+def _resolve_tomogram_name_alternate(
+    present_columns,
+    required_columns: tuple[str, ...] = RELION_REQUIRED_PARTICLE_COLUMNS,
+) -> Optional[str]:
+    """
+    Shared by diff_columns() and harmonize_particle_star() so they can't
+    drift into disagreeing about what counts as an alternate (an earlier
+    version had each reimplement this independently with different
+    semantics — set-based "any alternate" vs. list-based "first
+    alternate" — which would have silently diverged the moment a second
+    alternate name was ever added).
+
+    Returns the alternate column name that should satisfy/be renamed to
+    TOMOGRAM_NAME_COL, or None if no alternate applies. Only relevant when
+    TOMOGRAM_NAME_COL is itself required and currently absent. An alternate
+    that is ALSO independently listed in required_columns does not count —
+    that means the caller wants both names as genuinely separate columns,
+    not "either name satisfies the same requirement", so it must not be
+    collapsed/renamed away (the collision this guard specifically prevents:
+    without it, a required_columns tuple listing both rlnTomoName and
+    rlnMicrographName would have the latter silently renamed into the
+    former, then reported as "still missing" even though it was present).
+    """
+    if TOMOGRAM_NAME_COL not in required_columns or TOMOGRAM_NAME_COL in present_columns:
+        return None
+    for alt in TOMOGRAM_NAME_COL_ALTERNATES:
+        if alt != TOMOGRAM_NAME_COL and alt in present_columns and alt not in required_columns:
+            return alt
+    return None
+
 
 def load_warp_star(path: PathLike, block: Optional[str] = None) -> pd.DataFrame:
     """Load a Warp/M .tomostar or particle STAR file (reuses star_io)."""
@@ -86,13 +147,28 @@ def diff_columns(
     pipeline needs. Returns {'matched': [...], 'missing_from_source': [...],
     'extra_in_source': [...]} so you can see at a glance whether a mapping
     step is even necessary.
+
+    If reference_columns requires TOMOGRAM_NAME_COL (rlnTomoName) and the
+    source has rlnMicrographName instead, that alternate counts as matched
+    rather than being reported as both missing and (confusingly) extra —
+    see _resolve_tomogram_name_alternate and the module docstring.
     """
     source_cols = set(source_df.columns)
     ref_cols = set(reference_columns)
+    matched = source_cols & ref_cols
+    missing = ref_cols - source_cols
+    extra = source_cols - ref_cols
+
+    alt = _resolve_tomogram_name_alternate(source_cols, reference_columns)
+    if alt is not None:
+        missing = missing - {TOMOGRAM_NAME_COL}
+        matched = matched | {alt}
+        extra = extra - {alt}
+
     return {
-        "matched": sorted(source_cols & ref_cols),
-        "missing_from_source": sorted(ref_cols - source_cols),
-        "extra_in_source": sorted(source_cols - ref_cols),
+        "matched": sorted(matched),
+        "missing_from_source": sorted(missing),
+        "extra_in_source": sorted(extra),
     }
 
 
@@ -111,9 +187,23 @@ def harmonize_particle_star(
     see module docstring). Passing an explicit column_map is always safer
     than relying on the default until that default has been confirmed
     against your actual Warp/M output.
+
+    If required_columns needs TOMOGRAM_NAME_COL (rlnTomoName) and it's
+    still absent after column_map but rlnMicrographName is present, that
+    alternate is renamed to rlnTomoName too (see
+    _resolve_tomogram_name_alternate and the module docstring's WarpTools
+    citation) — this is an explicit, documented, version-aware rename for
+    a confirmed real naming convention, not a guessed mapping like
+    DEFAULT_COLUMN_MAP's placeholder would be. Leaving it unrenamed would
+    just move the same failure downstream into write_particles(), which
+    hard-requires rlnTomoName by name.
     """
     mapping = DEFAULT_COLUMN_MAP if column_map is None else column_map
     renamed = df.rename(columns=mapping)
+
+    alt = _resolve_tomogram_name_alternate(set(renamed.columns), required_columns)
+    if alt is not None:
+        renamed = renamed.rename(columns={alt: TOMOGRAM_NAME_COL})
 
     missing = [c for c in required_columns if c not in renamed.columns]
     if missing:
@@ -124,6 +214,44 @@ def harmonize_particle_star(
             f"correct Warp/M source column at each missing RELION name."
         )
     return renamed
+
+
+def angstrom_origin_to_pixel_origin(
+    df: pd.DataFrame,
+    pixel_size_angst: float,
+    columns: tuple[str, str] = ("rlnOriginXAngst", "rlnOriginYAngst"),
+    out_columns: tuple[str, str] = ("rlnOriginX", "rlnOriginY"),
+) -> pd.DataFrame:
+    """
+    Convert Warp/RELION >=3.1-style Angstrom-scale particle origin columns
+    (rlnOriginXAngst/rlnOriginYAngst) to the pixel-scale rlnOriginX/
+    rlnOriginY columns older M versions expect: pixel = angstrom /
+    pixel_size_angst.
+
+    COMMUNITY-SOURCED, not from an official Warp/RELION doc (see the
+    module docstring) — this is a real, reported friction point in the
+    Warp->RELION->M pipeline, but treat it as an opt-in helper to call
+    only if you hit this specific mismatch, not something applied by
+    default anywhere else in this module.
+
+    Only touches `columns` that are actually present; raises KeyError if
+    NEITHER is present (nothing to convert), same style as
+    remap_tomogram_paths. Does NOT raise if only one of the two is present
+    (matching remap_tomogram_paths' "only touch what's present" philosophy)
+    — but that leaves the output with only a partial pixel-scale pair, so
+    check the returned columns if you need both.
+    """
+    if pixel_size_angst <= 0:
+        raise ValueError(f"pixel_size_angst must be > 0, got {pixel_size_angst!r}")
+    present = [c for c in columns if c in df.columns]
+    if not present:
+        raise KeyError(f"None of {columns} present; available: {list(df.columns)}")
+    out = df.copy()  # single copy — mutate in place from here, not per-column
+    for src, dst in zip(columns, out_columns):
+        if src in out.columns:
+            out[dst] = out[src] / pixel_size_angst
+            del out[src]
+    return out
 
 
 def remap_tomogram_paths(

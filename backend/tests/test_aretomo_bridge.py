@@ -1,3 +1,15 @@
+"""
+Tests for aretomo_bridge.py's .aln -> .xf/.tlt conversion.
+
+The ROT/TX/TY -> .xf formula under test here was verified 2026-08-30
+against a real AreTomo2 source checkout (ImodUtil/CSaveXF.cpp,
+MrcUtil/CSaveAlnFile.cpp) term-for-term — see aretomo_bridge.py's own
+module docstring for the full citation. These tests still only check
+self-consistency against a hand-built SAMPLE_ALN (no real .aln/tilt-series
+data was available locally to build a true I/O ground-truth fixture — see
+the module docstring's note on the local AreTomo2 binary's broken CUDA
+runtime), but the formula itself is no longer just community-sourced.
+"""
 import math
 import sys
 from pathlib import Path

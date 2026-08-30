@@ -39,13 +39,29 @@ def test_read_coords_accepts_3col_xyz(tmp_path):
 
 
 def test_read_coords_rejects_wrong_field_count(tmp_path):
-    # 2 columns and 5 columns are genuinely malformed (neither `x y z` nor
-    # `class_id x y z`) and must still be rejected.
-    for bad in ("1.0 2.0\n", "0 1.0 2.0 3.0 4.0\n"):
+    # 2 columns and 6+ columns are genuinely malformed (neither `x y z` nor
+    # `class_id x y z`, and not the recognized 5-column Coords_withArea
+    # shape either) and must still be rejected with the generic message.
+    for bad in ("1.0 2.0\n", "0 1.0 2.0 3.0 4.0 5.0\n"):
         path = tmp_path / "bad.coords"
         path.write_text(bad)
         with pytest.raises(ValueError, match="expected 'class_id x y z'"):
             read_coords(path)
+
+
+def test_read_coords_rejects_5col_with_actionable_message(tmp_path):
+    """DeepETPicker also emits a 5-column `Coords_withArea` variant
+    (class_id x y z area, test.py's Coords_withArea writer). Auto-parsing
+    it by taking the last 3 columns (mirroring coords_to_relion4.py's own
+    slicing) would silently grab (y, z, area) instead of (x, y, z) here —
+    so this must stay a hard rejection, but with a specific, actionable
+    message pointing the user at Coords_All instead of the generic
+    field-count error. Verified against the real DeepETPicker source
+    checkout, 2026-08-30."""
+    path = tmp_path / "with_area.coords"
+    path.write_text("0 100.0 110.0 50.0 12.5\n")
+    with pytest.raises(ValueError, match="Coords_withArea"):
+        read_coords(path)
 
 
 def test_coords_to_relion_particles_no_scaling(tmp_path):

@@ -241,12 +241,29 @@ async def run_warp_import(project_dir: Path, values: dict, job_dir: Path) -> str
                 "correct source column names."
             )
         else:
+            # harmonize_particle_star (not the raw df) so the
+            # rlnMicrographName -> rlnTomoName alternate-column rename
+            # actually applies before writing -- see its own docstring and
+            # TOMOGRAM_NAME_COL_ALTERNATES in warp_bridge.py. With
+            # DEFAULT_COLUMN_MAP still empty, this is a no-op for any df
+            # that already has rlnTomoName directly.
+            harmonized = warp_bridge.harmonize_particle_star(df)
+            if "rlnTomoName" not in df.columns and "rlnTomoName" in harmonized.columns:
+                # Surface this explicitly -- diff_columns' "Matched RELION
+                # columns" line above only shows the alternate's ORIGINAL
+                # name (rlnMicrographName), so without this a user could
+                # miss that it's being written out under a different name.
+                lines.append(
+                    "Note: no rlnTomoName column found — using rlnMicrographName "
+                    "as the tomogram identity (older RELION 3.0-style tomography "
+                    "format; renamed to rlnTomoName in the output)."
+                )
             out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
             note = ""
             if out_path.exists():
                 backup = backup_before_overwrite(out_path)
                 note = f" (existing file backed up to {backup})"
-            write_particles(df, out_path, overwrite=True)
+            write_particles(harmonized, out_path, overwrite=True)
             lines.append(f"Wrote {out_path}{note}")
         return "\n".join(lines)
 
@@ -301,8 +318,9 @@ async def run_aretomo_import(project_dir: Path, values: dict, job_dir: Path) -> 
         lines.append(
             "Point RELION-5's IMOD tilt-series import at these .xf/.tlt. "
             "TX/TY were in pixels of the aligned stack — supply the correct "
-            "pixel size downstream. Validate against an AreTomo -OutImod .xf "
-            "if exactness matters (see the .aln field help)."
+            "pixel size downstream. The ROT/TX/TY -> .xf formula has been "
+            "verified against AreTomo2's own -OutImod source code (see "
+            "converters/aretomo_bridge.py's module docstring)."
         )
         return "\n".join(lines)
 

@@ -4,7 +4,11 @@ output and RELION-5 tomography particles.star.
 
 Verified against the DeepETPicker README (github.com/cbmi-group/DeepETPicker,
 accessed 2026-08-14; DeepETPicker itself: Liu et al. 2024, Nat Commun
-15:2090, PMID 38453943, DOI 10.1038/s41467-024-46041-0):
+15:2090, PMID 38453943, DOI 10.1038/s41467-024-46041-0), and re-verified
+2026-08-30 directly against a real DeepETPicker source checkout
+(test.py's Coords_All writer, utils/misc.py's get_centroids, and
+utils/coords_to_relion4.py) — column order, delimiter, and voxel units
+all match exactly:
 
 - DeepETPicker's native output is `*.coords`: four whitespace-separated
   columns `class_id x y z`, coordinates in voxels of the tomogram it was
@@ -67,6 +71,23 @@ def read_coords(path: PathLike) -> pd.DataFrame:
         elif len(parts) == 3:
             # bare `x y z` — DeepETPicker defaults class_id to 1 here
             class_id, (x, y, z) = 1, parts
+        elif len(parts) == 5:
+            # DeepETPicker's `Coords_withArea` variant (test.py's
+            # Coords_withArea writer): `class_id x y z area`. Deliberately
+            # NOT auto-parsed: DeepETPicker's own coords_to_relion4.py
+            # slices the LAST 3 columns as X/Y/Z, which for this 5-column
+            # form would grab (y, z, area) instead of (x, y, z) — silently
+            # corrupting coordinates. That converter is only ever pointed
+            # at the 4-column Coords_All output in practice; mirror that
+            # constraint here with a clear error instead of guessing.
+            raise ValueError(
+                f"{path}:{lineno}: got 5 fields — this looks like "
+                f"DeepETPicker's 'Coords_withArea' output ('class_id x y z "
+                f"area'), which this bridge does not support (the trailing "
+                f"area column can't be safely stripped without risking a "
+                f"misread). Point this at DeepETPicker's 'Coords_All' "
+                f"directory instead (4-column 'class_id x y z'): {line!r}"
+            )
         else:
             raise ValueError(
                 f"{path}:{lineno}: expected 'class_id x y z' (4 cols) or "

@@ -113,6 +113,49 @@ def test_custom_job_output_lands_in_its_own_job_dir(tmp_path):
     assert not (tmp_path / "particles.star").exists(), "output leaked to the project root"
 
 
+def test_run_warp_import_writes_particles_for_a_real_shaped_export(tmp_path):
+    """run_warp_import had zero integration-level coverage before this test
+    (confirmed via grep) despite being wired into the real job runner just
+    like DeepETPickerImport above. Uses the real, WarpTools-docs-verified
+    column shape (test_warp_bridge.py's REAL_WARPTOOLS_PARTICLE_COLUMNS) --
+    rlnMicrographName as the tomogram-identity column, no rlnTomoName --
+    to confirm the run_warp_import -> harmonize_particle_star wiring
+    (added alongside the rlnMicrographName alternate-column fix) actually
+    renames it and writes a valid particles.star end-to-end, not just at
+    the unit level."""
+    project_manager.init_new_project(tmp_path)
+    warp_df = pd.DataFrame({
+        "rlnCoordinateX": [443.701994], "rlnCoordinateY": [214.586768],
+        "rlnCoordinateZ": [203.739618], "rlnAngleRot": [54.077932],
+        "rlnAngleTilt": [-29.726951], "rlnAnglePsi": [92.706063],
+        "rlnMicrographName": ["TS_01.tomostar"],
+    })
+    starfile.write({"particles": warp_df}, tmp_path / "warp_export.star", overwrite=True)
+    manager = JobRunManager(tmp_path)
+    values = {"warp_star_path": "warp_export.star", "block_name": "", "out_path": "particles.star"}
+
+    async def go():
+        async def factory(job_dir):
+            return await custom_jobs.run_warp_import(tmp_path, values, job_dir)
+        run = await manager.start_custom_job(
+            "WarpImport", "Warp/M Import", factory, field_values=values
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status not in ("pending", "running"):
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == "completed", run.stderr_lines
+    job_dir = Path(run.cwd)
+    out_path = job_dir / "particles.star"
+    assert out_path.is_file(), "output not written -- harmonize wiring likely broken"
+    written = starfile.read(out_path)
+    assert "rlnTomoName" in written.columns
+    assert written.loc[0, "rlnTomoName"] == "TS_01.tomostar"
+
+
 # --------------------------------------------------------------------------
 # Manualpick / TomoManualPick -- see manual_pick.py for the STAR output
 # these jobs' *picker* writes; run_manual_pick/run_tomo_manual_pick

@@ -3,11 +3,13 @@ Unit tests for converters/imod_bridge.py.
 
 .xf / .tlt tests run everywhere (pure Python, plain text formats).
 .mod tests are skipped automatically if IMOD's point2model/model2point
-aren't on PATH (they won't be in this sandbox — that's expected; they will
-be available after `module load imod` on an HPC cluster, or on a
-workstation with IMOD installed).
+aren't on PATH. On this dev machine conftest.py's
+_add_local_imod_to_path_if_needed adds the real local IMOD 5.1.12 install
+to PATH automatically, so those tests actually run here rather than skip;
+on a sandbox with no IMOD install at all they still skip as before.
 """
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,6 +80,60 @@ def test_missing_binary_raises_clear_error(tmp_path, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="point2model"):
         coordinates_to_model(df, tmp_path / "out.mod", tomo_name="TS_01")
+
+
+def test_coordinates_to_model_passes_image_flag_when_given(tmp_path, monkeypatch):
+    """man point2model (real IMOD 5.1.12, verified 2026-08-30) recommends
+    -image when the .mod feeds downstream IMOD tools; tomo_mrc_path should
+    add it to the constructed command. Captures the real argv via a
+    monkeypatched subprocess.run rather than requiring a real, valid .mrc
+    file on disk (point2model would otherwise need one to succeed with
+    -image), matching test_missing_binary_raises_clear_error's own style."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        (tmp_path / "out.mod").write_bytes(b"")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    df = pd.DataFrame({
+        "rlnTomoName": ["TS_01"],
+        "rlnCoordinateX": [1.0],
+        "rlnCoordinateY": [2.0],
+        "rlnCoordinateZ": [3.0],
+    })
+    mrc = tmp_path / "TS_01.mrc"
+    coordinates_to_model(df, tmp_path / "out.mod", tomo_name="TS_01", tomo_mrc_path=mrc)
+
+    assert "-image" in captured["cmd"]
+    assert str(mrc) == captured["cmd"][captured["cmd"].index("-image") + 1]
+
+
+def test_coordinates_to_model_omits_image_flag_by_default(tmp_path, monkeypatch):
+    """Without tomo_mrc_path, the command must be unchanged from before this
+    parameter existed — no -image flag at all."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        (tmp_path / "out.mod").write_bytes(b"")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    df = pd.DataFrame({
+        "rlnTomoName": ["TS_01"],
+        "rlnCoordinateX": [1.0],
+        "rlnCoordinateY": [2.0],
+        "rlnCoordinateZ": [3.0],
+    })
+    coordinates_to_model(df, tmp_path / "out.mod", tomo_name="TS_01")
+
+    assert "-image" not in captured["cmd"]
 
 
 @pytest.mark.skipif(not IMOD_AVAILABLE, reason="IMOD point2model/model2point not on PATH")

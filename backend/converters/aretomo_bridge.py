@@ -36,11 +36,19 @@ own `-OutImod` export:
     DY  =  A21*(-TX) + A22*(-TY)
 
 i.e. a pure rotation by -ROT, with the shift negated and rotated into the
-transformed frame. This mapping is verified by working community code and by
-AreTomo's own IMOD output, but is NOT published as a formula by the AreTomo
-authors — so if exactness matters, validate against a real `-OutImod` `.xf`
-from your own data (noted in the AreTomo2 field help). GMAG/SCALE (≈1) are
-NOT folded in, matching alnfile.
+transformed frame. GMAG/SCALE (≈1) are NOT folded in, matching alnfile.
+
+VERIFIED 2026-08-30 against a real AreTomo2 source checkout
+(github.com/czimaginginstitute/AreTomo2), term-for-term, not just
+community code: `ImodUtil/CSaveXF.cpp` (`mSaveForWarp`/`mSaveForRelion`,
+the actual `-OutImod` `.xf` writer) constructs A11/A12/A21/A22/DX/DY with
+exactly this formula from `CAlignParam::GetTiltAxis`/`GetShift`, and
+`MrcUtil/CSaveAlnFile.cpp` (the `.aln` writer) confirms those are the same
+values printed as the ROT/TX/TY columns above — both come from the same
+`CAlignParam` object, so `.aln`'s ROT/TX/TY really are the `-OutImod`
+writer's direct inputs, with GMAG hardcoded to 1.0 and never read by
+either writer. This formula is no longer just community-sourced; it has
+been checked against the vendor's own code and matches exactly.
 
 Note: AreTomo2 can itself emit IMOD files with `-OutImod 1/2/3`. If you still
 have that output, prefer it. This bridge is for when you only kept the
