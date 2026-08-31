@@ -527,6 +527,13 @@ html, body {
 .job-actions-toolbar .btn.danger { border-color: var(--err); color: var(--err); }
 .job-actions-toolbar .btn.danger:hover { background: rgba(226, 88, 77, .15); }
 .job-actions-toolbar .btn[hidden] { display: none; }
+/* Generalized (not toolbar-scoped) so any destructive button gets this --
+   the toolbar-scoped rule above only ever added it alongside toolbar-
+   specific sizing, not for real namespacing reasons. Covers the Trash
+   popup's own danger buttons, and incidentally the Outputs tab's harsh-
+   clean/confirm-delete buttons, which had no danger styling at all before. */
+.btn.danger { border-color: var(--err); color: var(--err); }
+.btn.danger:hover { background: rgba(226, 88, 77, .15); }
 .job-note-row {
   padding: 4px 10px;
   border-bottom: 1px solid var(--border);
@@ -1034,6 +1041,22 @@ html, body {
   color: var(--text); box-sizing: border-box;
 }
 .settings-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 6px; border-top: 1px solid var(--border); }
+
+/* ---- Trash popup (Menu > Trash, issue #2) ---- */
+.trash-popup { padding: 14px 16px; height: 100%; overflow-y: auto; box-sizing: border-box; font-size: 13px; }
+.trash-hint, .trash-error { color: var(--text-dim); font-size: 12px; }
+.trash-error { color: var(--err); }
+.trash-actions-top { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.trash-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.trash-table th {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+  color: var(--text-dim); font-weight: 500;
+}
+.trash-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.trash-row-actions { display: flex; gap: 6px; white-space: nowrap; }
+.trash-row-actions .btn { padding: 3px 7px; font-size: 11px; }
+.trash-recovery-full { color: var(--ok); }
+.trash-recovery-partial { color: var(--warn); }
 
 /* ---- Analyze popup (Menu > Tools > Analyze) ---- */
 .analyze-popup { display: flex; flex-direction: column; height: 100%; background: var(--bg); color: var(--text); font-size: 13px; }

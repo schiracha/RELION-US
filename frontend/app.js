@@ -281,6 +281,7 @@ fetch("/api/auth/status")
   const menuToolsBtn = document.getElementById("menuToolsBtn");
   const menuToolsSubmenu = document.getElementById("menuToolsSubmenu");
   const menuSettingsBtn = document.getElementById("menuSettingsBtn");
+  const menuTrashBtn = document.getElementById("menuTrashBtn");
   const menuAnalyzeBtn = document.getElementById("menuAnalyzeBtn");
 
   let closeMenuListeners = null;
@@ -315,6 +316,7 @@ fetch("/api/auth/status")
     menuToolsSubmenu.classList.toggle("hidden");
   });
   menuSettingsBtn.addEventListener("click", () => { closeMenu(); openSettingsPopup(); });
+  menuTrashBtn.addEventListener("click", () => { closeMenu(); openTrashPopup(); });
   menuAnalyzeBtn.addEventListener("click", () => { closeMenu(); openAnalyzePopup(); });
 }
 
@@ -1246,13 +1248,15 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   deleteBtn.addEventListener("click", async () => {
     if (!currentRun) return;
     const removeFiles = await confirmDialog(
-      `Delete "${currentRun.job_name}"?\n\nThis removes it from the job history. Also delete its output directory (${currentRun.cwd || "unknown path"})? This cannot be undone.`,
-      { confirmLabel: "Delete + remove files", danger: true }
+      `Delete "${currentRun.job_name}"?\n\nThis removes it from the job history. Also move its output directory (${currentRun.cwd || "unknown path"}) to Trash? You can recover it later from Menu → 🗑 Trash, until it's permanently emptied from there.`,
+      { confirmLabel: "Delete + move to Trash", danger: true }
     );
     // A single confirm covers both "delete the history entry" (always) and
-    // "also remove files" (what the danger-styled confirm button means
-    // here) -- Cancel aborts the whole action rather than offering a third
-    // "delete history only" click, keeping this to one dialog.
+    // "also move files to Trash" (what the danger-styled confirm button
+    // means here, matching real RELION's own Delete-moves-to-Trash
+    // behavior -- see project_manager.move_to_trash) -- Cancel aborts the
+    // whole action rather than offering a third "delete history only"
+    // click, keeping this to one dialog.
     if (!removeFiles) return;
     try {
       await api(`/api/runs/${currentRun.run_id}?remove_files=true`, { method: "DELETE" });
@@ -3056,6 +3060,139 @@ async function openSettingsPopup() {
     onclose: () => { currentSettingsWinbox = null; return false; },
   });
   currentSettingsWinbox = win;
+}
+
+// Job Recovery (issue #2) -- mirrors real RELION's own Delete-moves-to-
+// -Trash + Undelete + separate-Empty-trash model (see job_runner.py's
+// module docstring on delete_run/restore_from_trash for the full
+// citation). "Restore" puts a trashed job back in its exact original
+// slot (POST /api/trash/restore); "Clone as new job" instead reuses the
+// EXISTING Clone code path unchanged (openJobPopup's cloneFieldValues --
+// same one cloneBtn already uses in a live job's popup), opening a fresh,
+// newly-numbered job pre-filled from the trashed job's recovered
+// settings -- exactly the two options issue #2 asked for, offered
+// together since a trashed job "may be missing things or have issues"
+// (job_star_available reports concretely whether this recovery used
+// RELION's own job.star record or only this app's own last-known snapshot).
+let currentTrashWinbox = null;
+
+async function openTrashPopup() {
+  if (currentTrashWinbox) { try { currentTrashWinbox.close(); } catch (err) {} currentTrashWinbox = null; }
+
+  const body = document.createElement("div");
+  body.className = "trash-popup";
+
+  async function refresh() {
+    let trash;
+    try {
+      trash = (await api("/api/trash")).trash;
+    } catch (err) {
+      body.innerHTML = `<p class="trash-error">Could not load Trash: ${escapeHtml(err.message)}</p>`;
+      return;
+    }
+    if (!trash.length) {
+      body.innerHTML = `<p class="trash-hint">Trash is empty. Deleting a job with "remove files" checked moves it here instead of destroying it right away.</p>`;
+      return;
+    }
+    body.innerHTML = `
+      <div class="trash-actions-top">
+        <button class="btn danger" data-role="empty-trash">🗑 Empty Trash (${trash.length})</button>
+      </div>
+      <table class="trash-table">
+        <thead><tr><th>Job</th><th>Type</th><th>Deleted</th><th>Recovery</th><th></th></tr></thead>
+        <tbody>
+          ${trash.map((e, i) => `
+            <tr data-index="${i}">
+              <td>${escapeHtml(e.alias || e.job_name || `job${String(e.job_number).padStart(3, "0")}`)}</td>
+              <td>${escapeHtml(e.display_name || e.internal_name)}</td>
+              <td>${formatTimestamp(e.deleted_at)}</td>
+              <td>${e.job_star_available
+                ? '<span class="trash-recovery-full" title="Recovered from RELION\'s own job.star -- the same record reopening any RELION-native job reads">RELION job.star</span>'
+                : '<span class="trash-recovery-partial" title="job.star was not written for this job (two-way RELION sync was off when it ran) -- recovered from RELION-US\'s own last-known settings instead">RELION-US snapshot</span>'}
+              </td>
+              <td class="trash-row-actions">
+                <button class="btn" data-action="restore">↩ Restore</button>
+                <button class="btn" data-action="clone">⎘ Clone as new job</button>
+                <button class="btn danger" data-action="delete-forever">✕</button>
+              </td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    `;
+
+    body.querySelector('[data-role="empty-trash"]').addEventListener("click", async () => {
+      const ok = await confirmDialog(
+        `Permanently delete all ${trash.length} job(s) in Trash? This cannot be undone.`,
+        { confirmLabel: "Empty Trash", danger: true }
+      );
+      if (!ok) return;
+      try {
+        await api("/api/trash", { method: "DELETE" });
+        await refresh();
+      } catch (err) {
+        errorDialog("Could not empty Trash: " + err.message);
+      }
+    });
+
+    trash.forEach((entry, i) => {
+      const row = body.querySelector(`tr[data-index="${i}"]`);
+      const label = entry.alias || entry.job_name || `job${String(entry.job_number).padStart(3, "0")}`;
+      const staleness = entry.job_star_available
+        ? ""
+        : " Its settings are reconstructed from RELION-US's own last-known values, not RELION's own record, since job.star wasn't available.";
+
+      row.querySelector('[data-action="restore"]').addEventListener("click", async () => {
+        const ok = await confirmDialog(
+          `Restore "${label}" (${entry.display_name || entry.internal_name})?\n\nDeleted ${formatTimestamp(entry.deleted_at).replace(/<[^>]+>/g, "")}. It may be missing files or have stale references.${staleness}\n\nConsider "Clone as new job" instead if you just want its settings, not this exact job slot back.`,
+          { confirmLabel: "Restore", danger: false }
+        );
+        if (!ok) return;
+        try {
+          const run = await api("/api/trash/restore?" + new URLSearchParams({ trash_id: entry.trash_id }), { method: "POST" });
+          currentTrashWinbox.close();
+          refreshCommandCenter();
+          openJobPopup(run.internal_name, run.display_name || run.internal_name, run);
+        } catch (err) {
+          errorDialog("Could not restore: " + err.message);
+        }
+      });
+
+      row.querySelector('[data-action="clone"]').addEventListener("click", async () => {
+        const ok = await confirmDialog(
+          `Clone "${label}" (${entry.display_name || entry.internal_name}) as a fresh new job, pre-filled with its recovered settings?${staleness}\n\nThis does NOT restore the original job slot or touch Trash -- it only opens a new, separately-numbered job popup.`,
+          { confirmLabel: "Clone as new job", danger: false }
+        );
+        if (!ok) return;
+        currentTrashWinbox.close();
+        openJobPopup(entry.internal_name, entry.display_name || entry.internal_name, null, {
+          cloneFieldValues: entry.field_values || {},
+        });
+      });
+
+      row.querySelector('[data-action="delete-forever"]').addEventListener("click", async () => {
+        const ok = await confirmDialog(
+          `Permanently delete "${label}"? This cannot be undone.`,
+          { confirmLabel: "Delete forever", danger: true }
+        );
+        if (!ok) return;
+        try {
+          await api("/api/trash?" + new URLSearchParams({ trash_id: entry.trash_id }), { method: "DELETE" });
+          await refresh();
+        } catch (err) {
+          errorDialog("Could not permanently delete: " + err.message);
+        }
+      });
+    });
+  }
+
+  await refresh();
+
+  const win = new WinBox({
+    title: "Trash", width: "620px", height: "480px", x: "center", y: "center",
+    mount: body, class: ["trash-winbox"],
+    onclose: () => { currentTrashWinbox = null; return false; },
+  });
+  currentTrashWinbox = win;
 }
 
 // Read-only, not-a-job popup inspired by CNIO_Relion_Tools' relion_analyse.py

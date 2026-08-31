@@ -2125,13 +2125,19 @@ class JobRunManager:
     def delete_run(self, run_id: str, remove_files: bool) -> tuple[bool, str]:
         """Real RELION 'Delete' job action. Always removes the run from
         this app's tracked history (in-memory + persisted). If
-        remove_files, also removes the run's own output directory --
-        always safe to do unconditionally here (unlike Clean/Harsh Clean,
-        see cleanup_candidates() below) because that directory is one
+        remove_files, moves the run's own output directory into Trash/
+        instead of destroying it (see project_manager.move_to_trash --
+        mirrors RELION's own Delete exactly, which is a move-to-Trash, not
+        a permanent removal; see issue #2) -- always safe to do
+        unconditionally here (unlike Clean/Harsh Clean, see
+        cleanup_candidates() below) because that directory is one
         RELION-US itself created exclusively for this run; nothing else
         can be living in it. Refuses (returns False, reason) rather than
-        deleting anything outside that directory, or a still-running job's
-        directory out from under it.
+        touching anything outside that directory, or a still-running job's
+        directory out from under it. remove_files=False (keep the
+        directory exactly where it is, just stop tracking it) is a
+        deliberately separate, non-Trash action -- out of Trash's scope,
+        unchanged by issue #2.
 
         Works the same whether this run is still live in self.runs (this
         session) or only survives in persisted history (a run from a
@@ -2142,28 +2148,93 @@ class JobRunManager:
         run = self.get(run_id)
         if run is not None:
             status, cwd, project_dir = run.status, run.cwd, run.project_dir
+            summary = run.to_summary()
         else:
             history = project_manager.load_history(self.project_dir)
             entry = next((h for h in history if h.get("run_id") == run_id), None)
             if entry is None:
                 return False, "Unknown run_id"
             status, cwd, project_dir = entry.get("status"), entry.get("cwd"), entry.get("project_dir")
+            summary = entry
 
         if status in (STATUS_RUNNING, STATUS_QUEUED):
             return False, "Cannot delete a job that is still running -- abort it first"
 
         if remove_files and cwd and project_dir:
-            ok, reason = self._safe_rmtree(cwd, project_dir)
-            if not ok:
-                return False, reason
+            try:
+                trashed_dir = project_manager.move_to_trash(Path(project_dir), Path(cwd))
+            except (ValueError, FileExistsError, OSError) as exc:
+                return False, str(exc)
+            try:
+                project_manager.write_trash_sidecar(trashed_dir, summary)
+            except OSError as exc:
+                # The move already succeeded; without a sidecar the
+                # directory would be invisible to list_trash (nothing
+                # globs for it) -- an orphan nobody can Restore or
+                # permanently delete except by wiping ALL of Trash/. Found
+                # in code review: roll back rather than leave that.
+                try:
+                    shutil.move(str(trashed_dir), cwd)
+                except OSError:
+                    pass  # best-effort; report the original failure regardless
+                return False, f"Could not record trash metadata, so the move was rolled back: {exc}"
 
         self.runs.pop(run_id, None)
         target_dir = Path(project_dir) if project_dir else self.project_dir
-        history = project_manager.load_history(target_dir)
-        project_manager.save_history(
-            target_dir, [h for h in history if h.get("run_id") != run_id]
+        try:
+            history = project_manager.load_history(target_dir)
+            project_manager.save_history(
+                target_dir, [h for h in history if h.get("run_id") != run_id]
+            )
+        except OSError as exc:
+            # The trash move (if any) already succeeded and is fully
+            # recoverable via its own sidecar regardless of what happens
+            # to history here -- report the failure rather than let an
+            # OSError escape this method's documented (bool, str) contract
+            # uncaught into an unhandled 500 (found in code review).
+            note = " (its files were already moved to Trash and remain recoverable there)" if remove_files else ""
+            return False, f"Could not update job history: {exc}{note}"
+        return True, "Moved to Trash" if remove_files else "Deleted"
+
+    def restore_from_trash(self, trash_id: str) -> Optional[JobRun]:
+        """The "Restore" trash action -- mirrors RELION's own PipeLine::
+        undeleteJob (moves the directory back, re-adds a pipeline/history
+        record). Returns the restored run (freshly re-added to both
+        self.runs and persisted history, exactly as it was recorded at
+        delete time), or None if trash_id doesn't resolve to a real
+        trashed job. Raises FileExistsError (propagated from
+        project_manager.restore_from_trash) if something already occupies
+        the original slot -- a real, reachable case: job numbers CAN be
+        reused once a job's history entry is gone (see that function's
+        own docstring), so a later, different job may legitimately have
+        taken the trashed job's old slot by the time someone restores it."""
+        try:
+            summary = project_manager.restore_from_trash(self.project_dir, trash_id)
+        except ValueError:
+            return None
+        run = JobRun(
+            run_id=summary["run_id"], internal_name=summary["internal_name"],
+            display_name=summary["display_name"], command=summary["command"],
+            cwd=summary["cwd"], project_dir=summary["project_dir"],
+            job_number=summary["job_number"], status=summary["status"],
+            alias=summary.get("alias", ""), note=summary.get("note", ""),
+            field_values=summary.get("field_values"),
+            detected_inputs=summary.get("detected_inputs", []),
+            exit_code=summary.get("exit_code"), pid=summary.get("pid"),
+            slurm_job_id=summary.get("slurm_job_id"), slurm_state=summary.get("slurm_state"),
+            started_at=summary.get("started_at"), ended_at=summary.get("ended_at"),
+            pipeline_registered=summary.get("pipeline_registered", False),
         )
-        return True, "Deleted"
+        # Live stdout/stderr lines were never part of the persisted summary
+        # (to_summary() doesn't carry them, same as any other reopened
+        # history entry) -- a restored run's Outputs/Errors tabs work from
+        # its files on disk, same as before it was ever trashed.
+        self.runs[run.run_id] = run
+        history = project_manager.load_history(self.project_dir)
+        project_manager.save_history(
+            self.project_dir, [h for h in history if h.get("run_id") != run.run_id] + [run.to_summary()]
+        )
+        return run
 
     def _safe_rmtree(self, cwd_str: str, project_dir_str: str) -> tuple[bool, str]:
         cwd = Path(cwd_str).resolve()

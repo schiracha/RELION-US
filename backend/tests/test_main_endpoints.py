@@ -399,3 +399,80 @@ def test_post_runs_with_slurm_payload_submits_via_sbatch(client, tmp_path, monke
     assert post_resp.status_code == 200
     assert detail["status"] == "queued"
     assert detail["slurm_job_id"] == "424242"
+
+
+# ---------------------------------------------------------------------------
+# Job Recovery / Trash (issue #2)
+# ---------------------------------------------------------------------------
+
+
+def _run_a_job_to_completion(client):
+    resp = client.post("/api/runs", json={
+        "internal_name": "Import", "command": "echo hello", "subdir": "Import/job001",
+    })
+    run_id = resp.json()["run_id"]
+    _wait_for_status(client, run_id, {"completed", "failed"})
+    return run_id
+
+
+def test_delete_then_list_trash_shows_the_entry(client):
+    run_id = _run_a_job_to_completion(client)
+    del_resp = client.delete(f"/api/runs/{run_id}", params={"remove_files": "true"})
+    assert del_resp.status_code == 200
+    assert del_resp.json()["message"] == "Moved to Trash"
+
+    trash_resp = client.get("/api/trash")
+    assert trash_resp.status_code == 200
+    entries = trash_resp.json()["trash"]
+    assert len(entries) == 1
+    assert entries[0]["run_id"] == run_id
+
+
+def test_restore_from_trash_via_http(client):
+    run_id = _run_a_job_to_completion(client)
+    client.delete(f"/api/runs/{run_id}", params={"remove_files": "true"})
+    trash_id = client.get("/api/trash").json()["trash"][0]["trash_id"]
+
+    restore_resp = client.post("/api/trash/restore", params={"trash_id": trash_id})
+    assert restore_resp.status_code == 200
+    assert restore_resp.json()["run_id"] == run_id
+
+    # Back in the Command Center, and gone from Trash.
+    assert client.get(f"/api/runs/{run_id}").status_code == 200
+    assert client.get("/api/trash").json()["trash"] == []
+
+
+def test_restore_unknown_trash_id_404s(client):
+    resp = client.post("/api/trash/restore", params={"trash_id": "NoSuchType/job999"})
+    assert resp.status_code == 404
+
+
+def test_permanently_delete_one_trash_entry_via_http(client):
+    run_id = _run_a_job_to_completion(client)
+    client.delete(f"/api/runs/{run_id}", params={"remove_files": "true"})
+    trash_id = client.get("/api/trash").json()["trash"][0]["trash_id"]
+
+    del_resp = client.delete("/api/trash", params={"trash_id": trash_id})
+    assert del_resp.status_code == 200
+    assert client.get("/api/trash").json()["trash"] == []
+    # Genuinely gone -- not just untracked, unlike a plain Delete.
+    assert client.post("/api/trash/restore", params={"trash_id": trash_id}).status_code == 404
+
+
+def test_empty_trash_via_http(client):
+    # Both jobs are created BEFORE either is deleted -- job numbering
+    # reuses a freed slot once its history entry is gone (confirmed via
+    # JobRunManager._next_job_number, which derives the next number from
+    # remaining history + on-disk directories, both of which stop
+    # accounting for a trashed job the instant it's moved away), so
+    # deleting job1 first would make job2 land back in the SAME job001
+    # slot job1's own trashed copy already occupies.
+    run_ids = [_run_a_job_to_completion(client) for _ in range(2)]
+    for run_id in run_ids:
+        del_resp = client.delete(f"/api/runs/{run_id}", params={"remove_files": "true"})
+        assert del_resp.status_code == 200
+    assert len(client.get("/api/trash").json()["trash"]) == 2
+
+    del_resp = client.delete("/api/trash")
+    assert del_resp.status_code == 200
+    assert client.get("/api/trash").json()["trash"] == []

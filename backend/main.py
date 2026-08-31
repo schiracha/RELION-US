@@ -619,6 +619,49 @@ def delete_run(run_id: str, remove_files: bool = False):
     return {"ok": True, "message": reason}
 
 
+@app.get("/api/trash")
+def list_trash():
+    """Job Recovery (issue #2): every job Deleted with remove_files=true,
+    still recoverable -- see project_manager.list_trash's own docstring."""
+    return {"trash": project_manager.list_trash(run_manager.project_dir)}
+
+
+@app.post("/api/trash/restore")
+def restore_from_trash(trash_id: str):
+    """"Restore" trash action -- moves the job back to its original
+    <JobType>/jobNNN slot and re-adds its history entry. trash_id is a
+    query param, not a path segment, since it's a Trash/-relative path
+    containing slashes (same convention as the file-download/preview
+    endpoints' own `path` query param, main.py's list_run_files/
+    download_run_file)."""
+    try:
+        run = run_manager.restore_from_trash(trash_id)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown trash_id")
+    return run.to_summary()
+
+
+@app.delete("/api/trash")
+def permanently_delete_trash(trash_id: str | None = None):
+    """"Permanently delete" (one job, trash_id given) / "Empty Trash" (the
+    whole thing, trash_id omitted) -- the only genuinely irreversible path
+    left once a job has been moved to Trash by Delete. Mirrors RELION's
+    own separate, further-confirmed `File/Empty trash` action."""
+    try:
+        project_manager.permanently_delete_trash(run_manager.project_dir, trash_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        # shutil.rmtree itself has no internal try/except (unlike delete_
+        # run's own trash-move path) -- a permission error, a TOCTOU race
+        # (something else already removed the target between the
+        # exists() check and rmtree), etc. would otherwise 500 unhandled.
+        raise HTTPException(status_code=500, detail=f"Could not permanently delete: {exc}")
+    return {"ok": True}
+
+
 @app.get("/api/runs/{run_id}/files")
 def list_run_files(run_id: str, harsh: bool | None = None):
     """Outputs tab file listing. Pass `harsh` (true/false) to get the Clean

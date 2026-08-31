@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,15 @@ from typing import Any
 MARKER_DIRNAME = ".relion_us"
 HISTORY_FILENAME = "run_history.json"
 RELION_PIPELINE_STAR = "default_pipeline.star"
+# Matches real RELION's own Trash directory name exactly (PipeLine::
+# deleteNodesAndProcesses, src/pipeliner.cpp: `mv -f <dir> Trash/...`) --
+# deliberate, not a coincidence: a project later opened in RELION's own
+# GUI sees RELION-US-trashed jobs under its own `Jobs/Undelete job(s)`
+# action too, and vice versa. See TRASH_SIDECAR_FILENAME below for how
+# RELION-US's own recovery data rides along with the moved directory,
+# mirroring RELION's own `deleted_pipeline.star` doing the same thing.
+TRASH_DIRNAME = "Trash"
+TRASH_SIDECAR_FILENAME = ".relion_us_trashed.json"
 
 PERMISSION_ERROR_MESSAGE = (
     "Improper permissions for this location, check user and either change "
@@ -813,6 +823,229 @@ def save_history(project_dir: Path, entries: list[dict[str, Any]]) -> None:
     marker = project_dir / MARKER_DIRNAME
     marker.mkdir(exist_ok=True)
     _history_path(project_dir).write_text(json.dumps(entries, indent=2))
+
+
+# --------------------------------------------------------------------------
+# Trash / job recovery (issue #2) -- mirrors real RELION's own Delete-moves
+# -to-Trash + Undelete-reads-a-companion-file + separate-Empty-trash model
+# (PipeLine::deleteNodesAndProcesses/undeleteJob, src/pipeliner.cpp), with
+# one deliberate improvement: real RELION's undelete depends on
+# deleted_pipeline.star, itself only ever written alongside job.star, which
+# in THIS app only exists when two-way pipeline sync was on at run time
+# (pipeline_bridge.register_job). RELION-US already tracks field_values in
+# run_history.json for every run regardless of sync state, so the sidecar
+# written here (see write_trash_sidecar) carries that same snapshot
+# unconditionally -- job recovery works for every deleted RELION-US job,
+# not only pipeline-synced ones. job.star (when it DOES exist) is still
+# preferred as the fresher source -- see list_trash below.
+# --------------------------------------------------------------------------
+
+
+def _require_under_project(project_dir: Path, path: Path, verb: str) -> tuple[Path, Path]:
+    """Shared safety check for move_to_trash: refuse to touch anything not
+    genuinely inside this project. Should be unreachable in practice
+    (this app always allocates job directories under project_dir) --
+    refusing loudly here is cheap insurance against some future code path
+    that doesn't. move_to_trash's own `cwd` argument always comes from a
+    JobRun's own recorded cwd (never raw HTTP input), so "under the
+    project" is the right bound for it specifically -- see
+    _require_under_trash for the stricter check functions driven by a
+    raw, HTTP-supplied trash_id need instead."""
+    project_dir = Path(project_dir).resolve()
+    path = Path(path).resolve()
+    if project_dir not in path.parents:
+        raise ValueError(f"Refusing to {verb} a directory outside the project: {path}")
+    return project_dir, path
+
+
+def _require_under_trash(project_dir: Path, path: Path, verb: str) -> tuple[Path, Path, Path]:
+    """Stricter sibling of _require_under_project, for restore_from_trash/
+    permanently_delete_trash specifically: both take a `trash_id` straight
+    from an HTTP query param (main.py), joined into a path as `trash_root
+    / trash_id` -- bounding the check to "under project_dir" alone is NOT
+    enough, since a crafted trash_id like "../CtfFind/job003" resolves
+    OUTSIDE Trash/ while still technically being "under the project."
+
+    Found in code review: this was a real path-traversal bug --
+    permanently_delete_trash had no OTHER gate protecting it, so
+    `DELETE /api/trash?trash_id=../CtfFind/job003` would rmtree a live,
+    never-trashed job's directory outright. restore_from_trash was only
+    ACCIDENTALLY safe from the same input, because it separately requires
+    a real .relion_us_trashed.json sidecar to exist at the resolved
+    location -- not a designed defense. Both now use this instead."""
+    project_dir = Path(project_dir).resolve()
+    trash_root = project_dir / TRASH_DIRNAME
+    path = Path(path).resolve()
+    if trash_root not in path.parents:
+        raise ValueError(f"Refusing to {verb} a path outside Trash/: {path}")
+    return project_dir, trash_root, path
+
+
+def move_to_trash(project_dir: Path, cwd: Path) -> Path:
+    """Moves a job's output directory into Trash/<same relative path>,
+    preserving its <JobType>/jobNNN structure -- mirrors RELION's own
+    `mv -f <dir> Trash/<parent>/` (pipeliner.cpp:1137) exactly, including
+    the directory NAME (see TRASH_DIRNAME's own comment on why that's
+    deliberate). Unlike RELION's own `rm -rf Trash/<path>` -- first --
+    this refuses with a clear error if something already occupies the
+    destination, rather than silently destroying it.
+
+    This is a real, reachable case, not just defensive paranoia:
+    JobRunManager._next_job_number derives the next number from
+    run_history.json + on-disk directories, both of which stop counting a
+    job the instant it's trashed (its history entry is removed, and its
+    directory no longer sits where the number-collision check looks) --
+    so a job number CAN be reused by a later job of the same type once an
+    earlier one's been trashed. If THAT job is later trashed too, it
+    collides with the first one's still-present trashed copy at the exact
+    same Trash/<JobType>/jobNNN path. Refusing (rather than following
+    RELION's own destructive `rm -rf` first) means the caller (job_runner.
+    delete_run) surfaces a clear error instead of silently clobbering an
+    earlier trashed job nobody's restored or emptied yet.
+    """
+    project_dir, cwd = _require_under_project(project_dir, cwd, "trash")
+    rel = cwd.relative_to(project_dir)
+    dest = project_dir / TRASH_DIRNAME / rel
+    # KNOWN RACE (check-then-move, not fixed here -- noted in code review,
+    # same accepted-risk shape as run_tests.sh's own documented free_port()
+    # race): two concurrent requests trashing the same job slot could both
+    # pass this exists() check before either's shutil.move runs. Accepted
+    # as low-risk for the same reason: this app's own concurrency model
+    # doesn't submit two Deletes for the same run_id at once in practice
+    # (the frontend's own popup only offers one Delete button per run,
+    # disabled mid-request), and a losing shutil.move would raise loudly
+    # (moving into an existing directory nests rather than silently
+    # overwriting), not corrupt data silently.
+    if dest.exists():
+        raise FileExistsError(f"Trash destination already exists: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(cwd), str(dest))
+    return dest
+
+
+def write_trash_sidecar(trashed_dir: Path, run_summary: dict[str, Any]) -> None:
+    """RELION-US's analogue of RELION's own deleted_pipeline.star riding
+    along with the moved directory (pipeliner.cpp:2177) -- a single,
+    self-contained JSON snapshot, so list_trash never needs a separate
+    index that could drift out of sync with what's actually in Trash/."""
+    sidecar = {**run_summary, "deleted_at": time.time()}
+    (Path(trashed_dir) / TRASH_SIDECAR_FILENAME).write_text(json.dumps(sidecar, indent=2))
+
+
+def list_trash(project_dir: Path) -> list[dict[str, Any]]:
+    """Every trashed job still recoverable in this project. field_values
+    always come from the sidecar's own snapshot -- NOT overridden by
+    re-reading job.star, even when job.star survived the move (pipeline
+    sync was on for that job). job_star_available is reported purely as
+    an informational signal (does RELION's own record survive here too),
+    not used to swap in job.star's values.
+
+    Found in code review: an earlier version DID prefer job.star's values
+    when present, on the theory that RELION's own record is more
+    authoritative -- but job.star stores every value as a STRING in
+    RELION's own "Yes"/"No" boolean convention (see
+    read_relion_job_options's own docstring), while the sidecar's
+    snapshot keeps the original JSON types this app's own forms already
+    expect. Substituting job.star's raw strings in here silently
+    corrupted boolean fields ("No" is a truthy non-empty string) wherever
+    a trashed job's field_values got used, e.g. "Clone as new job"'s
+    checkbox prefill. There's no real freshness to gain by preferring
+    job.star anyway -- it's written once, at job-start, same as the
+    snapshot -- so the sidecar's own typed values are simply correct.
+    """
+    trash_root = Path(project_dir) / TRASH_DIRNAME
+    if not trash_root.is_dir():
+        return []
+    entries = []
+    for sidecar_path in sorted(trash_root.glob(f"*/*/{TRASH_SIDECAR_FILENAME}")):
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        job_dir = sidecar_path.parent
+        entry = dict(sidecar)
+        entry["trash_id"] = str(job_dir.relative_to(trash_root))
+        entry["job_star_available"] = bool(read_relion_job_options(job_dir))
+        entries.append(entry)
+    return entries
+
+
+def restore_from_trash(project_dir: Path, trash_id: str) -> dict[str, Any]:
+    """Moves a trashed job's directory back to its original
+    <JobType>/jobNNN path and returns its sidecar snapshot (the caller,
+    JobRunManager.restore_from_trash, turns that into a real run_history
+    entry) -- mirrors RELION's own PipeLine::undeleteJob moving the
+    directory back out of Trash/ (pipeliner.cpp:1403-1412). Raises
+    ValueError if trash_id doesn't resolve to a real trashed job (or its
+    sidecar's own recorded location doesn't match trash_id -- see below),
+    or FileExistsError if something already occupies the original path --
+    a real, reachable case (not just defensive paranoia), same reason
+    move_to_trash's own docstring explains: a later job of the same type
+    can be renumbered into a trashed job's old slot once its history
+    entry is gone, so restoring the ORIGINAL job back into that slot
+    would collide with whatever's now legitimately living there."""
+    project_dir, trash_root, job_dir = _require_under_trash(
+        project_dir, Path(project_dir) / TRASH_DIRNAME / trash_id, "restore")
+    sidecar_path = job_dir / TRASH_SIDECAR_FILENAME
+    if not sidecar_path.is_file():
+        raise ValueError(f"Unknown trash_id (no sidecar found): {trash_id}")
+    sidecar = json.loads(sidecar_path.read_text())
+
+    original_cwd = sidecar.get("cwd")
+    if not original_cwd:
+        raise ValueError(f"Trashed job {trash_id} has no recorded original location")
+    dest = Path(original_cwd).resolve()
+    if project_dir not in dest.parents:
+        raise ValueError(f"Refusing to restore outside the project: {dest}")
+    # Cross-validate the sidecar's own recorded cwd against trash_id's
+    # implied slot -- found in code review: without this, a hand-edited,
+    # corrupted, or future-schema-mismatched sidecar whose "cwd" points
+    # somewhere else entirely would silently relocate this trashed
+    # content into an unrelated slot instead of loudly refusing.
+    try:
+        matches_trash_id = str(dest.relative_to(project_dir)) == trash_id
+    except ValueError:
+        matches_trash_id = False
+    if not matches_trash_id:
+        raise ValueError(
+            f"Sidecar's recorded location ({dest}) doesn't match trash_id "
+            f"({trash_id}) -- refusing to restore"
+        )
+    if dest.exists():
+        raise FileExistsError(f"Cannot restore -- something already exists at {dest}")
+
+    # Move BEFORE removing the sidecar record (the sidecar file itself
+    # lives inside job_dir, so it travels with the move) -- found in code
+    # review: the original ordering deleted the sidecar first, so a
+    # failed move afterward permanently orphaned the job (no sidecar left
+    # to find it by, but the directory no longer where anything expects
+    # it either).
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(job_dir), str(dest))
+    try:
+        (dest / TRASH_SIDECAR_FILENAME).unlink()
+    except OSError:
+        pass  # cosmetic leftover at worst; the restore itself already succeeded
+    sidecar.pop("deleted_at", None)
+    return sidecar
+
+
+def permanently_delete_trash(project_dir: Path, trash_id: str | None = None) -> None:
+    """Genuinely irreversible: shutil.rmtree's one trashed job (trash_id
+    given) or the entire Trash/ subtree (trash_id=None) -- mirrors
+    RELION's own separate, further-confirmed `File/Empty trash` action
+    (`rm -rf Trash`, gui_mainwindow.cpp:2330). This is the ONLY
+    permanent-delete path left once a job has been moved to Trash by
+    move_to_trash; a no-op (not an error) if there's nothing to remove."""
+    project_dir = Path(project_dir).resolve()
+    trash_root = project_dir / TRASH_DIRNAME
+    if trash_id is None:
+        target = trash_root
+    else:
+        _project_dir, _trash_root, target = _require_under_trash(
+            project_dir, trash_root / trash_id, "permanently delete")
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=False)
 
 
 # --------------------------------------------------------------------------
