@@ -1850,3 +1850,216 @@ def test_gpu_fields_needing_real_branch_logic_stay_unmapped(internal_name, field
     cmd, unmapped = job_registry._build_draft_command(raw, fields, internal_name, "")
     assert "--gpu" not in cmd
     assert "gpu_ids" in unmapped
+
+
+# --------------------------------------------------------------------------
+# Multi-command jobs (issue #56): real RELION's getCommands*Job() calls
+# commands.push_back() more than once for Inimodel, MultiBody, TomoReconPart,
+# Localres and TomoPickTomograms -- prepareFinalCommand joins every command
+# with real shell " && " into one final_command string, so this app's draft
+# does the same (see job_catalog.JobDraftOverride.commands_before's own
+# docstring for the full mechanism, already used by ModelAngelo since #37).
+# --------------------------------------------------------------------------
+
+
+def test_inimodel_second_command_runs_relion_align_symmetry():
+    """Confirmed for real (this stress-test session): without this second
+    command, a from-scratch InitialModel job reports RELION_JOB_EXIT_SUCCESS
+    and runs 100 genuine VDAM iterations, but initial_model.mrc -- the one
+    file every downstream job (Class3D's "Reference map") expects -- is
+    never created."""
+    raw = job_registry.raw_job("Inimodel")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"nr_iter": 100, "sym_name": "C1", "do_run_C1": True}, "Inimodel", "InitialModel/job008")
+    assert " && " in cmd
+    first, second = cmd.split(" && ", 1)
+    assert "relion_refine" in first
+    assert "`which relion_align_symmetry`" in second
+    assert "--i InitialModel/job008/run_it100_model.star" in second
+    assert "--o InitialModel/job008/initial_model.mrc" in second
+    assert "--sym C1" in second
+    assert "--apply_sym" in second.split()
+    assert "--select_largest_class" in second.split()
+
+
+def test_inimodel_align_symmetry_uses_real_target_symmetry_when_do_run_c1_and_non_c1_sym():
+    """`if (do_run_C1 && !(fn_sym=="C1"||"c1")) command2 += "--sym " +
+    sym_name; else command2 += "--sym C1";` -- relion_refine itself always
+    runs unbiased in C1 when do_run_C1 is checked, but this second command
+    still aligns that result to the user's real target symmetry."""
+    raw = job_registry.raw_job("Inimodel")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"nr_iter": 50, "sym_name": "D2", "do_run_C1": True}, "Inimodel", "InitialModel/job008")
+    _, second = cmd.split(" && ", 1)
+    assert "--sym D2" in second
+
+
+def test_inimodel_align_symmetry_uses_c1_when_do_run_c1_is_unchecked():
+    raw = job_registry.raw_job("Inimodel")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"nr_iter": 50, "sym_name": "D2", "do_run_C1": False}, "Inimodel", "InitialModel/job008")
+    _, second = cmd.split(" && ", 1)
+    assert "--sym C1" in second
+
+
+def test_multibody_second_command_runs_flex_analyse_when_do_analyse_checked():
+    """do_analyse defaults to checked, so this is the common case, not an
+    edge case."""
+    raw = job_registry.raw_job("MultiBody")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_analyse": True, "fn_bodies": "bodies.star", "nr_movies": 3},
+        "MultiBody", "MultiBody/job013")
+    assert " && " in cmd
+    _, second = cmd.split(" && ", 1)
+    assert "`which relion_flex_analyse`" in second
+    assert "--PCA_orient" in second.split()
+    assert "--model MultiBody/job013/run_model.star" in second
+    assert "--data MultiBody/job013/run_data.star" in second
+    assert "--bodies bodies.star" in second
+    assert "--o MultiBody/job013/analyse" in second
+    assert "--do_maps" in second.split()
+    assert "--k 3" in second
+
+
+def test_multibody_second_command_absent_when_do_analyse_unchecked():
+    raw = job_registry.raw_job("MultiBody")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_analyse": False}, "MultiBody", "MultiBody/job013")
+    assert " && " not in cmd
+
+
+def test_tomo_recon_part_helix_toolbox_commands_when_do_helix_checked():
+    raw = job_registry.raw_job("TomoReconPart")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {
+            "do_helix": True, "helical_twist": -1.0, "helical_rise": 4.75,
+            "helical_z_percentage": 20.0, "helical_tube_outer_diameter": 200.0,
+        },
+        "TomoReconPart", "Reconstruct/job020",
+    )
+    parts = cmd.split(" && ")
+    assert len(parts) == 4  # primary + half1 + half2 + merged
+    for name in ("half1", "half2", "merged"):
+        assert any(f"--i Reconstruct/job020/{name}.mrc" in p for p in parts), name
+        assert any(f"--o Reconstruct/job020/helical_{name}.mrc" in p for p in parts), name
+    assert all("`which relion_helix_toolbox` --impose" in p for p in parts[1:])
+    assert "--z_percentage 0.2" in cmd
+
+
+def test_tomo_recon_part_no_extra_commands_when_do_helix_unchecked():
+    raw = job_registry.raw_job("TomoReconPart")
+    cmd, _ = job_registry._build_draft_command(raw, {"do_helix": False}, "TomoReconPart", "Reconstruct/job020")
+    assert " && " not in cmd
+
+
+def test_localres_resmap_mode_symlinks_halves_and_uses_fn_resmap_as_program():
+    """do_resmap_locres defaults to checked -- this is the tutorial's own
+    default state, not an edge case. Previously Localres had NO
+    DRAFT_OVERRIDES entry at all: program_guess picked the OTHER
+    (do_relion_locres) branch's relion_postprocess, wrong for this default
+    configuration, and every ResMap-specific flag was unmapped."""
+    raw = job_registry.raw_job("Localres")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "do_resmap_locres": True, "do_relion_locres": False,
+            "fn_in": "Refine3D/job010/run_half1_class001.mrc",
+            "fn_resmap": "/public/EM/ResMap/ResMap-1.1.4-linux64",
+            "fn_mask": "MaskCreate/job011/mask.mrc",
+            "angpix": 1.4, "pval": 0.05, "minres": 0.0, "maxres": 0.0, "stepres": 1.0,
+        },
+        "Localres", "LocalRes/job014",
+    )
+    parts = cmd.split(" && ")
+    assert len(parts) == 3  # symlink half1, symlink half2, resmap itself
+    assert parts[0] == "ln -s ../../Refine3D/job010/run_half1_class001.mrc LocalRes/job014/half1.mrc"
+    assert parts[1] == "ln -s ../../Refine3D/job010/run_half2_class001.mrc LocalRes/job014/half2.mrc"
+    assert parts[2].startswith("/public/EM/ResMap/ResMap-1.1.4-linux64 ")
+    assert "--maskVol=MaskCreate/job011/mask.mrc" in parts[2]
+    assert "--noguiSplit LocalRes/job014/half1.mrc LocalRes/job014/half2.mrc" in parts[2]
+    assert "--vxSize=1.4" in parts[2]
+    assert "--pVal=0.05" in parts[2]
+    assert "--minRes=0.0" in parts[2]
+    assert "--maxRes=0.0" in parts[2]
+    assert "--stepRes=1.0" in parts[2]
+    # ResMap takes no --o at all -- an unrecognized flag on its own argparse CLI.
+    assert "--o " not in parts[2]
+    assert "fn_resmap" not in unmapped
+
+
+def test_localres_relion_mode_uses_relion_postprocess_and_locres_i_flag():
+    """The do_relion_locres branch was already correctly guessed by
+    program_guess before this fix -- confirms adding Localres's new
+    DRAFT_OVERRIDES entry didn't regress the branch that already worked."""
+    raw = job_registry.raw_job("Localres")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {
+            "do_resmap_locres": False, "do_relion_locres": True,
+            "fn_in": "Refine3D/job010/run_half1_class001.mrc", "angpix": 1.4,
+        },
+        "Localres", "LocalRes/job014",
+    )
+    assert " && " not in cmd  # relion_locres mode is a single command
+    assert cmd.startswith("`which relion_postprocess`")
+    assert "--locres --i Refine3D/job010/run_half1_class001.mrc" in cmd
+    assert "--o LocalRes/job014/relion" in cmd
+
+
+def test_localres_relion_mode_with_mpi_still_gets_the_mpi_binary_and_prefix():
+    """Confirms program_override's None-return for do_relion_locres leaves
+    the generic nr_mpi>1 -> program_mpi swap fully intact."""
+    raw = job_registry.raw_job("Localres")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"do_resmap_locres": False, "do_relion_locres": True, "nr_mpi": 4, "fn_in": "x_half1_y.mrc"},
+        "Localres", "LocalRes/job014",
+    )
+    assert cmd.startswith("mpirun -n 4 ")
+    assert "`which relion_postprocess_mpi`" in cmd
+
+
+def test_tomopick_full_three_command_sequence():
+    raw = job_registry.raw_job("TomoPickTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {
+            "pick_mode": "particles", "in_tomoset": "tomograms.star",
+            "in_star_file": "Extract/job004/particles.star",
+        },
+        "TomoPickTomograms", "Picks/job021",
+    )
+    parts = cmd.split(" && ")
+    assert len(parts) == 3
+    assert parts[0].startswith("`which relion_python_tomo_get_particle_poses` particles-from-star")
+    assert "--tomograms-file tomograms.star" in parts[0]
+    assert "--annotations-directory Picks/job021/annotations" in parts[0]
+    assert "--in-star-file Extract/job004/particles.star" in parts[0]
+    assert parts[1].startswith("`which relion_python_tomo_pick` particles")
+    assert "--tilt-series-star-file tomograms.star" in parts[1]
+    assert "--output-directory Picks/job021/" in parts[1]
+    assert parts[2].startswith("`which relion_python_tomo_get_particle_poses` particles")
+    assert "--annotations-directory Picks/job021/annotations" in parts[2]
+    assert "--output-directory Picks/job021/" in parts[2]
+    assert "--spacing-angstroms" not in parts[2]  # only for non-"particles" modes
+
+
+def test_tomopick_before_command_absent_without_in_star_file():
+    raw = job_registry.raw_job("TomoPickTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"pick_mode": "particles", "in_tomoset": "tomograms.star"},
+        "TomoPickTomograms", "Picks/job021")
+    parts = cmd.split(" && ")
+    assert len(parts) == 2  # primary + always-on after-command only
+
+
+def test_tomopick_spheres_mode_adds_spacing_angstroms_to_after_command():
+    raw = job_registry.raw_job("TomoPickTomograms")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"pick_mode": "spheres", "in_tomoset": "tomograms.star", "particle_spacing": 100.0},
+        "TomoPickTomograms", "Picks/job021")
+    parts = cmd.split(" && ")
+    assert len(parts) == 2
+    assert parts[0].startswith("`which relion_python_tomo_pick` spheres")
+    assert "--spacing-angstroms 100.0" in parts[1]

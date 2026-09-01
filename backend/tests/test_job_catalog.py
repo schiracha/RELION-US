@@ -45,21 +45,21 @@ from job_catalog import (
 
 
 def test_unlisted_job_gets_every_accessors_default():
-    assert "Localres" not in DRAFT_OVERRIDES  # not one of the overridden jobs
-    assert draft_flag_for("Localres", "anything") is None
-    assert draft_flag_condition_for("Localres", "anything") is None
-    assert draft_flag_is_negated("Localres", "anything") is False
-    assert draft_flag_if_condition_false_for("Localres", "anything") is None
-    assert draft_program_override("Localres") is None
-    assert draft_is_suppressed("Localres", "anything") is False
-    assert draft_output_flag("Localres") == "--o"
-    assert draft_output_suffix("Localres") is None
-    assert draft_extra_output_args("Localres", {}) == []
-    assert draft_extra_flags("Localres", {}) == []
-    assert has_draft_value_transform("Localres", "anything") is False
-    assert draft_value_for("Localres", "anything", "x") is None
-    assert has_draft_numeric_transform("Localres", "anything") is False
-    assert draft_numeric_value_for("Localres", "anything", 1.0) is None
+    assert "Joinstar" not in DRAFT_OVERRIDES  # not one of the overridden jobs
+    assert draft_flag_for("Joinstar", "anything") is None
+    assert draft_flag_condition_for("Joinstar", "anything") is None
+    assert draft_flag_is_negated("Joinstar", "anything") is False
+    assert draft_flag_if_condition_false_for("Joinstar", "anything") is None
+    assert draft_program_override("Joinstar") is None
+    assert draft_is_suppressed("Joinstar", "anything") is False
+    assert draft_output_flag("Joinstar") == "--o"
+    assert draft_output_suffix("Joinstar") is None
+    assert draft_extra_output_args("Joinstar", {}) == []
+    assert draft_extra_flags("Joinstar", {}) == []
+    assert has_draft_value_transform("Joinstar", "anything") is False
+    assert draft_value_for("Joinstar", "anything", "x") is None
+    assert has_draft_numeric_transform("Joinstar", "anything") is False
+    assert draft_numeric_value_for("Joinstar", "anything", 1.0) is None
 
 
 # --------------------------------------------------------------------------

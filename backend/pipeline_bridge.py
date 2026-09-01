@@ -576,13 +576,31 @@ def pipeline_control_args(command: str, job_subdir: str) -> str:
     `RelionJob::prepareFinalCommand`, using the hyphenated spelling for its
     Python tomo tools. It is what makes the program write the exit files that
     `--check_job_completion` reads, so a job run from here reaches "Succeeded"
-    in RELION's GUI rather than sitting at "Running" forever.
-    """
-    if "relion_" not in command:
-        return command
+    in RELION's GUI rather than sitting at "Running" forever. It is also what
+    lets a real relion_refine's own long-running optimiser loop notice a
+    RELION_JOB_ABORT_NOW file mid-run and exit gracefully (ml_optimiser.cpp's
+    own pipeline_control_check_abort_job() calls) -- an abort clicked in real
+    RELION's own GUI (concurrent two-way sync) depends on this, independent of
+    RELION-US's own Abort button, which signals the process group directly.
+
+    A multi-command draft (issue #56 -- e.g. Inimodel's relion_refine
+    followed by relion_align_symmetry, joined with real shell " && ") needs
+    this on EACH qualifying command, not just wherever it lands in the
+    string: real RELION's own prepareFinalCommand loops over every entry in
+    its `commands` vector and adds the flag to each one containing
+    "relion_" BEFORE joining them with " && " (src/pipeline_jobs.cpp
+    ~708-718) -- this mirrors that loop instead of treating the whole
+    already-joined string as one opaque command, which would silently leave
+    every command except the last one (arbitrarily) missing this flag."""
     subdir = job_subdir if job_subdir.endswith("/") else job_subdir + "/"
-    flag = (PIPELINE_CONTROL_FLAG_PYTHON if "relion_python_" in command
-            else PIPELINE_CONTROL_FLAG)
-    if flag in command:
-        return command
-    return f"{command} {flag} {subdir}"
+
+    def _add(segment: str) -> str:
+        if "relion_" not in segment:
+            return segment
+        flag = (PIPELINE_CONTROL_FLAG_PYTHON if "relion_python_" in segment
+                else PIPELINE_CONTROL_FLAG)
+        if flag in segment:
+            return segment
+        return f"{segment} {flag} {subdir}"
+
+    return " && ".join(_add(segment) for segment in command.split(" && "))

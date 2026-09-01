@@ -50,6 +50,7 @@ from job_catalog import (
     JOB_CATALOG,
     TOMO_VARIANT_OF,
     boolean_select_labels,
+    draft_commands_before,
     draft_extra_flags,
     draft_extra_output_args,
     draft_flag_condition_for,
@@ -65,6 +66,7 @@ from job_catalog import (
     draft_output_suffix,
     draft_program_extra,
     draft_program_override,
+    draft_suppress_output_flag,
     pipeline_type,
     synthetic_options,
 )
@@ -492,7 +494,8 @@ def _build_draft_command(
     """
     base_name, is_tomo_variant = _resolve_tomo_variant(internal_name)
     field_values = {**field_values, "is_tomo": is_tomo_variant}
-    program = draft_program_override(base_name) or raw_job.get("program_guess") or "<unknown_program>"
+    program_override_value = draft_program_override(base_name, field_values)
+    program = program_override_value or raw_job.get("program_guess") or "<unknown_program>"
     # A few jobs (DynaMight, ModelAngelo, External) don't hard-code a
     # binary — they run whatever executable path the user configured in a
     # JobOption (e.g. "Location of DynaMight executable:"). extract_job_
@@ -520,7 +523,15 @@ def _build_draft_command(
         nr_mpi = 1
     program_mpi = raw_job.get("program_mpi")
     prefix: list[str] = []
-    if nr_mpi > 1 and program_mpi and not is_exe_placeholder:
+    # Skipped entirely once a program_override already resolved `program`
+    # for the CURRENT field values (see JobDraftOverride.program_override's
+    # own docstring) -- otherwise this would blindly swap in raw_job's
+    # single fixed program_mpi guess even for a branch the override chose
+    # deliberately (e.g. Localres's ResMap mode, whose program is a
+    # user-configured executable with no MPI form of its own at all;
+    # program_mpi here is `relion_postprocess_mpi`, correct only for
+    # Localres's OTHER branch, which never sets program_override_value).
+    if nr_mpi > 1 and program_mpi and not is_exe_placeholder and program_override_value is None:
         # Same two conditions RELION applies: an _mpi binary exists for this
         # job, and more than one process was asked for.
         program = program_mpi
@@ -533,7 +544,10 @@ def _build_draft_command(
     parts.extend(draft_program_extra(base_name, field_values, output_subdir))
     # RELION-style output directory (project-root-relative), inserted right
     # after the program name — mirrors how getCommands*Job() appends it.
-    if output_subdir and not is_exe_placeholder:
+    # Skipped for a job branch that takes no --o at all (see
+    # JobDraftOverride.suppress_output_flag) on top of the existing
+    # exe-placeholder skip.
+    if output_subdir and not is_exe_placeholder and not draft_suppress_output_flag(base_name, field_values):
         subdir_arg = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
         # Some jobs don't take a bare directory here -- RELION appends a
         # literal suffix to form a file rootname prefix (e.g. "run" ->
@@ -742,7 +756,16 @@ def _build_draft_command(
     if extra:
         parts.append(extra)
 
-    return " ".join(parts), unmapped
+    primary_command = " ".join(parts)
+    # Complete, independent shell commands this job needs to run BEFORE the
+    # one just built (e.g. Localres's ResMap-mode symlinks) -- see
+    # job_catalog.JobDraftOverride.commands_before's own docstring for why
+    # these are joined with " && " exactly like real RELION's own
+    # prepareFinalCommand joins multiple commands.push_back() calls.
+    before_commands = draft_commands_before(base_name, field_values, output_subdir)
+    if before_commands:
+        return " && ".join([*before_commands, primary_command]), unmapped
+    return primary_command, unmapped
 
 
 def _resolve_tomo_variant(internal_name: str) -> tuple[str, bool]:

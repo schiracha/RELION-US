@@ -349,6 +349,37 @@ def test_the_flag_is_not_added_twice():
     assert pipeline_bridge.pipeline_control_args(once, "x") == once
 
 
+def test_pipeline_control_flag_is_appended_to_every_command_in_a_chained_draft():
+    """A multi-command job (issue #56 -- e.g. Inimodel's relion_refine
+    followed by " && " relion_align_symmetry) must get the flag on BOTH
+    commands, not just wherever it lands after " && ".join() -- otherwise
+    the FIRST (often much longer-running) command silently loses real
+    RELION's own mid-run abort-file check (ml_optimiser.cpp's
+    pipeline_control_check_abort_job)."""
+    cmd = pipeline_bridge.pipeline_control_args(
+        "`which relion_refine` --o InitialModel/job008/run --grad"
+        " && `which relion_align_symmetry` --i InitialModel/job008/run_it100_model.star --apply_sym",
+        "InitialModel/job008",
+    )
+    first, second = cmd.split(" && ")
+    assert first.endswith("--pipeline_control InitialModel/job008/")
+    assert second.endswith("--pipeline_control InitialModel/job008/")
+
+
+def test_pipeline_control_flag_skips_a_non_relion_command_in_a_chained_draft():
+    """Localres's ResMap mode (issue #56) chains two plain `ln -s` commands
+    before the ResMap executable itself -- neither is a relion_ program, so
+    neither should get the flag, while ResMap's own command (also not
+    relion_-prefixed) is correctly left alone too."""
+    cmd = pipeline_bridge.pipeline_control_args(
+        "ln -s ../../half1.mrc LocalRes/job014/half1.mrc"
+        " && ln -s ../../half2.mrc LocalRes/job014/half2.mrc"
+        " && /public/EM/ResMap/ResMap-1.1.4-linux64 --noguiSplit a b",
+        "LocalRes/job014",
+    )
+    assert "--pipeline_control" not in cmd
+
+
 # --------------------------------------------------------------------------
 # The per-project setting
 # --------------------------------------------------------------------------

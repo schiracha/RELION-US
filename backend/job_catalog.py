@@ -618,6 +618,50 @@ class JobDraftOverride:
     # second-command builder is the first user of it here too (it needs
     # output_subdir for -i/-o, which reuse the build step's own directory).
     extra_flags: Optional[Callable[[dict, str], list]] = None
+    # A job whose real getCommands*Job() calls commands.push_back() MORE
+    # THAN ONCE, where at least one extra command needs to run BEFORE the
+    # primary one this table otherwise builds (e.g. Localres's ResMap mode,
+    # which symlinks the two half-maps into the job directory before
+    # invoking ResMap itself; TomoPickTomograms's optional particles-from-
+    # star pass). Returns a list of COMPLETE, already-fully-formed shell
+    # command strings (unlike extra_flags, which returns bare TOKENS
+    # appended to the one command already under construction -- these are
+    # independent commands with their own program and flags), joined with
+    # real RELION's own " && " (see prepareFinalCommand, src/pipeline_jobs.
+    # cpp ~730-765: multiple commands.push_back() calls are joined with "
+    # && " into ONE final_command string -- this app's job_runner already
+    # runs the whole draft through asyncio.create_subprocess_shell, so a
+    # literal `&&` in the draft just works, exactly as it does for a command
+    # AFTER the primary one -- see extra_flags' ModelAngelo entry for that
+    # half of the same mechanism). [] for "nothing to prepend right now".
+    # Takes (field_values, output_subdir).
+    commands_before: Optional[Callable[[dict, str], list]] = None
+    # For the rare job whose real PROGRAM depends on field_values, not a
+    # single fixed string `program` above can express (e.g. Localres, whose
+    # command is either the user-configured fn_resmap executable or
+    # relion_postprocess, chosen by which of two mutually-exclusive
+    # checkboxes is on -- program_guess can only ever guess one). Takes
+    # field_values, returns the resolved program string, or None to fall
+    # back to `program`/program_guess unchanged. When this returns non-None,
+    # job_registry._build_draft_command skips its OWN generic nr_mpi>1 ->
+    # program_mpi swap entirely (the override fully owns program resolution
+    # for that branch) -- so a job needing an MPI variant for one of its own
+    # branches must resolve that itself (see Localres's own entry: only its
+    # do_resmap_locres branch overrides, which never has an MPI form of its
+    # own, so the untouched do_relion_locres branch keeps the normal
+    # program_guess/program_mpi behavior automatically).
+    program_override: Optional[Callable[[dict], Optional[str]]] = None
+    # For the rare job whose default --o/output_subdir insertion (RELION's
+    # own convention for almost every job) is flat WRONG for one of its
+    # branches -- e.g. Localres's ResMap mode, which never takes a --o flag
+    # at all (ResMap is a third-party argparse program with no such option;
+    # RELION's own getCommandsLocresJob only adds --o inside the OTHER,
+    # do_relion_locres branch). Takes field_values, returns True to skip the
+    # generic --o emission entirely for this draft. The branch that DOES
+    # want the normal --o still gets it automatically (output_suffix above
+    # stays a static per-job default, applied whenever this returns False/
+    # is unset) -- only the branch that must NOT have --o needs this hook.
+    suppress_output_flag: Optional[Callable[[dict], bool]] = None
 
 
 def _import_mode_and_ofile_args(field_values: dict) -> list:
@@ -1129,6 +1173,313 @@ def _modelangelo_hmm_search_command(field_values: dict, output_subdir: str) -> l
     return tokens
 
 
+# --------------------------------------------------------------------------
+# Multi-command jobs (issue #56): real RELION's getCommands*Job() calls
+# commands.push_back() more than once for 6 job types (Inimodel, MultiBody,
+# ModelAngelo, TomoReconPart, Localres, TomoPickTomograms), and
+# prepareFinalCommand (src/pipeline_jobs.cpp ~730-765) joins them with real
+# shell " && " into ONE final_command string before ever running anything --
+# multi-command execution is not a RELION-US invention, it's what RELION
+# ALREADY does under the hood. ModelAngelo (above, issue #37) was the first
+# job here to need this, via a literal "&&"-prefixed token list folded into
+# extra_flags. The five below follow the exact same mechanism -- see
+# extra_flags's own docstring for why a whole extra command can be
+# represented as one more entry in a bare token list (its first token is
+# just the string "&&" instead of a flag). Localres and TomoPickTomograms
+# additionally need commands_before (a command that must run BEFORE the
+# primary one), since neither extra_flags nor any other existing hook can
+# inject something ahead of the resolved program name -- see
+# JobDraftOverride.commands_before's own docstring.
+# --------------------------------------------------------------------------
+
+
+def _inimodel_extra_flags(field_values: dict, output_subdir: str) -> list:
+    """`--grad --denovo_3dref` (issue #stress-test, unchanged from before)
+    PLUS the second, independent `relion_align_symmetry` command real
+    RELION always runs after relion_refine for this job (getCommandsInimodelJob,
+    src/pipeline_jobs.cpp ~3555-3587) -- this is the command that actually
+    writes initial_model.mrc, the one file every downstream job (e.g.
+    Class3D's "Reference map") expects to consume. Confirmed for real:
+    without it, a from-scratch InitialModel job reports
+    RELION_JOB_EXIT_SUCCESS and runs 100 genuine VDAM iterations, but
+    initial_model.mrc is simply never created.
+
+    fn_model (command2's --i) is a value RELION computes from the FIRST
+    command's own iteration count, not a plain field passthrough:
+    `fn_model.compose(outputname + fn_run + "_it", total_nr_iter, "", 3)` --
+    fn_run is always "run" here (is_continue is always false in this app,
+    same reasoning as everywhere else in this table), so this is
+    `<out>run_it<nr_iter, zero-padded to at least 3 digits>_model.star`.
+
+    The --sym argument mirrors real RELION's own (at first glance
+    counter-intuitive, but scientifically deliberate) choice exactly: `if
+    (do_run_C1 && !(fn_sym=="C1"||"c1")) command2 += "--sym " + sym_name;
+    else command2 += "--sym C1";` -- i.e. relion_refine itself always runs
+    unbiased in C1 when do_run_C1 is checked (the common case, since ab-
+    initio reconstruction is least biased without symmetry), but this
+    SECOND command still aligns that C1 result to the user's real target
+    symmetry (sym_name) as a final step, UNLESS sym_name is already
+    trivially C1/c1 (nothing to align to). When do_run_C1 is unchecked,
+    relion_refine already ran directly in sym_name, so command2 just
+    reconfirms C1 -- redundant but harmless (RELION's own source does the
+    same thing)."""
+    tokens = ["--grad", "--denovo_3dref"]
+    if not output_subdir:
+        return tokens
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    try:
+        total_nr_iter = int(float(field_values.get("nr_iter") or 0))
+    except (TypeError, ValueError):
+        total_nr_iter = 0
+    if total_nr_iter <= 0:
+        return tokens
+    fn_model = f"{subdir}run_it{total_nr_iter:03d}_model.star"
+    sym_name = str(field_values.get("sym_name") or "C1")
+    do_run_c1 = bool(field_values.get("do_run_C1"))
+    sym = sym_name if (do_run_c1 and sym_name not in ("C1", "c1")) else "C1"
+    tokens += [
+        "&&", "`which relion_align_symmetry`",
+        "--i", shlex.quote(fn_model),
+        "--o", shlex.quote(subdir + "initial_model.mrc"),
+        "--sym", shlex.quote(sym),
+        "--apply_sym", "--select_largest_class",
+    ]
+    return tokens
+
+
+def _multibody_flex_analyse_flags(field_values: dict, output_subdir: str) -> list:
+    """The second, independent relion_flex_analyse command real RELION runs
+    when "Perform flexibility analysis?" is checked (getCommandsMultiBodyJob,
+    src/pipeline_jobs.cpp ~4820-4880) -- do_analyse defaults to checked, so
+    this fires for the common case, not just an edge case. fn_run is always
+    `<out>run` here (the `fn_run == ""` branch in real source only matters
+    for a continuation run search that never applies -- is_continue is
+    always false in this app, same reasoning as elsewhere in this table).
+    do_select's eigenvalue-selection flags are included for completeness
+    (mirrors real RELION exactly) even though do_select itself defaults to
+    unchecked."""
+    if not field_values.get("do_analyse") or not output_subdir:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    fn_run = f"{subdir}run"
+    fn_bodies = field_values.get("fn_bodies")
+    tokens = [
+        "&&", "`which relion_flex_analyse`", "--PCA_orient",
+        "--model", shlex.quote(fn_run + "_model.star"),
+        "--data", shlex.quote(fn_run + "_data.star"),
+        "--bodies", shlex.quote(str(fn_bodies or "")),
+        "--o", shlex.quote(subdir + "analyse"),
+    ]
+    try:
+        nr_movies = float(field_values.get("nr_movies") or 0)
+    except (TypeError, ValueError):
+        nr_movies = 0
+    if nr_movies > 0:
+        tokens += ["--do_maps", "--k", shlex.quote(str(field_values.get("nr_movies")))]
+    if field_values.get("do_select"):
+        tokens += [
+            "--select_eigenvalue", shlex.quote(str(field_values.get("select_eigenval"))),
+            "--select_eigenvalue_min", shlex.quote(str(field_values.get("eigenval_min"))),
+            "--select_eigenvalue_max", shlex.quote(str(field_values.get("eigenval_max"))),
+        ]
+    return tokens
+
+
+def _tomo_recon_part_helix_flags(field_values: dict, output_subdir: str) -> list:
+    """Three extra `relion_helix_toolbox --impose` commands
+    (getCommandsTomoReconPartJob, src/pipeline_jobs.cpp ~7960-7990), run
+    only when "Do helical reconstruction?" is checked (default off) -- one
+    each for half1/half2/merged, imposing the requested helical symmetry on
+    the reconstructions relion_tomo_reconstruct_particle just wrote."""
+    if not field_values.get("do_helix") or not output_subdir:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    twist = shlex.quote(str(field_values.get("helical_twist")))
+    rise = shlex.quote(str(field_values.get("helical_rise")))
+    try:
+        z_pct = float(field_values.get("helical_z_percentage") or 0) / 100.0
+    except (TypeError, ValueError):
+        z_pct = 0.0
+    diam = shlex.quote(str(field_values.get("helical_tube_outer_diameter")))
+    tokens = []
+    for name in ("half1", "half2", "merged"):
+        tokens += [
+            "&&", "`which relion_helix_toolbox`", "--impose",
+            "--i", shlex.quote(f"{subdir}{name}.mrc"),
+            "--o", shlex.quote(f"{subdir}helical_{name}.mrc"),
+            "--twist", twist, "--rise", rise,
+            "--z_percentage", str(z_pct),
+            "--cyl_outer_diameter", diam,
+        ]
+    return tokens
+
+
+def _localres_other_half(filename: str) -> Optional[str]:
+    """Python port of FileName::getTheOtherHalf (src/filename.cpp ~456) --
+    substitutes "half1"<->"half2" in the BASENAME only (the directory
+    portion, if any, is preserved verbatim), matching real RELION's own
+    half-map-pairing convention exactly. Returns None when neither
+    substring is present (real RELION treats this as a hard error;
+    RELION-US's own policy is to leave an incomplete draft rather than
+    validate, so the caller just omits the symlink commands in that case)."""
+    if "/" in filename:
+        directory, _, name = filename.rpartition("/")
+    else:
+        directory, name = "", filename
+    if "half1" in name:
+        other = name.replace("half1", "half2")
+    elif "half2" in name:
+        other = name.replace("half2", "half1")
+    else:
+        return None
+    return f"{directory}/{other}" if directory else other
+
+
+def _localres_program_override(field_values: dict) -> Optional[str]:
+    """do_resmap_locres's program is the user-configured fn_resmap
+    executable path (`command = joboptions["fn_resmap"].getString();`,
+    getCommandsLocresJob ~5350) -- not a quoted string literal like every
+    other job's `command = "..."`, so the extractor's literal-scan can't
+    see it; program_guess instead picked up the OTHER (do_relion_locres)
+    branch's `` `which relion_postprocess` `` literal, which is already
+    correct for THAT branch on its own. Returning None here for
+    do_relion_locres (or neither box checked) leaves program_guess and the
+    generic nr_mpi>1 -> program_mpi swap untouched, since relion_postprocess
+    genuinely does have an MPI form (relion_postprocess_mpi) that swap
+    already handles correctly."""
+    if field_values.get("do_resmap_locres"):
+        exe = field_values.get("fn_resmap")
+        return shlex.quote(str(exe)) if exe else None
+    return None
+
+
+def _localres_suppress_output_flag(field_values: dict) -> bool:
+    """do_resmap_locres's command never takes a --o flag at all -- ResMap is
+    a third-party argparse program with no such option; real RELION's own
+    getCommandsLocresJob only ever appends --o inside the OTHER
+    (do_relion_locres) branch (~5410: `command += " --o " + outputname +
+    "relion";`). Confirmed for real would be a broken draft otherwise: an
+    unrecognized --o flag on ResMap's own CLI."""
+    return bool(field_values.get("do_resmap_locres"))
+
+
+def _localres_commands_before(field_values: dict, output_subdir: str) -> list:
+    """The two `ln -s` commands real RELION runs before invoking ResMap
+    itself (getCommandsLocresJob ~5345-5346): `commands.push_back("ln -s
+    ../../" + fn_half1 + " " + outputname + "half1.mrc");` and the same for
+    half2/fn_half2 (fn_half2 computed via getTheOtherHalf -- see
+    _localres_other_half above). The "../../" prefix is correct as-is, not
+    something to adjust for this app: RELION-US already runs every command
+    from the PROJECT ROOT exactly like real RELION does (job_runner.py's
+    _run_subprocess), and a relative symlink TARGET is resolved relative to
+    the symlink's own location (<out>half1.mrc, two directories below the
+    project root), not the process's cwd -- so "../../" + a project-root-
+    relative fn_half1 lands back at the exact right file regardless."""
+    if not field_values.get("do_resmap_locres") or not output_subdir:
+        return []
+    fn_half1 = str(field_values.get("fn_in") or "")
+    if not fn_half1:
+        return []
+    fn_half2 = _localres_other_half(fn_half1)
+    if fn_half2 is None:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    return [
+        f"ln -s ../../{shlex.quote(fn_half1)} {shlex.quote(subdir + 'half1.mrc')}",
+        f"ln -s ../../{shlex.quote(fn_half2)} {shlex.quote(subdir + 'half2.mrc')}",
+    ]
+
+
+def _localres_extra_flags(field_values: dict, output_subdir: str) -> list:
+    """do_resmap_locres's own flags (getCommandsLocresJob ~5348-5373) --
+    all unmapped today: `--maskVol=`/`--vxSize=`/`--pVal=`/`--minRes=`/
+    `--maxRes=`/`--stepRes=` use "=" joining (not the generic "--flag
+    value" shape any FlagOverride can express) and `--noguiSplit` takes TWO
+    positional values under one flag, so this whole branch is handled as
+    one composed function instead, same as Extract's bg_radius or
+    Autopick's LoG parameters. do_relion_locres's own flags (angpix,
+    adhoc_bfac, fn_mtf, fn_mask) are already correctly extracted with a
+    do_relion_locres condition (see option_flags in job_definitions_raw.
+    json) and need no override here; only its fn_in ("--locres --i", a
+    compound literal the extractor couldn't split -- same shape as
+    Ctffind's --is_ctffind4/Class2D's --grad) is added, via this job's
+    `flags` entry below rather than here."""
+    if not field_values.get("do_resmap_locres") or not output_subdir:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    tokens = []
+    fn_mask = field_values.get("fn_mask")
+    if fn_mask:
+        tokens.append(f"--maskVol={shlex.quote(str(fn_mask))}")
+    tokens += ["--noguiSplit", shlex.quote(subdir + "half1.mrc"), shlex.quote(subdir + "half2.mrc")]
+    for key, flag in (
+        ("angpix", "--vxSize"), ("pval", "--pVal"), ("minres", "--minRes"),
+        ("maxres", "--maxRes"), ("stepres", "--stepRes"),
+    ):
+        value = field_values.get(key)
+        if value not in (None, ""):
+            tokens.append(f"{flag}={shlex.quote(str(value))}")
+    return tokens
+
+
+def _tomopick_program_extra(field_values: dict, output_subdir: str) -> list:
+    """pick_mode's value is a positional token right after the program name
+    on relion_python_tomo_pick's own CLI (getCommandsTomoPickTomogramsJob,
+    src/pipeline_jobs.cpp ~7660: `command += " " + pick_mode;`) -- same
+    "positional subcommand-style token" shape as ModelAngelo's build/
+    build_no_seq or TomoDenoiseTomograms's cryoCARE:train/predict, both
+    handled the same way via program_extra elsewhere in this table."""
+    pick_mode = field_values.get("pick_mode")
+    return [pick_mode] if pick_mode else []
+
+
+def _tomopick_commands_before(field_values: dict, output_subdir: str) -> list:
+    """The optional particles-from-star pre-pass real RELION runs first
+    when picking mode "particles" is combined with an input STAR file
+    (getCommandsTomoPickTomogramsJob ~7635-7648) -- converts an existing
+    particles.star into this job's own annotation format before the
+    interactive/auto picker itself runs."""
+    if field_values.get("pick_mode") != "particles" or not output_subdir:
+        return []
+    in_star_file = field_values.get("in_star_file")
+    if not in_star_file:
+        return []
+    in_tomoset = field_values.get("in_tomoset")
+    if not in_tomoset:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    return [
+        "`which relion_python_tomo_get_particle_poses` particles-from-star"
+        f" --tomograms-file {shlex.quote(str(in_tomoset))}"
+        f" --annotations-directory {shlex.quote(subdir + 'annotations')}"
+        f" --in-star-file {shlex.quote(str(in_star_file))}"
+    ]
+
+
+def _tomopick_extra_flags(field_values: dict, output_subdir: str) -> list:
+    """The second, UNCONDITIONAL relion_python_tomo_get_particle_poses
+    command real RELION always runs after the picker itself
+    (getCommandsTomoPickTomogramsJob ~7665-7679) -- converts whatever the
+    picker just wrote into this job's own particles.star output. --spacing-
+    angstroms is added for every pick_mode except "particles" (source:
+    `if (!fnt.contains("particles")) command2 += " --spacing-angstroms "
+    + particle_spacing;`)."""
+    pick_mode = field_values.get("pick_mode")
+    in_tomoset = field_values.get("in_tomoset")
+    if not pick_mode or not in_tomoset or not output_subdir:
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    tokens = [
+        "&&", "`which relion_python_tomo_get_particle_poses`", str(pick_mode),
+        "--tilt-series-star-file", shlex.quote(str(in_tomoset)),
+        "--annotations-directory", shlex.quote(subdir + "annotations"),
+        "--output-directory", shlex.quote(subdir),
+    ]
+    if pick_mode != "particles":
+        tokens += ["--spacing-angstroms", shlex.quote(str(field_values.get("particle_spacing")))]
+    return tokens
+
+
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # getCommandsTomoImportJob, DEFAULT branch (do_coords == false):
     #   command = "relion_python_tomo_import SerialEM ..."
@@ -1196,7 +1547,28 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # default --o. (NB: TomoAlignTiltSeries and TomoReconstructTomograms
     # were also checked and use plain --o, so they're deliberately NOT
     # listed here.)
-    "TomoPickTomograms": JobDraftOverride(output_flag="--output-directory"),
+    #
+    # getCommandsTomoPickTomogramsJob (~7615-7690) previously stayed fully
+    # unmapped beyond --output-directory ("a genuinely branched job... left
+    # out of flags/value_transforms entirely rather than risk a subtly-
+    # wrong reconstruction" -- see this table's own header comment) --
+    # re-read in full for issue #56 (multi-command support) and it turns
+    # out not to be that deeply branched: ONE primary command (always
+    # runs), an OPTIONAL command before it (pick_mode=="particles" AND an
+    # input STAR file given), and an UNCONDITIONAL command after it. See
+    # program_extra/commands_before/extra_flags's own docstrings above.
+    "TomoPickTomograms": JobDraftOverride(
+        output_flag="--output-directory",
+        program_extra=_tomopick_program_extra,
+        commands_before=_tomopick_commands_before,
+        extra_flags=_tomopick_extra_flags,
+        flags={
+            "in_tomoset": FlagOverride("--tilt-series-star-file"),
+        },
+        # pick_mode is consumed by program_extra (it's a positional token,
+        # not a --flag); in_star_file is consumed by commands_before.
+        suppress=frozenset({"pick_mode", "in_star_file"}),
+    ),
     "TomoDenoiseTomograms": JobDraftOverride(
         output_flag="--output-directory",
         program_extra=_tomo_denoise_subcommand_tokens,
@@ -1376,7 +1748,12 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # to 2D classification instead of 3D ab-initio reconstruction, the
         # one thing this job type exists to do; every run_itNNN_classes.mrcs
         # it wrote was a flat 64x64 image, not a 64^3 volume.
-        extra_flags=lambda field_values, output_subdir: ["--grad", "--denovo_3dref"],
+        #
+        # extra_flags ALSO carries the second relion_align_symmetry command
+        # real RELION runs after this one (issue #56) -- see
+        # _inimodel_extra_flags's own docstring above for the full source
+        # citation and why it belongs here rather than a new hook.
+        extra_flags=_inimodel_extra_flags,
         flags={
             "in_optimisation": FlagOverride("--ios"), "in_particles": FlagOverride("--i"),
             "in_tomograms": FlagOverride("--tomograms"), "in_trajectories": FlagOverride("--trajectories"),
@@ -1572,7 +1949,20 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "in_optimisation": FlagOverride("--i"), "in_particles": FlagOverride("--p"),
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
         },
-        suppress=frozenset({"use_direct_entries", "do_helix"}),
+        # do_helix's own primary-command flags (helical_nr_asu/twist/rise)
+        # are already correctly auto-mapped via the generic per-option loop
+        # (each has its own do_helix-conditioned option_flags entry). The
+        # do_helix branch ALSO runs three extra relion_helix_toolbox
+        # commands (issue #56, see _tomo_recon_part_helix_flags above) once
+        # helical reconstruction is actually on -- helical_tube_outer_
+        # diameter/helical_z_percentage belong ONLY to those, so they're
+        # suppressed here (now genuinely handled, not still needing a fix)
+        # rather than showing up as unmapped.
+        suppress=frozenset({
+            "use_direct_entries", "do_helix",
+            "helical_tube_outer_diameter", "helical_z_percentage",
+        }),
+        extra_flags=_tomo_recon_part_helix_flags,
     ),
     "TomoReconstructTomograms": JobDraftOverride(
         flags={
@@ -1660,6 +2050,12 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_pad1": FlagOverride("--pad 1"),  # ~4788
         },
         suppress=frozenset({"use_gpu"}),
+        # The second, independent relion_flex_analyse command real RELION
+        # runs when "Perform flexibility analysis?" is checked -- see
+        # _multibody_flex_analyse_flags's own docstring above (issue #56).
+        # do_analyse defaults to checked, so this fires for the tutorial's
+        # own default settings, not just an edge case.
+        extra_flags=_multibody_flex_analyse_flags,
     ),
     # Motioncorr/Ctffind's `is_tomo`-guarded fields. This table is keyed by
     # BASE name (see TOMO_VARIANT_OF above) -- job_registry._resolve_tomo_
@@ -1895,6 +2291,38 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "fn_in": FlagOverride("--i"),
             "do_skip_fsc_weighting": FlagOverride("--skip_fsc_weighting"),  # ~5370
         },
+    ),
+    # getCommandsLocresJob (src/pipeline_jobs.cpp ~5310-5390) is two
+    # mutually-exclusive modes with genuinely DIFFERENT programs
+    # (do_resmap_locres's is the user-configured fn_resmap executable;
+    # do_relion_locres's is relion_postprocess/_mpi) -- previously had NO
+    # entry here at all, so every draft fell through to the fully generic
+    # rule with a wrong program guess. do_resmap_locres defaults to CHECKED
+    # (do_relion_locres defaults unchecked), so this is the common case, not
+    # an edge case -- and it's also a multi-command job (issue #56): real
+    # RELION symlinks both half-maps into the job directory before running
+    # ResMap. See program_override/commands_before/extra_flags's own
+    # docstrings above for the full source citations.
+    "Localres": JobDraftOverride(
+        output_suffix="relion",
+        program_override=_localres_program_override,
+        suppress_output_flag=_localres_suppress_output_flag,
+        commands_before=_localres_commands_before,
+        extra_flags=_localres_extra_flags,
+        flags={
+            # `command += " --locres --i " + fn_in;` (~5382) -- a compound
+            # literal combining TWO flags in one assignment (same shape as
+            # Ctffind's --is_ctffind4/Class2D's --grad), only reachable in
+            # do_relion_locres mode; do_resmap_locres mode doesn't pass
+            # fn_in as a CLI flag at all (only via the symlink commands
+            # above, using the RAW value directly).
+            "fn_in": FlagOverride("--locres --i", condition="do_relion_locres"),
+        },
+        # fn_resmap is now consumed by program_override; pval/minres/maxres/
+        # stepres are now consumed by extra_flags (their real flags --pVal/
+        # --minRes/--maxRes/--stepRes don't case-match the generic "--" +
+        # key rule, so they were unmapped before too, just not yet fixed).
+        suppress=frozenset({"fn_resmap", "pval", "minres", "maxres", "stepres"}),
     ),
     "Extract": JobDraftOverride(
         # getCommandsExtractJob uses `--part_dir` (~2568) -- a THIRD distinct
@@ -2207,12 +2635,42 @@ def draft_flag_if_condition_false_for(internal_name: str, option_key: str) -> Op
     return entry.flag_if_condition_false if entry is not None else None
 
 
-def draft_program_override(internal_name: str) -> Optional[str]:
+def draft_program_override(internal_name: str, field_values: Optional[dict] = None) -> Optional[str]:
     """Verified program string for jobs whose extracted program_guess is
-    wrong for the default configuration, else None. See
-    JobDraftOverride.program."""
+    wrong for the default configuration, else None. Checks
+    JobDraftOverride.program_override FIRST (when field_values is given --
+    callers that don't need field-dependent resolution, e.g. this module's
+    own tests, can omit it and get the old fixed-`program`-only behavior
+    unchanged), falling back to the static `program` string. See both
+    fields' own docstrings for why a job needs one or the other."""
     override = _override(internal_name)
-    return override.program if override is not None else None
+    if override is None:
+        return None
+    if field_values is not None and override.program_override is not None:
+        resolved = override.program_override(field_values)
+        if resolved is not None:
+            return resolved
+    return override.program
+
+
+def draft_commands_before(internal_name: str, field_values: dict, output_subdir: str = "") -> list:
+    """Complete shell command strings this job needs to run BEFORE the
+    primary command this table otherwise builds, or [] for none right now.
+    See JobDraftOverride.commands_before."""
+    override = _override(internal_name)
+    if override is None or override.commands_before is None:
+        return []
+    return override.commands_before(field_values, output_subdir)
+
+
+def draft_suppress_output_flag(internal_name: str, field_values: dict) -> bool:
+    """True if this job's generic --o/output_subdir insertion must be
+    skipped entirely for the CURRENT field values. See
+    JobDraftOverride.suppress_output_flag."""
+    override = _override(internal_name)
+    if override is None or override.suppress_output_flag is None:
+        return False
+    return bool(override.suppress_output_flag(field_values))
 
 
 def draft_is_suppressed(internal_name: str, option_key: str) -> bool:
