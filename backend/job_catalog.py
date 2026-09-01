@@ -574,9 +574,10 @@ class JobDraftOverride:
     # Extra command-line tokens to append right after the output
     # flag/subdir, computed from the CURRENT field values -- for a
     # compulsory argument RELION derives from OTHER fields rather than
-    # reading directly off one JobOption (e.g. Import's --ofile, picked
-    # from is_multiframe's own two-way branch; see _import_ofile_args
-    # below). Returns [] for "nothing to add" (e.g. the branch this
+    # reading directly off one JobOption (e.g. Import's --ofile and
+    # --do_movies/--do_micrographs, both picked from is_multiframe's own
+    # two-way branch; see _import_mode_and_ofile_args below). Returns []
+    # for "nothing to add" (e.g. the branch this
     # computation covers isn't the one currently active). One of two slots
     # in this table that run code instead of holding data (see
     # extra_flags below for the other) -- reserved for exactly this
@@ -619,7 +620,7 @@ class JobDraftOverride:
     extra_flags: Optional[Callable[[dict, str], list]] = None
 
 
-def _import_ofile_args(field_values: dict) -> list:
+def _import_mode_and_ofile_args(field_values: dict) -> list:
     """relion_import's --ofile is compulsory (src/apps/import.cpp:49) and
     has no default -- without it the binary refuses to run at all
     (confirmed for real, running an Import job against RELION 5.0.1). Its
@@ -627,16 +628,70 @@ def _import_ofile_args(field_values: dict) -> list:
     app can just read: do_raw's is_multiframe checkbox selects
     "movies.star" vs "micrographs.star" (pipeline_jobs.cpp ~1312-1324) -- a
     plain two-way pick on one already-known boolean, safe to compute here.
+
+    is_multiframe ALSO selects one of --do_movies/--do_micrographs
+    (pipeline_jobs.cpp ~1310-1320) -- and unlike --ofile, this one is not
+    just missing a value, it's missing ENTIRELY without this fix: relion_import
+    refuses to run at all without exactly one of --do_movies/--do_micrographs/
+    --do_coordinates/--do_halfmaps/--do_other (confirmed for real, running
+    the do_raw-branch draft against RELION 5.0.1 failed immediately with
+    "ERROR: you can only use only one, and at least one, of the options
+    --do_movies, --do_micrographs, --do_coordinates, --do_halfmaps or
+    --do_other" -- an earlier version of this function computed --ofile but
+    left is_multiframe itself unmapped, on the mistaken assumption that its
+    only effect was picking the output filename).
+
     do_other's fn_out is derived from fn_in_other itself (basename, or a
     coords_suffix construction for the coordinate-import case) -- genuine
     per-node-type branch logic this app deliberately doesn't try to
     reconstruct (same policy as TomoImport's do_coords branch); that half
-    is left for the user to add via the editable command box, same as
-    is_multiframe itself already is (it shows in `unmapped`)."""
+    (including --do_coordinates/--do_other themselves) is left for the user
+    to add via the editable command box."""
     if not field_values.get("do_raw"):
         return []
-    ofile = "movies.star" if field_values.get("is_multiframe") else "micrographs.star"
-    return ["--ofile", ofile]
+    if field_values.get("is_multiframe"):
+        return ["--do_movies", "--ofile", "movies.star"]
+    return ["--do_micrographs", "--ofile", "micrographs.star"]
+
+
+def _autopick_log_flags(field_values: dict, output_subdir: str) -> list:
+    """Autopick's LoG-picking branch (pipeline_jobs.cpp ~2271-2293, `else if
+    (joboptions["do_log"].getBoolean()) { ... }`) is reached via an else-if
+    chain, so the extractor's per-option condition for every field inside it
+    (log_diam_min, log_diam_max, log_maxres, log_adjust_thr, log_upper_thr)
+    came out as the compound "else && joboptions[\"do_log\"].getBoolean()"
+    -- job_registry._evaluate_condition correctly refuses to guess at the
+    bare "else" term (see its own docstring), so ALL FIVE of these fields
+    fell out as unmapped, silently dropping every actual LoG picking
+    parameter from the draft. Confirmed for real: with do_log checked, the
+    draft command was just "`which relion_autopick` --o AutoPick/job003/"
+    -- no diameter, no threshold, nothing. log_invert (this job's OTHER
+    do_log-gated field) already had a correctly-verified condition="do_log"
+    override below; this covers the rest, plus two further literals that
+    have no owning JobOption at all: the bare `--LoG` mode flag and
+    `--shrink 0` (log_maxres's own value only feeds `--lowpass`, per the
+    source's `--shrink 0 --lowpass " + joboptions["log_maxres"]` on one
+    line). log_upper_thr is additionally gated on ITS OWN value (< 999.),
+    not a boolean field -- FlagOverride's condition mechanism evaluates
+    boolean gates only, so that comparison has to live here too."""
+    if not field_values.get("do_log"):
+        return []
+    tokens = [
+        "--LoG",
+        "--LoG_diam_min", str(field_values.get("log_diam_min", "")),
+        "--LoG_diam_max", str(field_values.get("log_diam_max", "")),
+        "--shrink", "0",
+        "--lowpass", str(field_values.get("log_maxres", "")),
+        "--LoG_adjust_threshold", str(field_values.get("log_adjust_thr", "")),
+    ]
+    upper_thr = field_values.get("log_upper_thr")
+    if upper_thr is not None and upper_thr != "":
+        try:
+            if float(upper_thr) < 999.0:
+                tokens += ["--LoG_upper_threshold", str(upper_thr)]
+        except (TypeError, ValueError):
+            pass
+    return tokens
 
 
 def _div_by_3(value: float) -> float:
@@ -737,15 +792,86 @@ def _extract_helical_nr_asu_rise_fallback_flags(field_values: dict) -> list:
     return []
 
 
+def _extract_coords_flags(field_values: dict) -> list:
+    """Extract's coordinate-input flag (pipeline_jobs.cpp ~2524-2541, the
+    do_reextract==false branch -- a fresh extraction, not a re-extraction):
+    `FileName mylist = joboptions["coords_suffix"].getString();` is read
+    into a local variable first, so the extractor's per-option scan (which
+    only looks for `joboptions["key"]` directly beside a `command +=`)
+    never sees it at all -- coords_suffix was completely unmapped,
+    confirmed for real: a from-scratch Extract job with coords_suffix
+    filled in produced a draft with no coordinate input whatsoever.
+
+    Worse than a plain miss, though: which FLAG applies depends on the
+    VALUE's own content, via RELION's own `mylist.contains("coords_suffix")`
+    "attempt at backwards compatibility" check -- true for the OLD
+    per-micrograph `coords_suffix_autopick.star` naming, splitting into
+    `--coord_dir <dir>/ --coord_suffix <name-without-"coords_suffix">`;
+    false for the current 2-column-list format RELION5's own AutoPick job
+    now writes (its own source comment: "new version: no longer save
+    coords_suffix nodetype, but 2-column list..."), which instead takes a
+    single `--coord_list <path>` verbatim. Confirmed for real against a
+    live AutoPick/job.../autopick.star (the ordinary, current-format case,
+    with no "coords_suffix" substring in its path) -- needs --coord_list,
+    not the old split form.
+
+    beforeLastOf/afterLastOf (filename.cpp:177-203) both return the WHOLE
+    string when the separator isn't found at all, not "" -- confirmed by
+    reading their real implementation, since Python's rpartition("/") on a
+    separator-less string gives ("", "", whole_string), the opposite
+    convention for the "before" half. Unreachable through this app's own
+    AutoPick -> Extract flow (AutoPick's own output paths always include a
+    job subdirectory), but matched exactly anyway for a manually-typed or
+    externally-imported coords_suffix path with no "/" in it at all."""
+    if field_values.get("do_reextract"):
+        return []
+    mylist = str(field_values.get("coords_suffix") or "")
+    if not mylist:
+        return []
+    if "coords_suffix" in mylist:
+        if "/" in mylist:
+            directory, _, name = mylist.rpartition("/")
+        else:
+            directory, name = mylist, mylist
+        return ["--coord_dir", directory + "/", "--coord_suffix", name.replace("coords_suffix", "")]
+    return ["--coord_list", mylist]
+
+
 def _extract_extra_flags(field_values: dict, output_subdir: str = "") -> list:
-    """Extract's DRAFT_OVERRIDES.extra_flags: combines the two
-    multi-field/branch-dependent groups the generic per-option rule and
-    the other transform mechanisms can't express (issues #17 and #18) --
-    see the two builders above for each one's own reasoning.
-    output_subdir is unused -- this job gets its output flag the ordinary
-    automatic way, unlike the exe-placeholder jobs extra_flags's second
-    parameter exists for."""
-    return _extract_bg_radius_flags(field_values) + _extract_helical_nr_asu_rise_fallback_flags(field_values)
+    """Extract's DRAFT_OVERRIDES.extra_flags: combines the multi-field/
+    branch-dependent groups the generic per-option rule and the other
+    transform mechanisms can't express (issues #17 and #18, plus the
+    coords_suffix local-variable miss) -- see each builder above for its
+    own reasoning. --part_dir (this job's own output flag) is handled the
+    ordinary automatic way via output_flag on this job's JobDraftOverride;
+    output_subdir is used here only for --part_star below, which RELION
+    computes as a full path rather than letting relion_preprocess combine
+    part_dir+part_star itself.
+
+    `command += " --extract";` (~2569) is a bare unconditional literal with
+    no owning JobOption -- same shape as Ctffind's --is_ctffind4/Autopick's
+    --LoG, so the generic per-option extractor can't find it either.
+    Confirmed for real: relion_preprocess refused to run at all with
+    "ERROR: Provide either --extract or --operate_on" -- every Extract job
+    this app ever built silently omitted its own mode flag.
+
+    `FileName fn_ostar = outputname + "particles.star"; command += "
+    --part_star " + fn_ostar;` (~2547-2549) is likewise unconditional
+    (after the reextract/fresh if-else closes, applying to both) and
+    likewise invisible to the per-option extractor (no joboptions[] on
+    either line). Confirmed for real: relion_preprocess ran to completion
+    ("Done preprocessing!", real per-micrograph .mrcs stacks written) but
+    never wrote the combined particles.star every downstream job (Class2D,
+    the tutorial's very next step) needs -- a job that reports success
+    while silently not producing the one output the rest of the pipeline
+    depends on is a worse failure mode than an honest crash."""
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    return (
+        ["--extract", "--part_star", subdir + "particles.star"]
+        + _extract_bg_radius_flags(field_values)
+        + _extract_helical_nr_asu_rise_fallback_flags(field_values)
+        + _extract_coords_flags(field_values)
+    )
 
 
 def _tomo_other_half(filename: str) -> Optional[str]:
@@ -1447,6 +1573,30 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     ),
     "Class2D": JobDraftOverride(
         output_suffix="run",
+        # `else if (joboptions["do_grad"].getBoolean()) { ... command += "
+        # --grad --class_inactivity_threshold 0.1 --grad_write_iter 10"; ...
+        # }` (~3203-3211) -- do_grad/VDAM's own mode flags are a bare
+        # unconditional-within-the-branch literal chunk with no owning
+        # JobOption, same shape as Ctffind's --is_ctffind4/Autopick's --LoG/
+        # Extract's --extract, so the generic per-option extractor can't
+        # find them either. do_grad defaults to Yes (VDAM is RELION's own
+        # recommended default since relion-4.0), so this is the COMMON
+        # case, not an edge one -- confirmed for real: a from-scratch
+        # Class2D draft with do_grad on (the default) had --iter 100 (the
+        # real nr_iter_grad value, correctly mapped on its own) but no
+        # --grad at all, which would have made relion_refine interpret
+        # that iter count as plain EM iterations instead of VDAM
+        # mini-batches -- a real, wrong-algorithm bug, not just a missing
+        # flag. do_em/do_grad are independent checkboxes in this app's own
+        # form (not a radio group) -- mirrors RELION's own explicit
+        # mutual-exclusivity error ("You cannot specify to use both the EM
+        # and the VDAM algorithm!") by only firing when do_grad is on AND
+        # do_em is off, same as RELION's own else-if.
+        extra_flags=lambda field_values, output_subdir: (
+            ["--grad", "--class_inactivity_threshold", "0.1", "--grad_write_iter", "10"]
+            if field_values.get("do_grad") and not field_values.get("do_em")
+            else []
+        ),
         flags={
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
             "do_combine_thru_disc": FlagOverride("--dont_combine_weights_via_disc", negated=True),
@@ -1575,10 +1725,25 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # slow_search (~1827, `if (!slow_search) command += " --fast_search
         # ";`) -- negated, applies in both SPA and Tomo mode (not nested
         # inside the is_tomo split above).
+        #
+        # --is_ctffind4 (~1826, `command += " --is_ctffind4 ";`) is a bare
+        # unconditional literal with no owning JobOption at all -- same
+        # shape as Postprocess's `--o ... postprocess` suffix, so the
+        # generic per-option extractor (which only ever sees a flag beside
+        # a `joboptions["key"]` reference) can't find it either. NOT
+        # cosmetic: ctffind_runner.cpp only adds `--old-school-input-
+        # ctffind4` to the executable's own invocation when is_ctffind4 is
+        # set, and modern CTFFIND (4.x/5.x) without that flag starts its
+        # own interactive prompt instead of reading the parameters
+        # RELION writes into each micrograph's *_ctffind3.com script --
+        # confirmed for real: every micrograph failed with "there was an
+        # error in executing" against RELION 5.0.1 + a real ctffind
+        # binary before this fix, immediately fixed after adding it.
         flags={
             "use_noDW": FlagOverride("--use_noDW", condition="!is_tomo"),
             "slow_search": FlagOverride("--fast_search", negated=True),
         },
+        extra_flags=lambda field_values, output_subdir: ["--is_ctffind4"],
     ),
     # getCommandsImportJob (src/pipeline_jobs.cpp:1439-1441, found by
     # actually running an Import job against RELION 5.0.1 -- the draft
@@ -1600,22 +1765,51 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # output_flag/extra_output_args: getCommandsImportJob (~1440-1441)
     # takes a DIFFERENT shape than every other job in this table: a
     # directory (`--odir`) AND a separate compulsory output FILENAME
-    # (`--ofile`, via _import_ofile_args above), not one bare `--o <dir>/`.
-    # `--o` isn't even a recognized argument to the real relion_import
-    # binary -- confirmed for real, running the default-settings draft
-    # against RELION 5.0.1 failed immediately with "WARNING: Option --o is
-    # not a valid RELION argument" plus "ERROR: Argument --odir not found" /
-    # "--ofile not found" (both compulsory, per relion_import --help).
+    # (`--ofile`, via _import_mode_and_ofile_args above), not one bare
+    # `--o <dir>/`. `--o` isn't even a recognized argument to the real
+    # relion_import binary -- confirmed for real, running the
+    # default-settings draft against RELION 5.0.1 failed immediately with
+    # "WARNING: Option --o is not a valid RELION argument" plus "ERROR:
+    # Argument --odir not found" / "--ofile not found" (both compulsory,
+    # per relion_import --help). That same function also supplies
+    # --do_movies/--do_micrographs -- also compulsory, also confirmed for
+    # real (see its own docstring).
     "Import": JobDraftOverride(
         output_flag="--odir",
         flags={
             "fn_in_raw": FlagOverride("--i", condition="do_raw"),
             "fn_in_other": FlagOverride("--i", condition="do_other"),
         },
-        extra_output_args=_import_ofile_args,
+        extra_output_args=_import_mode_and_ofile_args,
     ),
     "Autopick": JobDraftOverride(
+        # getCommandsAutopickJob uses `--odir` (~2069/2191), not the generic
+        # `--o` -- same shape as Import (see its own override for the
+        # confirmed-for-real reasoning). Confirmed for real here too: a
+        # completed LoG-mode Autopick job's coordinate files and logfile.pdf
+        # landed in AutoPick/ (relion_autopick's own working-directory
+        # fallback when handed an --o it doesn't recognize) instead of
+        # AutoPick/job003/ -- invisible to this app's own Command Center/
+        # Outputs tab, which only ever look inside the job's own numbered
+        # directory.
+        output_flag="--odir",
         flags={
+            # fn_input_autopick's `--i` appears TWICE in getCommandsAutopickJob:
+            # once inside the `is_continue && continue_manual` branch (~2067,
+            # relion_manualpick) and once in the real fresh-job path (~2175,
+            # right after the icheck==1/empty-field guards, shared by all
+            # three picking modes) -- the extractor's per-option scan takes
+            # the FIRST `command +=` beside a given joboptions[] key in the
+            # whole function body, so it attributed this flag to the
+            # continue-only occurrence's condition ("is_continue &&
+            # continue_manual"), which RELION-US's own field_values can never
+            # satisfy (this app never models a "continue" run). Confirmed for
+            # real: a from-scratch LoG-mode Autopick job's draft omitted --i
+            # entirely even with the input STAR file field filled in. Every
+            # other field on this job's I/O tab already resolves correctly
+            # since fn_input_autopick is the only one duplicated between the
+            # two branches.
+            "fn_input_autopick": FlagOverride("--i"),
             # All within the `else if (do_refs)` branch (~2295-2379) unless
             # noted -- one of Autopick's three mutually-exclusive picking
             # modes (LoG/references/topaz, enforced by an else-if chain, not
@@ -1650,6 +1844,7 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_read_fom_maps": FlagOverride("--read_fom_maps", condition="do_refs || do_log"),
         },
         suppress=frozenset({"use_gpu"}),
+        extra_flags=_autopick_log_flags,
     ),
     "Maskcreate": JobDraftOverride(
         output_suffix="mask.mrc",
@@ -1675,6 +1870,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         },
     ),
     "Extract": JobDraftOverride(
+        # getCommandsExtractJob uses `--part_dir` (~2568) -- a THIRD distinct
+        # output-flag convention in this table, different from both the
+        # generic `--o` every ordinary job gets and Import/Autopick's
+        # `--odir`. Confirmed for real: relion_preprocess warned "Option --o
+        # is not a valid RELION argument" and (combined with the missing
+        # --extract below) refused to run at all.
+        output_flag="--part_dir",
         flags={
             # `if (do_reextract) { ... if (do_reset_offsets) command += "
             # --reset_offsets"; else if (do_recenter) { command += "

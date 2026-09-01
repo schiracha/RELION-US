@@ -94,6 +94,15 @@ _PATH_TOKEN_RE = re.compile(
     r"[\w][\w\-./]*\.(?:star|mrc|mrcs|tomostar|mdoc|xf|tlt|mod)\b"
 )
 
+# \r\n listed before the bare \r/\n alternatives so a genuine CRLF pair
+# (matched leftmost-first by re) consumes both bytes as ONE separator --
+# splitting on \r and \n independently instead treats every \r\n pair as
+# two separators, inserting a spurious empty line between them that a real
+# terminal would never render (job_runner._pump's own reason for treating
+# \r as a separator at all is to survive RELION's \r-only progress-bar
+# animation without dropping output, not to fragment ordinary CRLF text).
+_LINE_SEP_RE = re.compile(rb"\r\n|\r|\n")
+
 
 def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) -> list[str]:
     """Best-effort, NOT ground truth: scans `text` (a run's command string,
@@ -1190,21 +1199,47 @@ class JobRunManager:
         stderr_log = _open_log("run.err")
 
         async def pump(stream, sink: list[str], msg_type: str, logfile):
+            # Chunk-based, not stream.readline(): readline() raises
+            # ValueError once a single line exceeds its 64 KiB limit, which
+            # RELION's own in-place progress-bar animation (`~~(,_,"> yum!`,
+            # printed via bare \r with no real \n between updates -- seen in
+            # the run.out of literally every job this session) can and does
+            # exceed on a long-running step. The old code caught that
+            # exception and stopped THIS pump() coroutine cleanly, but nothing
+            # else was left draining the pipe -- once the OS pipe's own
+            # buffer then filled, the child's next write() call blocked
+            # forever, silently hanging the whole job (not just logging)
+            # with the run stuck in "running" permanently. Confirmed for
+            # real: a Class2D job hung 17+ minutes at ~0% CPU, its only
+            # threads parked on blocked write/futex syscalls, immediately
+            # after this exact "[RELION-US] output stream error: Separator
+            # is not found, and chunk exceed the limit" appeared in its
+            # Errors tab. stream.read(n) has no such per-line limit --
+            # \r is treated as a line terminator alongside \n (matching how
+            # a real terminal would render the animation) so a single
+            # in-place-updating spinner still surfaces as many short lines
+            # instead of one unbounded one.
+            buf = b""
             while True:
-                try:
-                    line = await stream.readline()
-                except ValueError as exc:
-                    # StreamReader raises on a single line longer than its
-                    # 64 KiB limit -- real for tools that emit one huge line.
-                    # Report it and stop pumping rather than letting it
-                    # escape and strand the run in "running" forever.
-                    msg = f"[RELION-US] output stream error: {exc}"
-                    run.stderr_lines.append(msg)
-                    await run.broadcast({"type": "stderr", "line": msg})
+                chunk = await stream.read(65536)
+                if not chunk:
                     break
-                if not line:
-                    break
-                decoded = line.decode(errors="replace").rstrip("\n")
+                buf += chunk
+                while True:
+                    m = _LINE_SEP_RE.search(buf)
+                    if m is None:
+                        break
+                    raw_line, buf = buf[:m.start()], buf[m.end():]
+                    decoded = raw_line.decode(errors="replace")
+                    sink.append(decoded)
+                    if logfile is not None:
+                        try:
+                            logfile.write(decoded + "\n")
+                        except OSError:
+                            pass
+                    await run.broadcast({"type": msg_type, "line": decoded})
+            if buf:
+                decoded = buf.decode(errors="replace")
                 sink.append(decoded)
                 if logfile is not None:
                     try:

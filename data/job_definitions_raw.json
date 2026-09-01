@@ -390,7 +390,7 @@
       {
         "field_type": "filename",
         "label": "MOTIONCOR2 executable:",
-        "default": "default_location",
+        "default": "/public/EM/MOTIONCOR2/MotionCor2",
         "pattern": "*.*",
         "directory": ".",
         "help": "Location of the MOTIONCOR2 executable. You can control the default of this field by setting environment variable RELION_MOTIONCOR2_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code.",
@@ -738,7 +738,7 @@
       {
         "field_type": "filename",
         "label": "CTFFIND-4.1 executable:",
-        "default": "default_location",
+        "default": "/public/EM/ctffind/ctffind.exe",
         "pattern": "*",
         "directory": ".",
         "help": "Location of the CTFFIND (release 4.1 or later) executable. You can control the default of this field by setting environment variable RELION_CTFFIND_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code.",
@@ -3056,7 +3056,7 @@
       {
         "field_type": "text",
         "label": "Copy particles to scratch directory:",
-        "default": "default_scratch",
+        "default": "",
         "help": "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.",
         "key": "scratch_dir"
       },
@@ -3407,7 +3407,7 @@
       {
         "field_type": "text",
         "label": "Copy particles to scratch directory:",
-        "default": "default_scratch",
+        "default": "",
         "help": "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.",
         "key": "scratch_dir"
       },
@@ -4064,7 +4064,7 @@
       {
         "field_type": "text",
         "label": "Copy particles to scratch directory:",
-        "default": "default_scratch",
+        "default": "",
         "help": "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.",
         "key": "scratch_dir"
       },
@@ -4817,7 +4817,7 @@
       {
         "field_type": "text",
         "label": "Copy particles to scratch directory:",
-        "default": "default_scratch",
+        "default": "",
         "help": "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.",
         "key": "scratch_dir"
       },
@@ -5333,7 +5333,7 @@
       {
         "field_type": "text",
         "label": "Copy particles to scratch directory:",
-        "default": "default_scratch",
+        "default": "",
         "help": "If a directory is provided here, then the job will create a sub-directory in it called relion_volatile. If that relion_volatile directory already exists, it will be wiped. Then, the program will copy all input particles into a large stack inside the relion_volatile subdirectory. Provided this directory is on a fast local drive (e.g. an SSD drive), processing in all the iterations will be faster. If the job finishes correctly, the relion_volatile directory will be wiped. If the job crashes, you may want to remove it yourself.",
         "key": "scratch_dir"
       },
@@ -6312,7 +6312,7 @@
       {
         "field_type": "filename",
         "label": "ResMap executable:",
-        "default": "default_location",
+        "default": "/public/EM/ResMap/ResMap-1.1.4-linux64",
         "pattern": "ResMap*",
         "directory": ".",
         "help": "Location of the ResMap executable. You can control the default of this field by setting environment variable RELION_RESMAP_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code. \n \n Note that the ResMap wrapper cannot use MPI.",
@@ -8146,7 +8146,7 @@
       {
         "field_type": "filename",
         "label": "Batchruntomo executable:",
-        "default": "default_location",
+        "default": "/public/EM/imod/IMOD/bin/batchruntomo",
         "pattern": "*",
         "directory": ".",
         "help": "Location of the batchruntomo executable from IMOD. You can control the default of this field by setting environment variable RELION_BATCHTOMO_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code.",
@@ -8162,7 +8162,7 @@
       {
         "field_type": "filename",
         "label": "AreTomo2 executable:",
-        "default": "default_location",
+        "default": "/public/EM/AreTomo/AreTomo2/AreTomo2",
         "pattern": "*",
         "directory": ".",
         "help": "Location of the AreTomo2 executable. You can control the default of this field by setting environment variable RELION_ARETOMO_EXECUTABLE, or by editing the first few lines in src/gui_jobwindow.h and recompile the code.",

@@ -368,6 +368,91 @@ def expand_add_tomo_input_options_call(
     return out
 
 
+def parse_default_location_macros(header_text: str) -> dict[str, str]:
+    """pipeline_jobs.h's `#define DEFAULT<NAME> "..."` table -- covers both
+    the per-tool exe-path macros (DEFAULTCTFFINDLOCATION, ...) and unrelated
+    ones like DEFAULTSCRATCHDIR (""). Non-string macros (DEFAULTNRMPI 1,
+    DEFAULTALLOWCHANGEMINDEDICATED true, ...) don't match the quoted-string
+    pattern and are correctly skipped -- this table only ever backs a
+    std::string-typed JobOption default."""
+    return dict(re.findall(r'#define\s+(DEFAULT\w+)\s+"([^"]*)"', header_text))
+
+
+_GETENV_RE = re.compile(r'(\w+)\s*=\s*getenv\s*\(\s*"(RELION_\w+)"\s*\)')
+_DEFAULT_MACRO_RE = re.compile(r'\bDEFAULT[A-Z0-9_]+\b')
+
+
+def resolve_default_location_options(
+    options: list[dict], func_body: str, macros: dict[str, str]
+) -> None:
+    """Fixes a real bug, not limited to one variable name: several jobs
+    declare a JobOption's default as `std::string(default_location)` or
+    `std::string(default_scratch)` -- a local C++ variable (assigned a few
+    lines earlier from `getenv("RELION_...")`, falling back to a `#define
+    DEFAULT...` macro when unset), not a literal default string. Read
+    naively, the bare identifier text ("default_location", "default_scratch",
+    ...) ends up AS the field's default value -- confirmed for real twice:
+    a Ctffind job's fn_ctffind_exe showing literally "default_location"
+    (relion_run_ctffind_mpi then tried to exec a file by that name), and a
+    Class2D job's scratch_dir showing literally "default_scratch" (would
+    have made relion_refine try to copy every particle into a
+    "default_scratch/relion_volatile/" directory relative to cwd instead of
+    correctly defaulting to "" / no scratch copy at all, DEFAULTSCRATCHDIR's
+    real value).
+
+    General strategy, not a per-variable-name special case: for each
+    JobOption whose extracted default is a bare lowercase C-identifier-
+    shaped token, confirm that same name is assigned from a `getenv(...)`
+    call somewhere earlier in this function body (real string defaults --
+    "opticsGroup1", paths, "" -- never coincidentally match both a variable-
+    name shape AND an actual getenv-assigned local in the same body, so this
+    doesn't false-positive on genuine values). Take the LAST `DEFAULT...`-
+    shaped macro token appearing between that getenv(...) call and this
+    option's own `joboptions["key"] = JobOption(` occurrence -- covers both
+    the direct-assignment shape (`default_scratch = DEFAULTSCRATCHDIR;`) and
+    the indirect one (`char default_ctffind[] = DEFAULTCTFFINDLOCATION;
+    default_location = default_ctffind;`) without needing to trace variable
+    aliasing at all. A function declaring MORE THAN ONE such field
+    (TomoAlignTiltSeries has fn_batchtomo_exe and fn_aretomo_exe, each
+    reassigning the same `default_location` in turn) is why this is matched
+    positionally per-option rather than once per function -- taking "the
+    first getenv in the function" for every such field (an earlier version
+    of this did exactly that) gave fn_aretomo_exe batchruntomo's own path."""
+    candidates = {
+        opt["key"]
+        for opt in options
+        if isinstance(opt.get("default"), str) and re.match(r'^[a-z][a-z0-9_]*$', opt["default"])
+    }
+    if not candidates:
+        return
+    key_positions = {
+        m.group(1): m.start()
+        for m in re.finditer(r'joboptions\["([A-Za-z0-9_]+)"\]\s*=\s*JobOption\(', func_body)
+    }
+    for opt in options:
+        if opt["key"] not in candidates:
+            continue
+        varname = opt["default"]
+        opt_pos = key_positions.get(opt["key"])
+        if opt_pos is None:
+            continue
+        # Nearest getenv(...) assignment to THIS variable name preceding
+        # this option's own JobOption( call.
+        getenv_positions = [
+            m.start() for m in _GETENV_RE.finditer(func_body)
+            if m.group(1) == varname and m.start() < opt_pos
+        ]
+        if not getenv_positions:
+            continue
+        span = func_body[getenv_positions[-1]:opt_pos]
+        macro_matches = _DEFAULT_MACRO_RE.findall(span)
+        if not macro_matches:
+            continue
+        resolved = macros.get(macro_matches[-1])
+        if resolved is not None:
+            opt["default"] = resolved
+
+
 def extract_joboptions(func_body: str) -> list[dict]:
     results = []
     for m in re.finditer(r'joboptions\["([A-Za-z0-9_]+)"\]\s*=\s*JobOption\(', func_body):
@@ -819,6 +904,7 @@ def main() -> int:
     mpi_thread = extract_mpi_thread_capability(text)
     run_tab_options = extract_run_tab_options(text)
     tomo_input_template = extract_add_tomo_input_options_template(text)
+    default_location_macros = parse_default_location_macros(header_text)
 
     jobs = {}
 
@@ -828,6 +914,7 @@ def main() -> int:
         brace_close = find_matching_brace(text, brace_open)
         body = text[brace_open + 1 : brace_close]
         options = extract_joboptions(body)
+        resolve_default_location_options(options, body, default_location_macros)
         for opt in options:
             if opt["field_type"] == "radio" and opt.get("options_ref") in option_vectors:
                 opt["options"] = option_vectors[opt["options_ref"]]

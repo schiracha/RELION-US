@@ -183,13 +183,18 @@ def test_value_transform_lookup_and_unknown_label():
 
 
 def test_extra_output_args_import_do_raw_multiframe():
+    # --do_movies is compulsory, not just --ofile: relion_import refuses to
+    # run at all without exactly one of --do_movies/--do_micrographs/
+    # --do_coordinates/--do_halfmaps/--do_other -- confirmed for real
+    # against RELION 5.0.1, which is how this got caught (a prior version
+    # only emitted --ofile, leaving is_multiframe's mode flag unmapped).
     assert draft_extra_output_args("Import", {"do_raw": True, "is_multiframe": True}) == \
-        ["--ofile", "movies.star"]
+        ["--do_movies", "--ofile", "movies.star"]
 
 
 def test_extra_output_args_import_do_raw_single_frame():
     assert draft_extra_output_args("Import", {"do_raw": True, "is_multiframe": False}) == \
-        ["--ofile", "micrographs.star"]
+        ["--do_micrographs", "--ofile", "micrographs.star"]
 
 
 def test_extra_output_args_import_do_other_returns_nothing():
@@ -214,26 +219,34 @@ def test_extra_flags_extract_bg_radius():
     # "--norm" itself is a separate, plain FlagOverride (Extract's own
     # entry) -- not part of extra_flags' output, so it still appears even
     # if this computation bails out (see _extract_bg_radius_flags).
+    # "--extract"/"--part_star" are Extract's own always-on tokens (see
+    # _extract_extra_flags's docstring) -- present regardless of these
+    # field values, so every case in this section leads with them. No
+    # output_subdir given here -> the "/" prefix comes from this helper's
+    # own trailing-slash normalization, same as the generic output_flag
+    # mechanism uses (see test_extract_uses_odir_not_a_bare_o_flag in
+    # test_job_registry.py for a case with a real subdir).
     assert draft_extra_flags("Extract", {"do_norm": True, "bg_diameter": -1, "extract_size": 128}) == \
-        ["--bg_radius", "48"]
+        ["--extract", "--part_star", "/particles.star", "--bg_radius", "48"]
 
 
 def test_extra_flags_extract_bg_radius_omitted_when_do_norm_off():
-    assert draft_extra_flags("Extract", {"do_norm": False, "bg_diameter": -1, "extract_size": 128}) == []
+    assert draft_extra_flags("Extract", {"do_norm": False, "bg_diameter": -1, "extract_size": 128}) == \
+        ["--extract", "--part_star", "/particles.star"]
 
 
 def test_extra_flags_extract_helical_fallback():
     assert draft_extra_flags(
         "Extract",
         {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": False},
-    ) == ["--helical_nr_asu", "1", "--helical_rise", "1"]
+    ) == ["--extract", "--part_star", "/particles.star", "--helical_nr_asu", "1", "--helical_rise", "1"]
 
 
 def test_extra_flags_extract_helical_fallback_absent_once_cutting_into_segments():
     assert draft_extra_flags(
         "Extract",
         {"do_extract_helix": True, "do_extract_helical_tubes": True, "do_cut_into_segments": True},
-    ) == []
+    ) == ["--extract", "--part_star", "/particles.star"]
 
 
 def test_extra_flags_tomo_other_half_swap_both_directions():

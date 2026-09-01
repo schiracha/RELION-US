@@ -75,6 +75,21 @@ Ubuntu, `sudo dnf install python3` on Fedora (venv is included), pacman's
 `conda create -n relion-us python=3.11 && conda activate relion-us && pip
 install -r backend/requirements.txt`.
 
+**Distro-specific notes:**
+- **Ubuntu 24.04**: no extra steps — it ships Python 3.12 by default, well
+  above the 3.10 floor.
+- **RHEL / CentOS Stream (CentOS Linux proper is EOL — treat it as RHEL)**:
+  check your default `python3` version first (`python3 --version`). RHEL 8
+  ships Python 3.6 and RHEL 9 ships Python 3.9 — both below 3.10 — so
+  `python3 -m venv` above will create an environment `pip install` then
+  fails against. Install a newer interpreter and use it explicitly instead:
+  `sudo dnf install python3.11` (RHEL 9: available directly via AppStream;
+  RHEL 8: needs EPEL or the Software Collections repo first), then
+  `python3.11 -m venv relion-us` in place of the `python3 -m venv` command
+  above. Everything else (requirements, launch command, behavior) is
+  identical once that's done — nothing else in this app is RHEL/CentOS-
+  specific.
+
 Once the environment is set up and active, launch it with:
 
 ```bash

@@ -305,6 +305,79 @@ def test_autopick_default_program_is_not_its_continue_branch():
     assert "relion_autopick" in job_registry.raw_job("Autopick")["program_guess"]
 
 
+def test_autopick_uses_odir_not_a_bare_o_flag():
+    """getCommandsAutopickJob uses `--odir` (~2069/2191), not the generic
+    `--o` every other job (bar Import) gets. Confirmed for real: a
+    completed LoG-mode Autopick job's coordinate files and logfile.pdf
+    landed in AutoPick/ instead of AutoPick/job003/ -- relion_autopick
+    warned "Option --o is not a valid RELION argument" and fell back to
+    its own working-directory default, invisible to this app's Outputs
+    tab, which only looks inside the job's own numbered directory."""
+    raw = job_registry.raw_job("Autopick")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Autopick", "AutoPick/job003")
+    assert "--odir AutoPick/job003/" in cmd
+    assert "--o AutoPick/job003/" not in cmd
+
+
+def test_autopick_emits_input_star_file_flag():
+    """fn_input_autopick's `--i` appears twice in getCommandsAutopickJob:
+    once in the continue-only relion_manualpick branch (~2067) and once in
+    the real fresh-job path (~2175). The per-option extractor took the
+    FIRST occurrence's condition ("is_continue && continue_manual"), which
+    this app's field_values can never satisfy -- confirmed for real: a
+    from-scratch LoG-mode Autopick draft omitted --i entirely even with the
+    input STAR file filled in."""
+    raw = job_registry.raw_job("Autopick")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"fn_input_autopick": "mics.star", "do_log": True}, "Autopick", "AutoPick/job003")
+    assert "--i mics.star" in cmd
+
+
+def test_autopick_log_mode_emits_its_own_picking_parameters():
+    """Every field inside Autopick's LoG branch (pipeline_jobs.cpp
+    ~2271-2293, an else-if chain) got extracted with a condition of
+    "else && joboptions[\"do_log\"].getBoolean()" -- job_registry's
+    condition evaluator correctly refuses to guess at the bare "else" term,
+    so log_diam_min/log_diam_max/log_maxres/log_adjust_thr/log_upper_thr
+    all fell out unmapped, silently dropping every actual LoG parameter.
+    Confirmed for real: with do_log checked and these fields filled in via
+    RELION-US's own popup, the draft command was just "`which
+    relion_autopick` --o AutoPick/job003/" -- no diameter, no threshold."""
+    raw = job_registry.raw_job("Autopick")
+    fields = {
+        "do_log": True,
+        "log_diam_min": 150,
+        "log_diam_max": 180,
+        "log_maxres": 20,
+        "log_adjust_thr": 0,
+        "log_upper_thr": 5,
+    }
+    cmd, _ = job_registry._build_draft_command(raw, fields, "Autopick", "AutoPick/job003")
+    assert "--LoG " in cmd or cmd.endswith("--LoG")
+    assert "--LoG_diam_min 150" in cmd
+    assert "--LoG_diam_max 180" in cmd
+    assert "--shrink 0" in cmd
+    assert "--lowpass 20" in cmd
+    assert "--LoG_adjust_threshold 0" in cmd
+    assert "--LoG_upper_threshold 5" in cmd
+
+
+def test_autopick_log_upper_threshold_omitted_at_or_above_999():
+    """`if (joboptions["log_upper_thr"].getNumber(...) < 999.)` -- 999 is
+    RELION's own "disabled" sentinel for this field, not a real threshold."""
+    raw = job_registry.raw_job("Autopick")
+    fields = {"do_log": True, "log_diam_min": 150, "log_diam_max": 180, "log_upper_thr": 999}
+    cmd, _ = job_registry._build_draft_command(raw, fields, "Autopick", "AutoPick/job003")
+    assert "--LoG_upper_threshold" not in cmd
+
+
+def test_autopick_log_flags_absent_outside_log_mode():
+    raw = job_registry.raw_job("Autopick")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_refs": True}, "Autopick", "AutoPick/job003")
+    assert "--LoG" not in cmd
+
+
 def test_mpi_greater_than_one_uses_relions_own_wrapping():
     raw = job_registry.raw_job("Class2D")
     values = {"nr_mpi": 4, "nr_threads": 2}
@@ -378,6 +451,21 @@ def test_input_flag_comes_from_the_real_builder():
     cmd, _ = job_registry._build_draft_command(
         raw, {"input_star_mics": "mics.star"}, "Ctffind", "")
     assert "--i mics.star" in cmd
+
+
+def test_ctffind_always_emits_is_ctffind4():
+    """`command += " --is_ctffind4 ";` (pipeline_jobs.cpp ~1826) is an
+    unconditional literal with no owning JobOption -- confirmed for real
+    against RELION 5.0.1: every micrograph failed ("there was an error in
+    executing ... _ctffind3.com") because ctffind_runner.cpp only adds
+    --old-school-input-ctffind4 to the ctffind binary's own invocation when
+    this flag is present, and a modern CTFFIND without it starts its own
+    interactive prompt instead of reading the .com script RELION wrote."""
+    raw = job_registry.raw_job("Ctffind")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Ctffind", "")
+    assert "--is_ctffind4" in cmd
+    tomo_cmd, _ = job_registry._build_draft_command(raw, {}, "TomoCtffind", "")
+    assert "--is_ctffind4" in tomo_cmd
 
 
 def test_branch_dependent_flags_stay_out_of_the_draft():
@@ -634,11 +722,26 @@ def test_import_uses_odir_and_ofile_not_a_bare_o_flag():
     assert "--o Import/job001/" not in cmd  # no bare --o anywhere
 
 
+def test_import_emits_do_movies_for_multiframe_input():
+    """relion_import refuses to run at all without exactly one of
+    --do_movies/--do_micrographs/--do_coordinates/--do_halfmaps/--do_other
+    ("ERROR: you can only use only one, and at least one, of the options
+    ...") -- confirmed for real against RELION 5.0.1, running a draft from
+    an earlier version of this app that computed --ofile but left this flag
+    unmapped."""
+    raw = job_registry.raw_job("Import")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_raw": True, "is_multiframe": True}, "Import", "Import/job001")
+    assert "--do_movies" in cmd
+
+
 def test_import_ofile_picks_micrographs_star_for_single_frame():
     raw = job_registry.raw_job("Import")
     cmd, _ = job_registry._build_draft_command(
         raw, {"do_raw": True, "is_multiframe": False}, "Import", "Import/job001")
     assert "--ofile micrographs.star" in cmd
+    assert "--do_micrographs" in cmd
+    assert "--do_movies" not in cmd
 
 
 def test_import_ofile_omitted_outside_the_do_raw_branch():
@@ -646,12 +749,16 @@ def test_import_ofile_omitted_outside_the_do_raw_branch():
     or a coords_suffix construction for coordinate imports) -- genuine
     per-node-type branch logic this app deliberately doesn't reconstruct,
     same policy as TomoImport's do_coords branch. Left for the user to add
-    by hand, same as is_multiframe already is inside the do_raw branch."""
+    by hand (unlike is_multiframe's own --do_movies/--do_micrographs pair,
+    which this app computes -- see test_import_emits_do_movies_for_
+    multiframe_input)."""
     raw = job_registry.raw_job("Import")
     cmd, _ = job_registry._build_draft_command(
         raw, {"do_raw": False, "do_other": True, "fn_in_other": "ref.mrc"},
         "Import", "Import/job001")
     assert "--ofile" not in cmd
+    assert "--do_movies" not in cmd
+    assert "--do_micrographs" not in cmd
 
 
 def test_motioncorr_gain_rot_and_flip_translate_label_to_relions_numeric_code():
@@ -1483,6 +1590,128 @@ def test_extract_helical_nr_asu_rise_fallback_is_mutually_exclusive_with_the_rea
     cmd_off, unmapped_off = job_registry._build_draft_command(
         raw, {"do_extract_helix": True, "do_extract_helical_tubes": False}, "Extract", "")
     assert "--helical_nr_asu" not in cmd_off, cmd_off
+
+
+def test_class2d_vdam_mode_emits_its_own_grad_flags():
+    """`else if (joboptions["do_grad"].getBoolean()) { ... command += "
+    --grad --class_inactivity_threshold 0.1 --grad_write_iter 10"; ... }`
+    (~3203-3211) is a bare literal chunk with no owning JobOption.
+    do_grad defaults to Yes (RELION's own recommended default since
+    relion-4.0), so this is the common case: confirmed for real, a
+    from-scratch Class2D draft with do_grad on had the real --iter value
+    but no --grad at all, which would have made relion_refine interpret
+    that count as EM iterations instead of VDAM mini-batches."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_grad": True, "do_em": False}, "Class2D", "Class2D/job005")
+    assert "--grad" in cmd.split()
+    assert "--class_inactivity_threshold 0.1" in cmd
+    assert "--grad_write_iter 10" in cmd
+
+
+def test_class2d_grad_flags_absent_in_em_mode():
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_grad": False, "do_em": True}, "Class2D", "Class2D/job005")
+    assert "--grad" not in cmd.split()
+
+
+def test_class2d_grad_flags_absent_when_both_checked():
+    """Mirrors RELION's own explicit mutual-exclusivity error ("You cannot
+    specify to use both the EM and the VDAM algorithm!") rather than
+    guessing which one wins."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_grad": True, "do_em": True}, "Class2D", "Class2D/job005")
+    assert "--grad" not in cmd.split()
+
+
+def test_extract_uses_part_dir_not_a_bare_o_flag():
+    """getCommandsExtractJob uses `--part_dir` (~2568) -- a third distinct
+    output-flag convention in this table (generic --o, Import/Autopick's
+    --odir, and this). Confirmed for real: relion_preprocess warned
+    "Option --o is not a valid RELION argument"."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Extract", "Extract/job004")
+    assert "--part_dir Extract/job004/" in cmd
+    assert "--o Extract/job004/" not in cmd
+
+
+def test_extract_always_emits_part_star_with_the_full_output_path():
+    """`FileName fn_ostar = outputname + "particles.star"; command += "
+    --part_star " + fn_ostar;` (~2547-2549) is unconditional (after the
+    reextract/fresh if-else closes) and invisible to the per-option
+    extractor (no joboptions[] on either line). Confirmed for real:
+    relion_preprocess ran to completion and wrote real per-micrograph
+    .mrcs stacks, but never wrote the combined particles.star every
+    downstream job (Class2D, immediately next in the tutorial) needs --
+    reporting success while silently not producing the pipeline's next
+    input is worse than an honest crash."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Extract", "Extract/job004")
+    assert "--part_star Extract/job004/particles.star" in cmd
+
+
+def test_extract_always_emits_the_extract_mode_flag():
+    """`command += " --extract";` (~2569) is an unconditional literal with
+    no owning JobOption. Confirmed for real: relion_preprocess refused to
+    run at all with "ERROR: Provide either --extract or --operate_on" --
+    every Extract job this app ever built silently omitted it."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Extract", "Extract/job004")
+    assert "--extract" in cmd.split()
+
+
+def test_extract_coords_suffix_emits_coord_list_for_modern_autopick_output():
+    """coords_suffix is read into a local C++ variable before the
+    command += line (pipeline_jobs.cpp ~2526), so the extractor's
+    per-option scan never saw it at all -- confirmed for real: a
+    from-scratch Extract job with coords_suffix filled in (pointing at a
+    real AutoPick job's autopick.star) produced a draft with no
+    coordinate input whatsoever. RELION5's AutoPick now writes a 2-column
+    micrograph/coordinate-file list (not the old per-micrograph
+    coords_suffix_autopick.star naming), which needs --coord_list, not
+    the old --coord_dir/--coord_suffix split."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"coords_suffix": "AutoPick/job003/autopick.star"}, "Extract", "Extract/job004")
+    assert "--coord_list AutoPick/job003/autopick.star" in cmd
+
+
+def test_extract_coords_suffix_splits_dir_and_suffix_for_the_old_naming():
+    """`mylist.contains("coords_suffix")` -- RELION's own "attempt at
+    backwards compatibility" branch for the old per-micrograph naming."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"coords_suffix": "AutoPick/job003/coords_suffix_autopick.star"},
+        "Extract", "Extract/job004",
+    )
+    assert "--coord_dir AutoPick/job003/" in cmd
+    assert "--coord_suffix _autopick.star" in cmd
+    assert "--coord_list" not in cmd
+
+
+def test_extract_coords_suffix_old_naming_with_no_slash_at_all():
+    """FileName::beforeLastOf/afterLastOf both return the WHOLE string when
+    the separator isn't found (filename.cpp:177-203) -- not "" for the
+    "before" half, which is what Python's rpartition("/") gives on a
+    separator-less string. A bare `coords_suffix_autopick.star` (no
+    directory component) should split the same way RELION itself would."""
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"coords_suffix": "coords_suffix_autopick.star"}, "Extract", "Extract/job004")
+    assert "--coord_dir coords_suffix_autopick.star/" in cmd
+    assert "--coord_suffix _autopick.star" in cmd
+
+
+def test_extract_coords_suffix_absent_during_reextraction():
+    raw = job_registry.raw_job("Extract")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_reextract": True, "coords_suffix": "AutoPick/job003/autopick.star"},
+        "Extract", "Extract/job004")
+    assert "--coord_list" not in cmd
+    assert "--coord_dir" not in cmd
 
 
 def test_helical_fields_are_included_when_the_checkbox_is_checked():

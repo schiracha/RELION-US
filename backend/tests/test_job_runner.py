@@ -451,6 +451,64 @@ def test_subprocess_output_is_teed_to_run_out_and_run_err(tmp_path):
     assert "stderr-line-1" in err_text
 
 
+def test_subprocess_surviving_a_carriage_return_animated_progress_line(tmp_path):
+    """RELION's own progress-bar animation prints in place via bare \\r with
+    no real \\n between updates (every job's run.out this session showed
+    the same `~~(,_,"> yum!` spinner shape) -- a long-running step can
+    produce well over 64 KiB between real newlines. The old pump()
+    implementation used stream.readline(), which raises ValueError once a
+    single line exceeds that limit; the exception was caught and stopped
+    THAT pump() coroutine, but nothing else was left draining the pipe, so
+    once the OS pipe's own buffer filled the child's next write() blocked
+    forever -- confirmed for real: a Class2D job hung 17+ minutes at ~0%
+    CPU.
+
+    The payload here is 5,000,000 bytes, not just "over 64 KiB": a smaller
+    payload (originally 220,000 bytes in an earlier version of this test)
+    writes fast enough that the child finishes and exits before
+    readline()'s internal buffering ever backs up far enough to pause the
+    transport -- under the OLD code that made this test pass for the WRONG
+    reason (proc.wait() returns because the child genuinely exited, not
+    because pumping recovered), while stdout_lines came back completely
+    empty instead of catching the real hang. Verified directly (via `git
+    stash` on job_runner.py): at this size the OLD code hangs -- proc.wait()
+    never returns, the test's own poll loop times out with status still
+    STATUS_RUNNING -- while the NEW code completes in under a second with
+    every line intact. Asserting the full line count (not just that
+    "done-marker" appears somewhere) additionally guards against the
+    silent-data-loss failure mode the smaller payload could only catch by
+    accident."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    n_lines = 500_000
+    spinner_script = (
+        "python3 -c \""
+        "import sys\n"
+        f"for i in range({n_lines}):\n"
+        "    sys.stdout.write('x' * 9 + chr(13))\n"
+        "print('done-marker')\n"
+        "\""
+    )
+
+    async def go():
+        sub = manager.prospective_subdir("Import")
+        run = await manager.start_subprocess_job(
+            "Import", "Import", spinner_script, subdir=sub,
+        )
+        for _ in range(400):
+            await asyncio.sleep(0.05)
+            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == STATUS_COMPLETED, (run.status, run.stderr_lines[-3:])
+    assert len(run.stdout_lines) == n_lines + 1, len(run.stdout_lines)
+    assert run.stdout_lines[-1] == "done-marker"
+    assert not any("output stream error" in line for line in run.stderr_lines)
+
+
 def test_overwrite_run_out_appends_rather_than_truncates(tmp_path):
     """RELION appends (">>") to run.out/run.err, not overwrites -- a
     re-run's output accumulates on top of the previous attempt's, matching
