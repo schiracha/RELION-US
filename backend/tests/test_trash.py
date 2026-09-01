@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import project_manager
-from job_runner import STATUS_COMPLETED, JobRunManager
+from job_runner import STATUS_COMPLETED, JobRun, JobRunManager
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +376,107 @@ def test_job_number_reuse_after_trashing_makes_a_later_restore_collide(tmp_path)
     # The second (current, live) job's directory must be untouched.
     assert Path(second.cwd).is_dir()
     assert manager.get(second.run_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Deleting a pipeline-synced job: relion_pipeliner has no CLI verb to remove
+# a process from default_pipeline.star (PipeLine::deleteNodesAndProcesses is
+# GUI-only -- see pipeline_bridge.py's module docstring), so the orphaned
+# process is hidden locally instead of left to reappear as a "relion:jobNNN"
+# ghost row. See project_manager.load_relion_deleted_job_numbers's docstring
+# for why keying this by RELION's own job_number is safe.
+# ---------------------------------------------------------------------------
+
+_FAKE_PIPELINE_STAR = """
+# version 30001
+
+data_pipeline_general
+
+_rlnPipeLineJobCounter                      5
+
+
+# version 30001
+
+data_pipeline_processes
+
+loop_
+_rlnPipeLineProcessName #1
+_rlnPipeLineProcessAlias #2
+_rlnPipeLineProcessTypeLabel #3
+_rlnPipeLineProcessStatusLabel #4
+CtfFind/job005/          None            relion.ctffind.ctffind4  Succeeded
+"""
+
+
+def _make_pipeline_synced_run(tmp_path):
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    job_dir = tmp_path / "CtfFind" / "job005"
+    job_dir.mkdir(parents=True)
+    (job_dir / "micrographs_ctf.star").write_text("dummy output\n")
+    (tmp_path / "default_pipeline.star").write_text(_FAKE_PIPELINE_STAR)
+
+    run = JobRun(
+        run_id="abc123", internal_name="CtfFind", display_name="CTF Estimation",
+        command="true", cwd=str(job_dir), project_dir=str(tmp_path),
+        job_number=5, status=STATUS_COMPLETED, pipeline_registered=True,
+    )
+    manager.runs[run.run_id] = run
+    project_manager.save_history(tmp_path, [run.to_summary()])
+    return manager, run
+
+
+def test_delete_run_hides_the_orphaned_relion_pipeline_ghost_row(tmp_path):
+    manager, run = _make_pipeline_synced_run(tmp_path)
+
+    # Before delete: this app's own tracked entry already suppresses the
+    # would-be duplicate from default_pipeline.star (own_job_numbers).
+    assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
+
+    ok, reason = manager.delete_run(run.run_id, remove_files=False)
+    assert ok is True
+
+    # After delete: no "relion:job005" ghost row, even though the process
+    # entry is still sitting untouched in default_pipeline.star.
+    assert manager.list_runs() == []
+    assert 5 in project_manager.load_relion_deleted_job_numbers(tmp_path)
+    assert "5" in (tmp_path / "default_pipeline.star").read_text()  # untouched
+
+
+def test_delete_run_does_not_hide_a_job_that_was_never_pipeline_registered(tmp_path):
+    """Only a job_number known to be RELION's own monotonic pipeline
+    counter value (pipeline_registered) is safe to hide -- this app's own
+    locally-reused numbering scheme must never feed this set (see
+    load_relion_deleted_job_numbers's docstring on why reuse would then be
+    unsafe)."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job("Import", "Import", "echo hello", subdir="run1")
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            if run.status == STATUS_COMPLETED:
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.pipeline_registered is False  # no relion_pipeliner in this test env
+    manager.delete_run(run.run_id, remove_files=True)
+    assert project_manager.load_relion_deleted_job_numbers(tmp_path) == set()
+
+
+def test_restore_from_trash_unhides_the_relion_pipeline_row(tmp_path):
+    manager, run = _make_pipeline_synced_run(tmp_path)
+    manager.delete_run(run.run_id, remove_files=True)
+    assert 5 in project_manager.load_relion_deleted_job_numbers(tmp_path)
+
+    trash_id = project_manager.list_trash(tmp_path)[0]["trash_id"]
+    restored = manager.restore_from_trash(trash_id)
+
+    assert restored is not None
+    assert 5 not in project_manager.load_relion_deleted_job_numbers(tmp_path)
+    assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
 
 
 def test_delete_run_refuses_a_running_job_before_ever_trashing_it(tmp_path):

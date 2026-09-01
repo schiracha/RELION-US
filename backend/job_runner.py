@@ -449,9 +449,16 @@ class JobRunManager:
         # genuinely run outside this app entirely (a legacy project, or a
         # job launched from RELION's own GUI) that only exist in
         # default_pipeline.star.
+        # Job numbers RELION-US itself deleted (Delete on a pipeline-synced
+        # job) while relion_pipeliner has no CLI verb to prune the matching
+        # process out of default_pipeline.star -- see project_manager.
+        # load_relion_deleted_job_numbers's own docstring for the full
+        # reasoning and why this is safe against job-number reuse.
+        hidden_job_numbers = project_manager.load_relion_deleted_job_numbers(Path(target))
         merged: dict[str, dict] = {}
         for entry in self._relion_pipeline_entries(Path(target)):
-            if entry.get("job_number") in own_job_numbers:
+            job_number = entry.get("job_number")
+            if job_number in own_job_numbers or job_number in hidden_job_numbers:
                 continue
             merged[entry["run_id"]] = entry
         merged.update(own_entries)
@@ -2229,6 +2236,15 @@ class JobRunManager:
             # uncaught into an unhandled 500 (found in code review).
             note = " (its files were already moved to Trash and remain recoverable there)" if remove_files else ""
             return False, f"Could not update job history: {exc}{note}"
+        if summary.get("pipeline_registered") and summary.get("job_number"):
+            # This app's own record is gone, but relion_pipeliner has no CLI
+            # verb to remove the matching process from RELION's own
+            # default_pipeline.star (see project_manager.
+            # load_relion_deleted_job_numbers's docstring) -- without this,
+            # that untouched process reappears next refresh as a read-only
+            # "relion:jobNNN" ghost row. Marking it hidden is purely local
+            # bookkeeping, not a write to RELION's file.
+            project_manager.mark_relion_job_number_deleted(target_dir, summary["job_number"])
         return True, "Moved to Trash" if remove_files else "Deleted"
 
     def restore_from_trash(self, trash_id: str) -> Optional[JobRun]:
@@ -2269,6 +2285,11 @@ class JobRunManager:
         project_manager.save_history(
             self.project_dir, [h for h in history if h.get("run_id") != run.run_id] + [run.to_summary()]
         )
+        if run.pipeline_registered and run.job_number:
+            # Undo delete_run's own hide -- own_job_numbers in list_runs
+            # already excludes RELION's duplicate for a tracked job number,
+            # this just stops the hidden set accumulating restored jobs.
+            project_manager.unmark_relion_job_number_deleted(self.project_dir, run.job_number)
         return run
 
     def _safe_rmtree(self, cwd_str: str, project_dir_str: str) -> tuple[bool, str]:

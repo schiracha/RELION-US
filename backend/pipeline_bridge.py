@@ -71,6 +71,23 @@ is safe against RELION-US's own concurrent operations (the lock), but NOT a
 substitute for closing any native RELION GUI that already has the project
 open -- a live GUI process holds its own in-memory copy of the pipeline this
 write can't coordinate with; see the app's startup warning.
+
+Deleting a job does NOT call into this module at all, for the same reason:
+`relion_pipeliner`'s CLI (src/apps/pipeliner.cpp) has no verb for removing
+one process from `default_pipeline.star`. The real operation --
+`PipeLine::deleteNodesAndProcesses`, src/pipeliner.cpp -- is called only
+from `gui_mainwindow.cpp`, and unlike set_process_status's one-token edit
+it rewrites all five linked tables at once (a `write(...)` overload that
+filters processes/nodes/edges together), which is exactly the multi-table
+graph surgery this module exists to avoid reimplementing. So a
+pipeline-synced job's process entry is left untouched in
+default_pipeline.star when RELION-US deletes its own tracked copy;
+job_runner.delete_run/restore_from_trash instead maintain a small local
+hide-list (project_manager.load_relion_deleted_job_numbers) so the
+now-orphaned entry doesn't reappear as a ghost row in the Command Center
+-- see that function's docstring for why keying it by RELION's own
+job_number is safe against number reuse. Nothing about this writes to
+default_pipeline.star; it only changes what RELION-US chooses to display.
 """
 from __future__ import annotations
 

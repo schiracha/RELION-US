@@ -1112,6 +1112,80 @@ def set_relion_overlay(project_dir: Path, run_id: str, **fields: str) -> dict[st
     return entry
 
 
+RELION_DELETED_JOB_NUMBERS_FILENAME = "relion_deleted_job_numbers.json"
+
+
+def _relion_deleted_job_numbers_path(project_dir: Path) -> Path:
+    return project_dir / MARKER_DIRNAME / RELION_DELETED_JOB_NUMBERS_FILENAME
+
+
+def load_relion_deleted_job_numbers(project_dir: Path) -> set[int]:
+    """RELION pipeline job numbers whose RELION-US-tracked counterpart was
+    deleted from here while pipeline sync was on -- see job_runner.
+    delete_run's own comment for why. relion_pipeliner has no CLI verb for
+    removing a single process from default_pipeline.star (PipeLine::
+    deleteNodesAndProcesses, the real operation, is called only from
+    gui_mainwindow.cpp and rewrites all five linked pipeline tables at
+    once -- exactly the kind of multi-table graph surgery this module's own
+    docstring says to leave to relion_pipeliner, not the narrow single-
+    token edit set_process_status gets away with). So the deleted job's
+    process entry keeps sitting in default_pipeline.star untouched; this
+    set is a purely local, this-app-only note to stop treating it as a
+    live job in the Command Center, without ever touching RELION's file.
+
+    Safe to key by RELION's own job_number alone (never scoped to a
+    process name) because it is only ever populated for jobs that were
+    actually registered with real relion_pipeliner (pipeline_registered),
+    whose job_number IS RELION's own `_rlnPipeLineJobCounter` value for
+    that process -- monotonically increasing and never reused by RELION
+    itself, even across deletes (job_counter++ only, pipeliner.cpp; no
+    decrement anywhere, including deleteNodesAndProcesses). This app's
+    OWN local job numbering (_next_job_number, used when a job was never
+    pipeline-registered) can and does reuse numbers once a history entry
+    is gone -- but those numbers are never written here, so that reuse
+    can't collide with an entry in this set."""
+    p = _relion_deleted_job_numbers_path(project_dir)
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text())
+        return {int(n) for n in data} if isinstance(data, list) else set()
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return set()
+
+
+def _save_relion_deleted_job_numbers(project_dir: Path, numbers: set[int]) -> None:
+    marker = project_dir / MARKER_DIRNAME
+    try:
+        marker.mkdir(exist_ok=True)
+        _relion_deleted_job_numbers_path(project_dir).write_text(
+            json.dumps(sorted(numbers), indent=2)
+        )
+    except OSError:
+        # A read-only project must still be usable; the edit simply won't
+        # persist past this backend session -- same tolerance
+        # set_relion_overlay above already has.
+        pass
+
+
+def mark_relion_job_number_deleted(project_dir: Path, job_number: int) -> None:
+    numbers = load_relion_deleted_job_numbers(project_dir)
+    if job_number not in numbers:
+        numbers.add(job_number)
+        _save_relion_deleted_job_numbers(project_dir, numbers)
+
+
+def unmark_relion_job_number_deleted(project_dir: Path, job_number: int) -> None:
+    """Called on Restore -- the tracked entry is back, so its RELION
+    pipeline duplicate no longer needs hiding (own_job_numbers in
+    list_runs already covers that on its own); this just keeps the set
+    from accumulating restored jobs forever."""
+    numbers = load_relion_deleted_job_numbers(project_dir)
+    if job_number in numbers:
+        numbers.discard(job_number)
+        _save_relion_deleted_job_numbers(project_dir, numbers)
+
+
 def list_dir(path: Path) -> dict[str, Any]:
     """Server-side folder listing for the 'select folder' UI. This has to
     be server-side (not a plain HTML file picker) because the backend may
