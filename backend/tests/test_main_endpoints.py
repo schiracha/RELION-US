@@ -476,3 +476,89 @@ def test_empty_trash_via_http(client):
     del_resp = client.delete("/api/trash")
     assert del_resp.status_code == 200
     assert client.get("/api/trash").json()["trash"] == []
+
+
+# ---------------------------------------------------------------------------
+# /ws/terminal (issue #3, Terminal popup) -- the interactive shell socket.
+# TestClient's websocket_connect() drives the real ASGI websocket handler
+# in-process, same as every other test in this file drives the real HTTP
+# routes -- no mocking of terminal_session.TerminalSession.
+# ---------------------------------------------------------------------------
+
+def test_terminal_websocket_echoes_shell_output(client):
+    with client.websocket_connect("/ws/terminal") as ws:
+        ws.send_json({"type": "input", "data": "echo hello-ws-terminal\n"})
+        seen = ""
+        for _ in range(50):  # generous bound: shell startup + echo round trip
+            msg = ws.receive_json()
+            if msg["type"] == "output":
+                seen += msg["data"]
+            if "hello-ws-terminal" in seen:
+                break
+        assert "hello-ws-terminal" in seen
+
+
+def test_terminal_websocket_resize_does_not_break_the_session(client):
+    with client.websocket_connect("/ws/terminal") as ws:
+        ws.send_json({"type": "resize", "cols": 120, "rows": 40})
+        ws.send_json({"type": "input", "data": "echo still-here\n"})
+        seen = ""
+        for _ in range(50):
+            msg = ws.receive_json()
+            if msg["type"] == "output":
+                seen += msg["data"]
+            if "still-here" in seen:
+                break
+        assert "still-here" in seen
+
+
+def test_terminal_websocket_survives_a_null_data_input_message(client):
+    # msg.get("data", "") only substitutes the default when the key is
+    # ABSENT -- {"type": "input", "data": null} sails past that and used
+    # to crash the handler with AttributeError on None.encode(), killing
+    # the connection with an unhandled server-side exception instead of
+    # just ignoring the malformed message.
+    with client.websocket_connect("/ws/terminal") as ws:
+        ws.send_json({"type": "input", "data": None})
+        ws.send_json({"type": "input", "data": "echo still-alive-after-null\n"})
+        seen = ""
+        for _ in range(50):
+            msg = ws.receive_json()
+            if msg["type"] == "output":
+                seen += msg["data"]
+            if "still-alive-after-null" in seen:
+                break
+        assert "still-alive-after-null" in seen
+
+
+def test_terminal_websocket_survives_an_out_of_range_resize(client):
+    # struct.pack's "H" fields only hold 0..65535 -- a resize message with
+    # a value outside that range used to raise struct.error inside
+    # session.resize() (not an OSError, so not caught by its own guard),
+    # crashing the handler instead of just being ignored.
+    with client.websocket_connect("/ws/terminal") as ws:
+        ws.send_json({"type": "resize", "cols": 999999, "rows": 1})
+        ws.send_json({"type": "input", "data": "echo still-alive-after-bad-resize\n"})
+        seen = ""
+        for _ in range(50):
+            msg = ws.receive_json()
+            if msg["type"] == "output":
+                seen += msg["data"]
+            if "still-alive-after-bad-resize" in seen:
+                break
+        assert "still-alive-after-bad-resize" in seen
+
+
+def test_terminal_websocket_refuses_connection_when_auth_enabled_without_session(client):
+    import auth
+
+    auth.set_password("hunter22-terminal-test")
+    auth.enable()
+    try:
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/terminal"):
+                pass
+    finally:
+        auth.disable()

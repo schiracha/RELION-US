@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>RELION-US</title>
   <link rel="stylesheet" href="vendor/winbox.min.css" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -21,6 +22,7 @@
       <div id="menuPanel" class="menu-panel hidden" role="menu">
         <button id="menuSettingsBtn" class="menu-item" role="menuitem">⚙ Settings</button>
         <button id="menuTrashBtn" class="menu-item" role="menuitem" title="Recover a job Deleted with 'remove files' checked">🗑 Trash</button>
+        <button id="menuTerminalBtn" class="menu-item" role="menuitem" title="Open a shell in this project's directory">🖥 Terminal</button>
         <div class="menu-submenu">
           <button id="menuToolsBtn" class="menu-item menu-item-submenu" role="menuitem" aria-haspopup="true">🛠 Tools ▸</button>
           <div id="menuToolsSubmenu" class="menu-submenu-panel hidden">
@@ -128,6 +130,8 @@
        and this app needs to work there. See frontend/vendor/WINBOX_LICENSE.txt
        (Apache-2.0) and https://github.com/nextapps-de/winbox. -->
   <script src="vendor/winbox.bundle.min.js"></script>
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/xterm-addon-fit.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

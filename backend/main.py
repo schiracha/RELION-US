@@ -166,6 +166,7 @@ import pipeline_bridge
 import program_help
 import project_manager
 import manual_pick
+import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
 from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
@@ -1033,6 +1034,85 @@ async def run_websocket(websocket: WebSocket, run_id: str):
         reader.cancel()
         if queue in run.subscribers:
             run.subscribers.remove(queue)
+
+
+@app.websocket("/ws/terminal")
+async def terminal_websocket(websocket: WebSocket) -> None:
+    # Same manual auth re-check as run_websocket above -- the HTTP
+    # auth_gate middleware never sees websocket scope. This socket is a
+    # real interactive shell, so it needs the exact same gate as
+    # everything else, not a weaker one.
+    cfg = auth.load_config()
+    if auth.is_enabled(cfg) and not auth.session_is_valid(
+        websocket.cookies.get(auth.COOKIE_NAME), cfg
+    ):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+
+    session = terminal_session.TerminalSession()
+    try:
+        session.start(run_manager.project_dir)
+    except OSError as exc:
+        await websocket.send_json({"type": "error", "data": f"Could not start shell: {exc}"})
+        await websocket.close()
+        return
+
+    async def pump_output() -> None:
+        while True:
+            data = await session.read()
+            await websocket.send_json({"type": "output", "data": data.decode("utf-8", errors="replace")})
+
+    async def pump_input() -> None:
+        while True:
+            msg = await websocket.receive_json()
+            msg_type = msg.get("type")
+            if msg_type == "input":
+                data = msg.get("data")
+                # msg.get("data", "") only substitutes when the key is
+                # ABSENT, not when it's present as null/non-string --
+                # {"data": null} would otherwise crash this task with
+                # AttributeError on .encode(), same as it would above.
+                if isinstance(data, str):
+                    session.write(data.encode("utf-8", errors="replace"))
+            elif msg_type == "resize":
+                cols, rows = msg.get("cols"), msg.get("rows")
+                # struct.pack's "H" fields are 0..65535 -- a client sending
+                # a value outside that range would otherwise raise
+                # struct.error inside session.resize(), which isn't an
+                # OSError and so isn't caught by that method's own guard.
+                if (
+                    isinstance(cols, int) and isinstance(rows, int)
+                    and 1 <= cols <= 65535 and 1 <= rows <= 65535
+                ):
+                    session.resize(cols, rows)
+
+    # Two independent tasks (send loop, receive loop) raced against each
+    # other, not one task quietly running alongside a while-loop: a send
+    # failure (e.g. the client half-closed the connection) used to die
+    # inside a fire-and-forget task with no one watching it, leaving the
+    # receive loop parked on receive_json() forever with output silently
+    # going nowhere. Whichever task ends first (clean disconnect or a real
+    # error) now tears the other down too, via the same "race + inspect
+    # exceptions" shape run_websocket above uses for its own queue/reader
+    # race.
+    output_task = asyncio.create_task(pump_output())
+    input_task = asyncio.create_task(pump_input())
+    try:
+        done, _pending = await asyncio.wait(
+            {output_task, input_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            # Retrieve it (send/receive failing, e.g. a half-closed socket,
+            # or a clean WebSocketDisconnect) so asyncio doesn't log a
+            # "Task exception was never retrieved" warning -- either way
+            # this connection is over; finally below tears down the other
+            # task and the session regardless of which one ended or why.
+            task.exception()
+    finally:
+        output_task.cancel()
+        input_task.cancel()
+        session.close()
 
 
 # --------------------------------------------------------------------------

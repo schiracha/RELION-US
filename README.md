@@ -135,7 +135,8 @@ RELION-US binds `127.0.0.1` by default, so it isn't reachable from another
 machine unless you deliberately opt in with `--host 0.0.0.0` — but even at
 the default bind, anyone who can already reach this machine's localhost
 (another user on a shared HPC login node, for instance) can open jobs, run
-them, and delete run history, with no login at all. A user interface
+them, delete run history, and open a full interactive shell via the
+Terminal popup, with no login at all. A user interface
 password can be set at each startup as a basic deterrent against that —
 **not real security**. If you need actual confidentiality, put it behind a
 reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
@@ -167,7 +168,8 @@ device, immediately — there's no separate "log everyone out" step.
 login page first (`frontend/login.html`, a self-contained page with no
 dependency on anything else here, since it has to render even while
 everything else is gated); the password gates every page, every API call,
-and the job-output websocket, not just the initial page load. A **🔒 Log
+and every websocket -- job output as well as the Terminal popup's shell --
+not just the initial page load. A **🔒 Log
 out** button appears in the top bar once you're logged in. Sessions last 30
 days.
 

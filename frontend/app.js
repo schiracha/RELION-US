@@ -282,6 +282,7 @@ fetch("/api/auth/status")
   const menuToolsSubmenu = document.getElementById("menuToolsSubmenu");
   const menuSettingsBtn = document.getElementById("menuSettingsBtn");
   const menuTrashBtn = document.getElementById("menuTrashBtn");
+  const menuTerminalBtn = document.getElementById("menuTerminalBtn");
   const menuAnalyzeBtn = document.getElementById("menuAnalyzeBtn");
 
   let closeMenuListeners = null;
@@ -317,6 +318,7 @@ fetch("/api/auth/status")
   });
   menuSettingsBtn.addEventListener("click", () => { closeMenu(); openSettingsPopup(); });
   menuTrashBtn.addEventListener("click", () => { closeMenu(); openTrashPopup(); });
+  menuTerminalBtn.addEventListener("click", () => { closeMenu(); openTerminalPopup(); });
   menuAnalyzeBtn.addEventListener("click", () => { closeMenu(); openAnalyzePopup(); });
 }
 
@@ -3193,6 +3195,99 @@ async function openTrashPopup() {
     onclose: () => { currentTrashWinbox = null; return false; },
   });
   currentTrashWinbox = win;
+}
+
+// A real interactive shell in the browser, for quick shell tasks (ls, tail
+// -f, git, editing a config) without a second SSH session. One at a time,
+// matching the Trash/Settings/Job popup singleton convention -- open a
+// second browser tab for a second shell. Uses vendored xterm.js
+// (frontend/vendor/) for real ANSI/cursor/scrollback rendering; the
+// backend side is /ws/terminal (backend/main.py), a pty-backed shell in
+// backend/terminal_session.py.
+let currentTerminalWinbox = null;
+function openTerminalPopup() {
+  if (currentTerminalWinbox) {
+    try { currentTerminalWinbox.close(); } catch (e) { /* noop */ }
+    currentTerminalWinbox = null;
+  }
+
+  const body = document.createElement("div");
+  body.className = "terminal-popup";
+  const mountEl = document.createElement("div");
+  mountEl.className = "terminal-mount";
+  body.appendChild(mountEl);
+
+  const tc = themeColors();
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    theme: { background: tc.surface, foreground: tc.text },
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(mountEl);
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws/terminal`);
+
+  function sendResize() {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    }
+  }
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "output") term.write(msg.data);
+    else if (msg.type === "error") term.write(`\r\n[${msg.data}]\r\n`);
+  };
+  ws.onerror = () => term.write("\r\n[websocket error]\r\n");
+  // The very first fit()+sendResize() (below, right after mount) usually
+  // runs before this socket finishes its handshake -- sendResize()'s own
+  // readyState guard silently drops that call, so without this the server
+  // never learns the real size until the user manually resizes the popup.
+  // (The backend also seeds a sane 80x24 default independently, so a
+  // client that never resizes at all still isn't stuck at a bogus 0x0.)
+  ws.onopen = () => refit();
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+  });
+
+  function onThemeChange() {
+    const c = themeColors();
+    term.options.theme = { background: c.surface, foreground: c.text };
+  }
+  document.addEventListener("relion-us-theme-changed", onThemeChange);
+
+  function refit() { fitAddon.fit(); sendResize(); }
+
+  const win = new WinBox({
+    title: "Terminal",
+    width: "760px", height: "480px", x: "center", y: "center",
+    mount: body,
+    class: ["terminal-winbox"],
+    // WinBox fires onmaximize/onrestore separately from onresize (edge
+    // drag only) -- without these two, maximizing the popup leaves the
+    // pty at its pre-maximize size, so a full-screen TUI program (vim,
+    // htop) would render wrapped/cut off despite the window looking full
+    // size. A brief delay lets WinBox's own resize/layout settle first;
+    // calling fit() synchronously in these handlers reads stale
+    // dimensions (confirmed by hand: the row count didn't change without
+    // it).
+    onresize: refit,
+    onmaximize: () => setTimeout(refit, 50),
+    onrestore: () => setTimeout(refit, 50),
+    onclose: () => {
+      document.removeEventListener("relion-us-theme-changed", onThemeChange);
+      try { ws.close(); } catch (e) { /* noop */ }
+      term.dispose();
+      if (currentTerminalWinbox === win) currentTerminalWinbox = null;
+      return false;
+    },
+  });
+  currentTerminalWinbox = win;
+  // WinBox mounts asynchronously; the first fit needs the real box size.
+  setTimeout(refit, 0);
 }
 
 // Read-only, not-a-job popup inspired by CNIO_Relion_Tools' relion_analyse.py

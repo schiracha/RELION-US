@@ -1058,6 +1058,12 @@ html, body {
 .trash-recovery-full { color: var(--ok); }
 .trash-recovery-partial { color: var(--warn); }
 
+/* ---- Terminal popup (Menu > Terminal, issue #3) ---- */
+.terminal-popup { height: 100%; box-sizing: border-box; padding: 6px; background: var(--panel); }
+.terminal-mount { height: 100%; width: 100%; }
+.terminal-mount .xterm { height: 100%; }
+.terminal-mount .xterm-viewport { overflow-y: auto; }
+
 /* ---- Analyze popup (Menu > Tools > Analyze) ---- */
 .analyze-popup { display: flex; flex-direction: column; height: 100%; background: var(--bg); color: var(--text); font-size: 13px; }
 .analyze-coming-soon { color: var(--text-dim); font-size: 13px; padding: 20px; text-align: center; }
