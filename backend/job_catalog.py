@@ -1361,6 +1361,22 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # the normal boolean-field emit logic supplies the inner one.
     "Inimodel": JobDraftOverride(
         output_suffix="run",
+        # `if (!is_continue) { command += " --grad --denovo_3dref "; ... }`
+        # (~3475-3478) -- unconditional in this app's context (RELION-US
+        # never models a "continue" run, so !is_continue is always true
+        # here, same reasoning as every other !is_continue-gated field in
+        # this table), and a bare literal with no owning JobOption, so the
+        # generic per-option extractor can't find it -- same shape as
+        # Class2D's --grad/Ctffind's --is_ctffind4/Autopick's --LoG.
+        # --denovo_3dref specifically is NOT cosmetic: confirmed for real,
+        # a from-scratch Inimodel draft missing it ran relion_refine to
+        # completion (RELION_JOB_EXIT_SUCCESS written, 100 real iterations)
+        # but with _rlnReferenceDimensionality/_rlnDataDimensionality both
+        # 2 in the resulting model.star -- relion_refine silently defaulted
+        # to 2D classification instead of 3D ab-initio reconstruction, the
+        # one thing this job type exists to do; every run_itNNN_classes.mrcs
+        # it wrote was a flat 64x64 image, not a 64^3 volume.
+        extra_flags=lambda field_values, output_subdir: ["--grad", "--denovo_3dref"],
         flags={
             "in_optimisation": FlagOverride("--ios"), "in_particles": FlagOverride("--i"),
             "in_tomograms": FlagOverride("--tomograms"), "in_trajectories": FlagOverride("--trajectories"),
@@ -1490,6 +1506,17 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         numeric_transforms={
             "helical_range_distance": _third_if_positive,
         },
+        # `if (!is_continue) { command += " --auto_refine --split_random_
+        # halves"; ... }` (~4357-4359) -- unconditional in this app's
+        # context (same !is_continue reasoning as elsewhere in this table)
+        # and a bare literal with no owning JobOption. Not cosmetic: this
+        # is what makes "3D Auto-refine" actually run RELION's gold-
+        # standard auto-refinement (independent half-set FSC-driven
+        # convergence) instead of a single, non-split, plain refinement --
+        # the one thing distinguishing this job type from Class3D with
+        # --K 1. Confirmed missing for real while stress-testing the SPA
+        # tutorial's Refine3D step.
+        extra_flags=lambda field_values, output_subdir: ["--auto_refine", "--split_random_halves"],
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
             "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",

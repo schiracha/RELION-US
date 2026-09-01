@@ -236,7 +236,18 @@ def unquote(s: str) -> str:
     return s
 
 
-NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?f?$")
+# \.\d* (zero or more digits after the dot), not \.\d+ -- C++ float
+# literals are routinely written with a bare trailing dot ("0.", "1.", no
+# digit after it) as shorthand for "0.0"/"1.0", confirmed present in this
+# very source (pipeline_jobs.cpp's Maskcreate slider: `JobOption(...,
+# 0.02, 0., 0.5, 0.01, ...)`). Requiring \d+ made "0." fail this pattern
+# entirely, so a SLIDER JobOption's 6-arg shape (label, default, min, max,
+# step, help) silently fell through to the INPUTNODE overload instead
+# (also 6 args) -- confirmed for real: Maskcreate's own inimask_threshold
+# field showed "0.5" (the slider's MAX bound, misread as if it were a
+# default) as its default instead of the real 0.02, and it silently
+# rendered as a plain input-node file-picker field on top of that.
+NUMERIC_RE = re.compile(r"^-?\d+(\.\d*)?f?$")
 
 
 def classify_and_parse(args: list[str]) -> dict:

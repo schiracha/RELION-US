@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from extract_job_definitions import parse_default_location_macros, resolve_default_location_options
+from extract_job_definitions import classify_and_parse, parse_default_location_macros, resolve_default_location_options
 
 
 HEADER_TEXT = '''
@@ -109,3 +109,48 @@ def test_missing_getenv_leaves_the_literal_identifier_untouched():
     options = [{"key": "fn_something_exe", "default": "default_location", "field_type": "filename"}]
     resolve_default_location_options(options, "no getenv call in this body at all", macros)
     assert options[0]["default"] == "default_location"
+
+
+# ---------------------------------------------------------------------------
+# classify_and_parse's SLIDER vs INPUTNODE disambiguation (both are 6-arg
+# JobOption(...) shapes). Found via a real RELION-US MaskCreate job: the
+# form showed a plain file-picker for "Initial binarisation threshold:"
+# instead of a number field, and Recompute Draft produced --ini_threshold
+# 0.5 (the SLIDER's own MAX bound, per pipeline_jobs.cpp's real
+# `JobOption(..., 0.02, 0., 0.5, 0.01, help)` call) instead of the real
+# default 0.02 -- confirmed for real, running the resulting command
+# against RELION 5.0.1 would have started from a threshold 25x too high.
+# ---------------------------------------------------------------------------
+
+
+def test_slider_with_a_bare_trailing_decimal_point_is_not_misread_as_inputnode():
+    """C++ float literals are routinely written with a bare trailing dot
+    ("0.", "1.") as shorthand for "0.0"/"1.0" -- confirmed present in
+    pipeline_jobs.cpp's own MaskCreate slider call. The old NUMERIC_RE
+    required at least one digit after the dot, so "0." failed the SLIDER
+    shape check entirely and this 6-arg call silently fell through to the
+    INPUTNODE overload (also 6 args) instead."""
+    args = ['"Initial binarisation threshold:"', "0.02", "0.", "0.5", "0.01", '"help text"']
+    parsed = classify_and_parse(args)
+    assert parsed["field_type"] == "slider"
+    assert parsed["default"] == 0.02
+    assert parsed["min"] == 0.0
+    assert parsed["max"] == 0.5
+    assert parsed["step"] == 0.01
+
+
+def test_slider_with_ordinary_decimals_still_parses_correctly():
+    """Guards against a regression in the other direction: loosening the
+    regex to accept a bare trailing dot must not break the common case of
+    a normal decimal with digits on both sides."""
+    args = ['"Mask diameter (A):"', "200.0", "0.0", "500.0", "10.0", '"help text"']
+    parsed = classify_and_parse(args)
+    assert parsed["field_type"] == "slider"
+    assert parsed["default"] == 200.0
+
+
+def test_integer_valued_slider_args_still_parse_correctly():
+    args = ['"Number of classes:"', "1", "1", "50", "1", '"help text"']
+    parsed = classify_and_parse(args)
+    assert parsed["field_type"] == "slider"
+    assert parsed["default"] == 1.0

@@ -1592,6 +1592,36 @@ def test_extract_helical_nr_asu_rise_fallback_is_mutually_exclusive_with_the_rea
     assert "--helical_nr_asu" not in cmd_off, cmd_off
 
 
+def test_autorefine_always_emits_auto_refine_and_split_random_halves():
+    """`if (!is_continue) { command += " --auto_refine --split_random_
+    halves"; ... }` (~4357-4359) is unconditional in this app's context
+    and a bare literal with no owning JobOption. Not cosmetic: this is
+    what makes "3D Auto-refine" actually run gold-standard, half-set-
+    split auto-refinement instead of a single plain refinement --
+    confirmed missing for real while stress-testing the SPA tutorial's
+    Refine3D step."""
+    raw = job_registry.raw_job("Autorefine")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Autorefine", "Refine3D/job010")
+    assert "--auto_refine" in cmd.split()
+    assert "--split_random_halves" in cmd.split()
+
+
+def test_inimodel_always_emits_grad_and_denovo_3dref():
+    """`if (!is_continue) { command += " --grad --denovo_3dref "; ... }`
+    (~3475-3478) is unconditional in this app's context and a bare literal
+    with no owning JobOption. --denovo_3dref is not cosmetic: confirmed
+    for real, a draft missing it ran relion_refine to completion but with
+    _rlnReferenceDimensionality/_rlnDataDimensionality both 2 in the
+    resulting model.star -- silently doing 2D classification instead of
+    3D ab-initio reconstruction, the one thing this job type exists to do
+    (every run_itNNN_classes.mrcs it wrote was a flat 64x64 image, not a
+    64^3 volume)."""
+    raw = job_registry.raw_job("Inimodel")
+    cmd, _ = job_registry._build_draft_command(raw, {}, "Inimodel", "InitialModel/job007")
+    assert "--grad" in cmd.split()
+    assert "--denovo_3dref" in cmd.split()
+
+
 def test_class2d_vdam_mode_emits_its_own_grad_flags():
     """`else if (joboptions["do_grad"].getBoolean()) { ... command += "
     --grad --class_inactivity_threshold 0.1 --grad_write_iter 10"; ... }`
