@@ -109,10 +109,24 @@ PIPELINER_TIMEOUT_SECONDS = 120
 
 # RELION appends this to every command containing "relion_" (see
 # RelionJob::prepareFinalCommand); it is what makes a program write the exit
-# files --check_job_completion looks for. The Python tomo tools take the
-# hyphenated spelling.
+# files --check_job_completion looks for.
+#
+# **Previously documented as "the Python tomo tools take the hyphenated
+# spelling" here -- that turned out to be untested and wrong.** Confirmed
+# for real running a from-scratch ImportTomo job: relion_python_tomo_import
+# (Click/Typer-based, via tomography_python_programs.import_tilt_series)
+# rejected `--pipeline-control` outright ("No such option: --pipeline-
+# control (Possible options: --amplitude-contrast, --pipeline_control)").
+# Traced to tomography_python_programs/_utils/relion.py's own shared
+# pipeline-argument decorator, which every one of these tools (import,
+# pick, get_particle_poses x3, exclude_tilt_images, align_tilt_series
+# imod/aretomo, denoise cryoCARE train/predict) is built from --
+# `typer.Option(None, '--pipeline_control')`, explicitly overriding
+# Typer's own default underscore-to-hyphen auto-conversion. There is no
+# real RELION program, C++ or Python, that actually wants the hyphenated
+# form -- the whole PIPELINE_CONTROL_FLAG_PYTHON distinction was based on
+# a mistaken assumption from the start.
 PIPELINE_CONTROL_FLAG = "--pipeline_control"
-PIPELINE_CONTROL_FLAG_PYTHON = "--pipeline-control"
 
 
 class PipelineBridgeError(Exception):
@@ -573,13 +587,16 @@ def pipeline_control_args(command: str, job_subdir: str) -> str:
     """`--pipeline_control <jobdir>/`, appended the way RELION appends it.
 
     RELION adds this to every command containing "relion_" (and only those) in
-    `RelionJob::prepareFinalCommand`, using the hyphenated spelling for its
-    Python tomo tools. It is what makes the program write the exit files that
-    `--check_job_completion` reads, so a job run from here reaches "Succeeded"
-    in RELION's GUI rather than sitting at "Running" forever. It is also what
-    lets a real relion_refine's own long-running optimiser loop notice a
-    RELION_JOB_ABORT_NOW file mid-run and exit gracefully (ml_optimiser.cpp's
-    own pipeline_control_check_abort_job() calls) -- an abort clicked in real
+    `RelionJob::prepareFinalCommand` -- including its Python tomo tools, which
+    all take the SAME underscore spelling as every C++ relion_ binary (see
+    PIPELINE_CONTROL_FLAG's own docstring for how that was confirmed, and why
+    an earlier hyphenated special-case here was wrong). It is what makes the
+    program write the exit files that `--check_job_completion` reads, so a
+    job run from here reaches "Succeeded" in RELION's GUI rather than sitting
+    at "Running" forever. It is also what lets a real relion_refine's own
+    long-running optimiser loop notice a RELION_JOB_ABORT_NOW file mid-run
+    and exit gracefully (ml_optimiser.cpp's own
+    pipeline_control_check_abort_job() calls) -- an abort clicked in real
     RELION's own GUI (concurrent two-way sync) depends on this, independent of
     RELION-US's own Abort button, which signals the process group directly.
 
@@ -595,12 +612,8 @@ def pipeline_control_args(command: str, job_subdir: str) -> str:
     subdir = job_subdir if job_subdir.endswith("/") else job_subdir + "/"
 
     def _add(segment: str) -> str:
-        if "relion_" not in segment:
+        if "relion_" not in segment or PIPELINE_CONTROL_FLAG in segment:
             return segment
-        flag = (PIPELINE_CONTROL_FLAG_PYTHON if "relion_python_" in segment
-                else PIPELINE_CONTROL_FLAG)
-        if flag in segment:
-            return segment
-        return f"{segment} {flag} {subdir}"
+        return f"{segment} {PIPELINE_CONTROL_FLAG} {subdir}"
 
     return " && ".join(_add(segment) for segment in command.split(" && "))

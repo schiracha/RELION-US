@@ -129,6 +129,17 @@ def test_flag_override_with_an_alternate_false_branch_flag():
     assert draft_flag_is_negated("Class2D", "do_preread_images") is False
 
 
+def test_tomoimport_pure_gate_fields_are_suppressed_not_unmapped():
+    """dose_is_per_movie_frame and do_coords both only SELECT a branch (which
+    flag dose_rate uses; which program/branch this job runs at all) -- neither
+    ever becomes a --flag of its own, so they must be suppressed like any
+    other pure-gate field (do_helix etc. elsewhere in this table), not left to
+    show up in unmapped_fields implying something still needs fixing. Found
+    running a real Import (Tomo) job against this dataset's own defaults."""
+    assert draft_is_suppressed("TomoImport", "dose_is_per_movie_frame") is True
+    assert draft_is_suppressed("TomoImport", "do_coords") is True
+
+
 # --------------------------------------------------------------------------
 # program / output_flag / output_suffix
 # --------------------------------------------------------------------------

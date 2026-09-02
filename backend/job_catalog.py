@@ -1526,9 +1526,22 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "flip_tiltseries_hand": FlagOverride("--invert-defocus-handedness"),
             "images_are_motion_corrected": FlagOverride("--images-are-motion-corrected"),
         },
+        # dose_is_per_movie_frame and do_coords are both pure gates with no
+        # CLI flag of their own (dose_is_per_movie_frame only SELECTS which
+        # of two flag names dose_rate's own value goes out under, above;
+        # do_coords only selects which of two entirely different program
+        # branches this job runs -- see this table's own header comment on
+        # why the do_coords==true branch stays unmapped) -- same shape as
+        # do_helix/do_local_ang_searches elsewhere in this table. Found
+        # running a fresh Import (Tomo) job for real against this dataset's
+        # own defaults (dose_is_per_movie_frame=False, do_coords=False):
+        # both showed up in unmapped_fields even though the generated
+        # command was already fully correct, wrongly implying something
+        # here still needed fixing.
         suppress=frozenset({
             "in_coords", "remove_substring", "remove_substring2",
             "is_center", "scale_factor", "add_factor",
+            "dose_is_per_movie_frame", "do_coords",
         }),
     ),
     # getCommandsTomoExcludeTiltImagesJob (src/pipeline_jobs.cpp ~7017-7040):

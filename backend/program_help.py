@@ -207,8 +207,11 @@ def gui_exposed_flags(job_def: dict) -> set[str]:
         if flag:
             flags.add(flag)
     # Always in the draft, never a "hidden" option worth offering again.
+    # (--pipeline_control is the only real spelling any program accepts --
+    # see pipeline_bridge.PIPELINE_CONTROL_FLAG's own docstring for why a
+    # hyphenated variant used to be listed here too.)
     flags.update({"--o", "--output-directory", "--pipeline_control",
-                  "--pipeline-control", "--version", "--help", "--j"})
+                  "--version", "--help", "--j"})
     return flags
 
 

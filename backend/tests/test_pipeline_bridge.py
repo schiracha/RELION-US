@@ -330,11 +330,19 @@ def test_pipeline_control_flag_is_appended_to_relion_commands():
     assert cmd.endswith("--pipeline_control Class2D/job007/")
 
 
-def test_pipeline_control_flag_uses_the_python_tools_spelling():
+def test_pipeline_control_flag_uses_the_same_underscore_spelling_for_python_tools():
+    """Previously asserted the hyphenated `--pipeline-control` here --
+    confirmed for real (running a from-scratch ImportTomo job) that
+    relion_python_tomo_import actually rejects that spelling outright
+    ("No such option: --pipeline-control (Possible options: ...,
+    --pipeline_control)"). Every tomography_python_programs CLI tool is
+    built from the same shared decorator (`typer.Option(None,
+    '--pipeline_control')`), so there is no real Python tomo tool that
+    wants the hyphenated form -- see PIPELINE_CONTROL_FLAG's own docstring."""
     cmd = pipeline_bridge.pipeline_control_args(
         "relion_python_tomo_import SerialEM --output-directory Tomo/job007/", "Tomo/job007")
-    assert "--pipeline-control Tomo/job007/" in cmd
-    assert "--pipeline_control" not in cmd
+    assert "--pipeline_control Tomo/job007/" in cmd
+    assert "--pipeline-control" not in cmd
 
 
 def test_non_relion_commands_are_left_alone():
