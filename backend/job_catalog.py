@@ -1480,6 +1480,41 @@ def _tomopick_extra_flags(field_values: dict, output_subdir: str) -> list:
     return tokens
 
 
+def _motioncorr_grouping_for_ps_flags(field_values: dict, output_subdir: str) -> list:
+    """`--grouping_for_ps <N>`, the ONLY real effect of "Save sum of power
+    spectra?" (getCommandsMotioncorrJob ~1650-1666): `float dose_for_ps =
+    group_for_ps.getNumber(); float dose_rate = 1.0; if (!is_tomo) dose_rate
+    = dose_per_frame.getNumber(); ... int grouping_for_ps = ROUND(dose_for_ps
+    / dose_rate); if (grouping_for_ps == 0) grouping_for_ps = 1; command +=
+    " --grouping_for_ps " + str(grouping_for_ps);` -- do_save_ps itself never
+    becomes a flag. In TOMO mode specifically, dose_rate stays the hardcoded
+    literal 1.0 (dose_per_frame is never read at all -- real RELION's own
+    per-tilt dose lives in the tilt-series star file by that point, not this
+    JobOption), confirmed by the `if (!is_tomo)` guard around the only line
+    that would otherwise read it."""
+    if not field_values.get("do_save_ps"):
+        return []
+    try:
+        dose_for_ps = float(field_values.get("group_for_ps"))
+    except (TypeError, ValueError):
+        return []
+    if dose_for_ps <= 0:
+        return []
+    if field_values.get("is_tomo"):
+        dose_rate = 1.0
+    else:
+        try:
+            dose_rate = float(field_values.get("dose_per_frame"))
+        except (TypeError, ValueError):
+            dose_rate = 0.0
+    if dose_rate <= 0:
+        return []
+    grouping = int(dose_for_ps / dose_rate + 0.5)  # RELION's own ROUND macro
+    if grouping == 0:
+        grouping = 1
+    return ["--grouping_for_ps", str(grouping)]
+
+
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # getCommandsTomoImportJob, DEFAULT branch (do_coords == false):
     #   command = "relion_python_tomo_import SerialEM ..."
@@ -2130,6 +2165,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # --save_noDW "; } }` (~1642-1647) -- same !is_tomo shape as
             # do_dose_weighting above, plus its own name mismatch.
             "do_save_noDW": FlagOverride("--save_noDW", condition="!is_tomo && do_dose_weighting"),
+            # `if (do_float16) { if (!do_save_ps) { error_message = "...";
+            # return false; } command += " --float16"; }` (~1660-1670) --
+            # self-guarded in real source, but the extractor's per-option
+            # scan missed it entirely (option_flags has no entry at all for
+            # this key -- likely the nested do_save_ps error-check
+            # confusing its pattern match), so it fell through to the
+            # generic "--" + key fallback, which doesn't match either
+            # ("--do_float16" vs the real "--float16"). Confirmed for real
+            # running a from-scratch tomography MotionCorr job with "Write
+            # output in float16?" checked (the tutorial's own recommended
+            # setting): the draft silently never wrote float16 output at
+            # all.
+            "do_float16": FlagOverride("--float16"),
         },
         value_transforms={
             "gain_rot": {
@@ -2141,6 +2189,18 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
                 "Flip left to right (2)": "2",
             },
         },
+        # do_save_ps has NO flag of its own -- it only gates a COMPUTED
+        # value (see _motioncorr_grouping_for_ps_flags below), same shape
+        # as do_helix elsewhere in this table, so it's suppressed rather
+        # than left to show up in unmapped_fields implying a fix is still
+        # needed. Also found running a real MotionCorr(Tomo) job with "Save
+        # sum of power spectra?" checked (required together with float16,
+        # per the tutorial and RELION's own hard error otherwise): the
+        # draft carried --float16 but never --grouping_for_ps, and
+        # CTFFIND-4.1 cannot read float16 images without a power-spectrum
+        # sum to fall back on.
+        suppress=frozenset({"do_save_ps"}),
+        extra_flags=_motioncorr_grouping_for_ps_flags,
     ),
     "Ctffind": JobDraftOverride(
         # (~1809-1813, condition `else { if (joboptions["use_noDW"]

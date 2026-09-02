@@ -790,6 +790,54 @@ def test_motioncorr_gain_rot_unknown_label_is_left_unmapped_not_guessed():
     assert "gain_rot" in unmapped
 
 
+def test_motioncorr_float16_flag_is_emitted_when_checked():
+    """do_float16's own flag ("--float16") doesn't spell out as "--" + its
+    key, and the extractor's per-option scan missed it entirely (a nested
+    do_save_ps error-check inside the same guard apparently confused its
+    pattern match) -- confirmed for real running a from-scratch tomography
+    MotionCorr job with "Write output in float16?" checked, the tutorial's
+    own recommended setting: the draft never wrote float16 output at all."""
+    raw = job_registry.raw_job("Motioncorr")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_float16": True}, "Motioncorr", "")
+    assert "--float16" in cmd.split()
+    assert "do_float16" not in unmapped
+
+
+def test_motioncorr_grouping_for_ps_computed_in_tomo_mode():
+    """do_save_ps has NO flag of its own -- its sole real effect is a
+    computed --grouping_for_ps value: ROUND(group_for_ps / dose_rate), where
+    dose_rate is HARDCODED to 1.0 in tomo mode (dose_per_frame is never
+    read at all when is_tomo). Confirmed for real: a from-scratch
+    MotionCorr(Tomo) job with "Save sum of power spectra?" checked and the
+    tutorial's own group_for_ps=4 carried --float16 but never
+    --grouping_for_ps -- CTFFIND-4.1 cannot read float16 images without
+    this power-spectrum sum to fall back on."""
+    raw = job_registry.raw_job("Motioncorr")
+    # internal_name must be the TOMO variant, not "Motioncorr" -- is_tomo is
+    # resolved from internal_name itself (_resolve_tomo_variant), overwriting
+    # any is_tomo passed directly in field_values (see _build_draft_command's
+    # own docstring).
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"do_save_ps": True, "group_for_ps": 4, "dose_per_frame": 999}, "TomoMotioncorr", "")
+    assert "--grouping_for_ps 4" in cmd  # round(4 / 1.0) == 4, dose_per_frame ignored
+    assert "do_save_ps" not in unmapped
+
+
+def test_motioncorr_grouping_for_ps_uses_dose_per_frame_in_spa_mode():
+    raw = job_registry.raw_job("Motioncorr")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_save_ps": True, "group_for_ps": 4, "is_tomo": False, "dose_per_frame": 2}, "Motioncorr", "")
+    assert "--grouping_for_ps 2" in cmd  # round(4 / 2) == 2
+
+
+def test_motioncorr_grouping_for_ps_absent_when_do_save_ps_unchecked():
+    raw = job_registry.raw_job("Motioncorr")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"do_save_ps": False, "group_for_ps": 4, "is_tomo": True}, "Motioncorr", "")
+    assert "--grouping_for_ps" not in cmd
+
+
 def test_tomoalign_motion_sigma_fields_are_emitted_when_do_motion_is_on():
     """sigma_vel/sigma_div (--s_vel/--s_div) are gated on the same bare
     local-variable condition shape, "do_motion", in TomoAlign."""
