@@ -793,6 +793,28 @@ def _emit_if_positive(value: float) -> Optional[float]:
     return value if value > 0.0 else None
 
 
+# `int JobOption::getHealPixOrder(std::string s)` (src/pipeline_jobs.cpp
+# ~232-241): returns (0-based index into job_sampling_options) + 1, or -1
+# if not found. Autorefine/Class3D's own sampling/auto_local_sampling
+# fields then emit `--healpix_order`/`--auto_local_healpix_order` as
+# `getHealPixOrder(...) - iover` where iover is the fixed constant 1 --
+# the +1/-1 cancel out, so the net emitted value is just the plain 0-based
+# index, which this table gives directly (no need to replicate the
+# +1-then-1 arithmetic). NOT reusable as-is for a job that emits
+# getHealPixOrder's raw (1-based) result directly instead (e.g. Autopick's
+# ref3d_sampling, src/pipeline_jobs.cpp ~2321) -- confirmed those two
+# shapes coexist in real RELION, so this table's own callers were checked
+# individually before use, not assumed uniform. Found running the
+# tomography tutorial's own Initial 3D refinement step (Autorefine's
+# "Initial angular sampling"/"Local searches from auto-sampling" fields
+# were both entirely unmapped -- option_flags has no entry for either).
+_HEALPIX_ORDER_LABELS = {
+    "30 degrees": "0", "15 degrees": "1", "7.5 degrees": "2", "3.7 degrees": "3",
+    "1.8 degrees": "4", "0.9 degrees": "5", "0.5 degrees": "6", "0.2 degrees": "7",
+    "0.1 degrees": "8",
+}
+
+
 def _safe_float(value, default: float) -> Optional[float]:
     """Best-effort float parse for a slider/number field's current raw
     value, or `default` when the value itself is empty/None (the ordinary
@@ -1902,6 +1924,15 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
                 "--sigma_psi", condition="do_helix && dont_skip_align && !do_local_ang_searches"),
             "range_rot": FlagOverride(
                 "--sigma_rot", condition="do_helix && dont_skip_align && !do_local_ang_searches"),
+            # `--healpix_order` (see _HEALPIX_ORDER_LABELS' own docstring
+            # for the exact -iover arithmetic) -- only reached inside the
+            # `else` of `if (!dont_skip_align) { --skip_align } else {
+            # ...--healpix_order... }` (~3985-4010), same gate as
+            # sigma_angles above. Entirely unmapped before this fix (no
+            # option_flags entry at all) -- confirmed running the
+            # tomography tutorial's own 3D classification step later with
+            # its own recommended "7.5 degrees" default.
+            "sampling": FlagOverride("--healpix_order", condition="dont_skip_align"),
             "helical_range_distance": FlagOverride(
                 "--helical_sigma_distance",
                 condition="do_helix && dont_skip_align && !do_local_ang_searches"),
@@ -1918,6 +1949,9 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # do_helix are different job modes), not by any guard this app
             # enforces either.
             "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
+        },
+        value_transforms={
+            "sampling": _HEALPIX_ORDER_LABELS,
         },
         numeric_transforms={
             "sigma_angles": _div_by_3,
@@ -1972,6 +2006,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # Same shape as Inimodel/Class3D's own sigma_tilt (see
             # Inimodel's entry for the full citation).
             "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
+            # `--healpix_order`/`--auto_local_healpix_order` (see
+            # _HEALPIX_ORDER_LABELS' own docstring for the exact -iover
+            # arithmetic and why it reduces to a plain label->index table).
+            # Both entirely unmapped before this fix (no option_flags entry
+            # for either) -- confirmed running the tomography tutorial's
+            # own Initial 3D refinement step with its own recommended
+            # "7.5 degrees" / "1.8 degrees" defaults.
+            "sampling": FlagOverride("--healpix_order"),
+            "auto_local_sampling": FlagOverride("--auto_local_healpix_order"),
+        },
+        value_transforms={
+            "sampling": _HEALPIX_ORDER_LABELS,
+            "auto_local_sampling": _HEALPIX_ORDER_LABELS,
         },
         numeric_transforms={
             "helical_range_distance": _third_if_positive,

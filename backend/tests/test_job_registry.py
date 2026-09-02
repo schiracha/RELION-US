@@ -601,6 +601,35 @@ def test_inimodel_infers_is_tomo_from_in_optimisation_content():
     assert "sigma_tilt" not in unmapped
 
 
+def test_autorefine_healpix_order_flags_translate_degree_labels():
+    """sampling/auto_local_sampling were entirely unmapped (no option_flags
+    entry -- getHealPixOrder's own -iover arithmetic in real source reduces
+    to a plain 0-based index, see _HEALPIX_ORDER_LABELS). Confirmed running
+    the tomography tutorial's own Initial 3D refinement step with its own
+    recommended "7.5 degrees" / "1.8 degrees" defaults."""
+    raw = job_registry.raw_job("Autorefine")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"sampling": "7.5 degrees", "auto_local_sampling": "1.8 degrees"}, "Autorefine", "")
+    assert "--healpix_order 2" in cmd
+    assert "--auto_local_healpix_order 4" in cmd
+    assert not ({"sampling", "auto_local_sampling"} & set(unmapped))
+
+
+def test_class3d_healpix_order_flag_gated_on_dont_skip_align():
+    """Class3D's own sampling only emits --healpix_order inside the `else`
+    of `if (!dont_skip_align) --skip_align else {...}` -- unlike
+    Autorefine, which has no alignment-skip concept at all."""
+    raw = job_registry.raw_job("Class3D")
+    cmd_on, unmapped = job_registry._build_draft_command(
+        raw, {"sampling": "7.5 degrees", "dont_skip_align": True}, "Class3D", "")
+    assert "--healpix_order 2" in cmd_on
+    assert "sampling" not in unmapped
+
+    cmd_off, _ = job_registry._build_draft_command(
+        raw, {"sampling": "7.5 degrees", "dont_skip_align": False}, "Class3D", "")
+    assert "--healpix_order" not in cmd_off
+
+
 def test_class3d_and_autorefine_sigma_tilt_emitted_in_tomo_mode():
     """Same fix as Inimodel's own sigma_tilt, applied proactively to its
     two siblings in the same one-menu-entry-for-both-modes family before
