@@ -185,13 +185,19 @@ def test_tomo_import_dose_is_per_movie_frame_gets_dropdown_labels():
     assert "boolean_labels" not in raw_opt
 
 
-def test_tomo_exclude_tilt_images_maps_its_hyphenated_flags():
-    d = job_registry.build_job_definition("TomoExcludeTiltImages")
-    draft = d["draft_command"]
-    assert "--cache-size" in draft, draft
-    # in_tiltseries has an empty default so no value is emitted, but the key
-    # must be mapped (not flagged unmapped) via the overlay.
-    assert "in_tiltseries" not in d["unmapped_fields"], d["unmapped_fields"]
+def test_tomo_exclude_tilt_images_is_not_a_draftable_subprocess_job():
+    """TomoExcludeTiltImages moved to custom_jobs.CUSTOM_JOB_DEFINITIONS
+    (job_catalog.CUSTOM_JOBS) -- its real program, relion_tomo_exclude_tilt_
+    images, opens a napari desktop window unconditionally (no headless flag
+    at all), so it can no longer be drafted/run as a subprocess the way
+    build_job_definition()/JOB_CATALOG assume. See exclude_tilts.py /
+    custom_jobs.py for how it's actually run now (the same "moved to
+    CUSTOM_JOBS" treatment TomoImport's hyphenated-flag test above still
+    covers for OTHER tomo jobs that stayed real subprocesses)."""
+    with pytest.raises(KeyError):
+        job_registry.build_job_definition("TomoExcludeTiltImages")
+    from custom_jobs import CUSTOM_JOB_DEFINITIONS
+    assert "TomoExcludeTiltImages" in CUSTOM_JOB_DEFINITIONS
 
 
 def test_extractor_regex_captures_full_hyphenated_flags():
@@ -1999,6 +2005,31 @@ def test_tomo_recon_part_no_extra_commands_when_do_helix_unchecked():
     raw = job_registry.raw_job("TomoReconPart")
     cmd, _ = job_registry._build_draft_command(raw, {"do_helix": False}, "TomoReconPart", "Reconstruct/job020")
     assert " && " not in cmd
+
+
+def test_tomo_subtomo_crop_max_dose_min_frames_emitted_when_positive():
+    """All three read into a local C++ variable before their own `if (val
+    > 0.)` guard (getCommandsSubtomoJob) -- the extractor's self-guard
+    heuristic missed all three, even though max_dose/min_frames' own flag
+    names already spell "--" + their key. Confirmed running a real Extract
+    subtomos job against the tutorial's own settings (crop_size=96,
+    max_dose=50, min_frames=1 -- all positive, all previously unmapped)."""
+    raw = job_registry.raw_job("TomoSubtomo")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"crop_size": 96, "max_dose": 50, "min_frames": 1}, "TomoSubtomo", "Extract/job005")
+    assert "--crop 96" in cmd
+    assert "--max_dose 50" in cmd
+    assert "--min_frames 1" in cmd
+    assert not ({"crop_size", "max_dose", "min_frames"} & set(unmapped))
+
+
+def test_tomo_subtomo_crop_max_dose_min_frames_omitted_when_not_positive():
+    raw = job_registry.raw_job("TomoSubtomo")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"crop_size": -1, "max_dose": -1, "min_frames": 0}, "TomoSubtomo", "Extract/job005")
+    assert "--crop" not in cmd
+    assert "--max_dose" not in cmd
+    assert "--min_frames" not in cmd
 
 
 def test_localres_resmap_mode_symlinks_halves_and_uses_fn_resmap_as_program():

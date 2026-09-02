@@ -77,8 +77,6 @@ JOB_CATALOG = {
                                    "Reconstruction of tomograms for particle picking"),
     "TomoDenoiseTomograms":      ("relion.denoisetomo", "Denoise Tomograms", "Tilt Series / Tomogram Reconstruction",
                                    "Denoise tomograms"),
-    "TomoExcludeTiltImages":     ("relion.excludetilts", "Exclude Tilt Images", "Tilt Series / Tomogram Reconstruction",
-                                   "Exclusion of bad tilt-images from tilt-series"),
     "Extract":                   ("relion.extract", "Particle Extraction", "Extraction",
                                    "Window particles, normalize, downsize etc from micrographs"),
     "TomoSubtomo":               ("relion.pseudosubtomo", "Extract Pseudo-subtomograms", "Extraction",
@@ -131,7 +129,7 @@ assert set(JOB_CATALOG) == {
     "Import", "TomoImport", "Motioncorr", "TomoMotioncorr", "Ctffind", "TomoCtffind",
     "Ctfrefine", "TomoCtfRefine",
     "Autopick", "TomoPickTomograms", "TomoAlignTiltSeries",
-    "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
+    "TomoReconstructTomograms", "TomoDenoiseTomograms",
     "Extract", "TomoSubtomo", "Select", "Class2D", "Inimodel", "Class3D",
     "Autorefine", "MultiBody", "TomoAlign", "TomoReconPart", "Motionrefine",
     "Maskcreate", "Joinstar", "Subtract", "Postprocess", "Localres", "DynaMight",
@@ -147,7 +145,14 @@ assert set(JOB_CATALOG) == {
     "label (relion.manualpick) so it still shows up correctly in RELION's "
     "own pipeline/GUI, but its actual picking happens through the in-browser "
     "tomogram/micrograph viewer (viz.py) rather than a subprocess -- see "
-    "custom_jobs.py."
+    "custom_jobs.py. TomoExcludeTiltImages is likewise deliberately NOT here "
+    "-- relion_tomo_exclude_tilt_images (tomography_python_programs/"
+    "exclude_tilt_images/_cli.py) unconditionally opens a napari desktop "
+    "window (napari.Viewer()/napari.run(), no headless flag at all), the "
+    "exact same problem as relion_manualpick. It's registered in CUSTOM_JOBS "
+    "below too, under its own real RELION type label (relion.excludetilts), "
+    "with the actual review/exclusion happening through an in-browser tilt-"
+    "image list (exclude_tilts.py) instead of a subprocess."
 )
 
 # Motioncorr/Ctffind are ONE real RelionJob class each, with is_tomo a plain
@@ -183,24 +188,25 @@ AMBIGUOUS_TOMO_LABELS = {JOB_CATALOG[base][0] for base in set(TOMO_VARIANT_OF.va
 # in the Jobs list, but see job_runner.py for how they execute (direct
 # in-process Python calls into backend/converters/, not a subprocess).
 #
-# Manualpick/TomoManualPick are a different kind of "custom" job from the
-# import bridges below: their label_new is a REAL RELION type label
-# (relion.manualpick / relion.picktomo, the same one TomoPickTomograms uses
-# for automated tomogram picking), not a custom.* one -- see
-# job_runner.py's _register_in_relion_pipeline, which now checks CUSTOM_JOBS
-# for a label_new the same way it checks JOB_CATALOG, and pipeline_bridge's
-# module docstring for why registering under the real label matters: it's
-# what lets `relion_pipeliner --addJobFromStar` (called on Run, same as any
-# other job when two-way sync is on) recognize the job type, validate it,
-# and compute its real output nodes -- so a picking job registered here
-# shows up correctly in RELION's own pipeline/GUI and its output is a valid
-# input to any real downstream RELION job (Extract, TomoSubtomo, ...),
-# exactly as if a real relion_manualpick/relion_python_tomo_pick had
-# produced it. The import bridges below use custom.* labels precisely
-# because they AREN'T standing in for a real RELION job type -- registering
-# those under a label relion_pipeliner has never heard of would just fail
-# (harmlessly; _register_in_relion_pipeline's caller already falls back to
-# this app's own numbering on any registration error).
+# Manualpick/TomoManualPick/TomoExcludeTiltImages are a different kind of
+# "custom" job from the import bridges below: their label_new is a REAL
+# RELION type label (relion.manualpick / relion.picktomo / relion.
+# excludetilts, the last also used by real relion_tomo_exclude_tilt_images),
+# not a custom.* one -- see job_runner.py's _register_in_relion_pipeline,
+# which now checks CUSTOM_JOBS for a label_new the same way it checks
+# JOB_CATALOG, and pipeline_bridge's module docstring for why registering
+# under the real label matters: it's what lets `relion_pipeliner
+# --addJobFromStar` (called on Run, same as any other job when two-way sync
+# is on) recognize the job type, validate it, and compute its real output
+# nodes -- so a job registered here shows up correctly in RELION's own
+# pipeline/GUI and its output is a valid input to any real downstream RELION
+# job (Extract, TomoSubtomo, Reconstruct Tomograms, ...), exactly as if a
+# real relion_manualpick/relion_python_tomo_pick/relion_tomo_exclude_tilt_
+# images had produced it. The import bridges below use custom.* labels
+# precisely because they AREN'T standing in for a real RELION job type --
+# registering those under a label relion_pipeliner has never heard of would
+# just fail (harmlessly; _register_in_relion_pipeline's caller already
+# falls back to this app's own numbering on any registration error).
 CUSTOM_JOBS = {
     "Manualpick": {
         "label_new": "relion.manualpick",
@@ -213,6 +219,12 @@ CUSTOM_JOBS = {
         "display_name": "Manual Picking (Tomo)",
         "category": "Particle Picking",
         "description": "Manually pick particles in tomograms",
+    },
+    "TomoExcludeTiltImages": {
+        "label_new": "relion.excludetilts",
+        "display_name": "Exclude Tilt Images",
+        "category": "Tilt Series / Tomogram Reconstruction",
+        "description": "Exclusion of bad tilt-images from tilt-series",
     },
     "ImodImport": {
         "label_new": "custom.imod_import",
@@ -765,6 +777,20 @@ def _third_if_positive(value: float) -> Optional[float]:
     joboptions condition) -- returns None to mean "correctly omit", which
     _build_draft_command's caller must NOT count as unmapped."""
     return _div_by_3(value) if value > 0.0 else None
+
+
+def _emit_if_positive(value: float) -> Optional[float]:
+    """Pass the raw value through unchanged when positive, else None to mean
+    "correctly omit" -- for a field whose real flag fires only on `if (val
+    > 0.)` against its OWN raw value (no computation), same reasoning as
+    _third_if_positive above but without the extra division. Used by
+    TomoSubtomo's crop_size/max_dose/min_frames (getCommandsSubtomoJob):
+    each is read into a local C++ variable first (`float max_dose =
+    joboptions["max_dose"].getNumber(...)`), which is why the extractor's
+    self-guard heuristic missed all three even though max_dose/min_frames'
+    OWN flag names already spell "--" + their key (crop_size's doesn't:
+    its real flag is "--crop")."""
+    return value if value > 0.0 else None
 
 
 def _safe_float(value, default: float) -> Optional[float]:
@@ -1579,17 +1605,12 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "dose_is_per_movie_frame", "do_coords",
         }),
     ),
-    # getCommandsTomoExcludeTiltImagesJob (src/pipeline_jobs.cpp ~7017-7040):
-    #   `which relion_python_tomo_exclude_tilt_images`
-    #     --tilt-series-star-file <in_tiltseries> --cache-size <cache_size>
-    #     --output-directory <out>
-    "TomoExcludeTiltImages": JobDraftOverride(
-        output_flag="--output-directory",
-        flags={
-            "in_tiltseries": FlagOverride("--tilt-series-star-file"),
-            "cache_size": FlagOverride("--cache-size"),
-        },
-    ),
+    # TomoExcludeTiltImages has no draft-command entry here anymore -- it
+    # moved to CUSTOM_JOBS (see that table's docstring above): its real
+    # program, relion_tomo_exclude_tilt_images, opens a napari desktop
+    # window unconditionally, so it can no longer be drafted/run as a
+    # subprocess at all. See exclude_tilts.py / custom_jobs.py.
+    #
     # Verified per-job against getCommands*Job() in src/pipeline_jobs.cpp
     # (RELION cloned 2026-08-14): both take --output-directory, not the
     # default --o. (NB: TomoAlignTiltSeries and TomoReconstructTomograms
@@ -1953,6 +1974,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
             "do_float16": FlagOverride("--float16"),  # ~7112
             "do_stack2d": FlagOverride("--stack2d"),  # ~7117
+            # All three read into a local C++ variable before their own
+            # `if (val > 0.)` guard (getCommandsSubtomoJob), which is why
+            # the extractor's self-guard heuristic missed them -- see
+            # _emit_if_positive's own docstring. crop_size's real flag
+            # ("--crop") also doesn't spell out as "--" + its key.
+            "crop_size": FlagOverride("--crop"),
+            "max_dose": FlagOverride("--max_dose"),
+            "min_frames": FlagOverride("--min_frames"),
+        },
+        numeric_transforms={
+            "crop_size": _emit_if_positive,
+            "max_dose": _emit_if_positive,
+            "min_frames": _emit_if_positive,
         },
         suppress=frozenset({"use_direct_entries"}),
     ),
