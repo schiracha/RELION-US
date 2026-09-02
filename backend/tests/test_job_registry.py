@@ -185,13 +185,19 @@ def test_tomo_import_dose_is_per_movie_frame_gets_dropdown_labels():
     assert "boolean_labels" not in raw_opt
 
 
-def test_tomo_exclude_tilt_images_maps_its_hyphenated_flags():
-    d = job_registry.build_job_definition("TomoExcludeTiltImages")
-    draft = d["draft_command"]
-    assert "--cache-size" in draft, draft
-    # in_tiltseries has an empty default so no value is emitted, but the key
-    # must be mapped (not flagged unmapped) via the overlay.
-    assert "in_tiltseries" not in d["unmapped_fields"], d["unmapped_fields"]
+def test_tomo_exclude_tilt_images_is_not_a_draftable_subprocess_job():
+    """TomoExcludeTiltImages moved to custom_jobs.CUSTOM_JOB_DEFINITIONS
+    (job_catalog.CUSTOM_JOBS) -- its real program, relion_tomo_exclude_tilt_
+    images, opens a napari desktop window unconditionally (no headless flag
+    at all), so it can no longer be drafted/run as a subprocess the way
+    build_job_definition()/JOB_CATALOG assume. See exclude_tilts.py /
+    custom_jobs.py for how it's actually run now (the same "moved to
+    CUSTOM_JOBS" treatment TomoImport's hyphenated-flag test above still
+    covers for OTHER tomo jobs that stayed real subprocesses)."""
+    with pytest.raises(KeyError):
+        job_registry.build_job_definition("TomoExcludeTiltImages")
+    from custom_jobs import CUSTOM_JOB_DEFINITIONS
+    assert "TomoExcludeTiltImages" in CUSTOM_JOB_DEFINITIONS
 
 
 def test_extractor_regex_captures_full_hyphenated_flags():

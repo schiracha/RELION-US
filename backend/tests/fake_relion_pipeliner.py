@@ -40,6 +40,7 @@ DIRNAME_BY_LABEL = {
     "relion.select": "Select",
     "relion.manualpick": "ManualPick",
     "relion.picktomo": "Picks",
+    "relion.excludetilts": "ExcludeTiltImages",
 }
 
 EXIT_FILES = {

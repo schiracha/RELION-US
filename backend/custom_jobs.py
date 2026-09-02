@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import exclude_tilts
 import job_registry
 import manual_pick
 import viz
@@ -58,30 +59,35 @@ def _opt_float(value) -> float | None:
 
 
 def _picker_definition(internal_name: str, real_job_name: str, label_new: str,
-                        display_name: str, description: str, picker_kind: str) -> dict:
-    """Manualpick/TomoManualPick reuse the REAL RELION option list/layout
-    (job_registry.raw_job(real_job_name), still present in
-    data/job_definitions_raw.json even though job_catalog.JOB_CATALOG no
-    longer lists Manualpick as a real subprocess job -- see job_catalog.py's
-    CUSTOM_JOBS docstring) rather than hand-picking a subset. That keeps the
-    Inputs tab identical to what real RELION's own GUI would show for the
-    same job type, which is what makes the job.star this ultimately
-    registers (see run_manual_pick/run_tomo_manual_pick below) a genuinely
-    realistic one -- every field a real relion_manualpick/
-    relion_python_tomo_pick job would have, not just the handful this app's
-    own picker actually uses.
+                        display_name: str, description: str, picker_kind: str,
+                        category: str = "Particle Picking",
+                        action_desc: str = "picking happens",
+                        impl_module: str = "backend/manual_pick.py") -> dict:
+    """Manualpick/TomoManualPick/TomoExcludeTiltImages all reuse the REAL
+    RELION option list/layout (job_registry.raw_job(real_job_name), still
+    present in data/job_definitions_raw.json even though job_catalog.
+    JOB_CATALOG no longer lists any of them as a real subprocess job -- see
+    job_catalog.py's CUSTOM_JOBS docstring) rather than hand-picking a
+    subset. That keeps the Inputs tab identical to what real RELION's own
+    GUI would show for the same job type, which is what makes the job.star
+    this ultimately registers (see run_manual_pick/run_tomo_manual_pick/
+    run_exclude_tilt_images below) a genuinely realistic one -- every field
+    a real relion_manualpick/relion_python_tomo_pick/relion_tomo_exclude_
+    tilt_images job would have, not just the handful this app's own in-
+    browser UI actually uses.
 
-    picker_kind ("spa" | "tomo") tags the popup so app.js knows to show the
-    Picker button/embedded viewer instead of (custom jobs') plain Run
-    button, and which manual_pick.py functions + /api/manual-pick/* routes
-    to call.
+    picker_kind ("spa" | "tomo" | "excludetilts") tags the popup so app.js
+    knows to show the Picker button/embedded UI instead of (custom jobs')
+    plain Run button, which in-browser UI to open (the orthoslice picker
+    for spa/tomo, the tilt-image reviewer for excludetilts), and which
+    input field names/API routes to call for it.
     """
     raw = job_registry.raw_job(real_job_name)
     return {
         "internal_name": internal_name,
         "label_new": label_new,
         "display_name": display_name,
-        "category": "Particle Picking",
+        "category": category,
         "description": description,
         "options": raw.get("options", []),
         "standard_groups": job_registry._standard_groups(raw),
@@ -91,7 +97,7 @@ def _picker_definition(internal_name: str, real_job_name: str, label_new: str,
         # these two), so anything set here would be dead and misleadingly
         # imply otherwise.
         "program_guess": (
-            f"(no subprocess -- see backend/manual_pick.py; picking happens in "
+            f"(no subprocess -- see {impl_module}; {action_desc} in "
             f"the in-browser viewer, not {raw.get('program_guess', 'the real binary')})"
         ),
         "flags_used": [],
@@ -110,6 +116,13 @@ CUSTOM_JOB_DEFINITIONS = {
     "TomoManualPick": _picker_definition(
         "TomoManualPick", "TomoPickTomograms", "relion.picktomo", "Manual Picking (Tomo)",
         "Manually pick particles in tomograms", "tomo",
+    ),
+    "TomoExcludeTiltImages": _picker_definition(
+        "TomoExcludeTiltImages", "TomoExcludeTiltImages", "relion.excludetilts",
+        "Exclude Tilt Images", "Exclusion of bad tilt-images from tilt-series", "excludetilts",
+        category="Tilt Series / Tomogram Reconstruction",
+        action_desc="tilt-image review/exclusion happens",
+        impl_module="backend/exclude_tilts.py",
     ),
     "ImodImport": {
         "internal_name": "ImodImport",
@@ -399,9 +412,47 @@ async def run_tomo_manual_pick(project_dir: Path, values: dict, job_dir: Path) -
     return await asyncio.to_thread(work)
 
 
+async def run_exclude_tilt_images(project_dir: Path, values: dict, job_dir: Path) -> str:
+    """Tilt-image-exclusion counterpart of run_manual_pick/run_tomo_manual_
+    pick above -- same stays_running / Done / Continue / Overwrite-clears-
+    first reasoning (see run_manual_pick's docstring).
+
+    Unlike picking, there's an obvious non-destructive default with nothing
+    chosen yet: keep EVERY tilt image (relion_tomo_exclude_tilt_images' own
+    napari widget starts the exact same way -- nothing pre-excluded until
+    the user acts on it). So, unlike an unpicked SPA/tomo job (which has
+    literally no particles yet), this writes that full pass-through
+    immediately (exclude_tilts.write_passthrough) rather than leaving the
+    job's output missing until the user opens the reviewer -- the job's
+    output (selected_tilt_series.star) stays valid for downstream jobs
+    (Reconstruct Tomograms, TomoSubtomo, ...) to read even if the reviewer
+    is never opened at all.
+    """
+    in_tiltseries = values.get("in_tiltseries", "")
+    if not in_tiltseries:
+        raise ValueError("Input tilt series field is required.")
+
+    def work():
+        removed = exclude_tilts.clear_exclusions(job_dir)
+        n_series = exclude_tilts.write_passthrough(project_dir, job_dir, in_tiltseries)
+        cleared_note = f"Cleared {removed} existing output file(s) from a previous run.\n" if removed else ""
+        return (
+            f"{cleared_note}"
+            f"Found {n_series} tilt series in {in_tiltseries}.\n"
+            f"Every tilt image is kept by default -- 'nothing excluded' is a "
+            f"legitimate choice on its own. Use the Picker button above to "
+            f"review each tilt series and exclude bad images -- this job's "
+            f"output (selected_tilt_series.star) stays valid for downstream "
+            f"jobs (Reconstruct Tomograms, TomoSubtomo, ...) to read either way."
+        )
+
+    return await asyncio.to_thread(work)
+
+
 CUSTOM_JOB_RUNNERS = {
     "Manualpick": run_manual_pick,
     "TomoManualPick": run_tomo_manual_pick,
+    "TomoExcludeTiltImages": run_exclude_tilt_images,
     "ImodImport": run_imod_import,
     "WarpImport": run_warp_import,
     "DeepETPickerImport": run_deepetpicker_import,

@@ -53,7 +53,9 @@ JOB_HELP_TARGETS: dict[str, list[tuple[Path, str, list[str]]]] = {
     "TomoAlign": [(BIN_DIR, "relion_tomo_align", [])],
     "TomoReconPart": [(BIN_DIR, "relion_tomo_reconstruct_particle", [])],
     "TomoImport": [(CONDA_BIN_DIR, "relion_tomo_import", ["SerialEM"])],
-    "TomoExcludeTiltImages": [(CONDA_BIN_DIR, "relion_tomo_exclude_tilt_images", [])],
+    # TomoExcludeTiltImages has no entry here -- it moved to CUSTOM_JOBS (see
+    # job_catalog.py), so DRAFT_OVERRIDES no longer has anything to verify
+    # for it (this script only iterates DRAFT_OVERRIDES.items()).
     # Motioncorr's --help exits before printing usage (it errors out demanding
     # --use_motioncor2 / RELION's own implementation be chosen first); its
     # flags are checked against source instead, via SOURCE_FALLBACK below.

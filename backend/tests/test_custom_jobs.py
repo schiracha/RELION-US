@@ -411,6 +411,167 @@ def test_overwrite_clears_prior_picks_and_resumes_running(synced_project):
     assert manual_pick.load_spa_picks(project, Path(overwritten.cwd), "a.mrc") == []
 
 
+def _seed_tilt_series(project):
+    """Same minimal CtfFind-shaped input test_exclude_tilts.py's own
+    fixture uses -- one tilt series, two images."""
+    ctf_dir = project / "CtfFind" / "job002" / "tilt_series"
+    ctf_dir.mkdir(parents=True)
+    series_df = pd.DataFrame({
+        "rlnMicrographMovieName": ["a.mrc", "b.mrc"],
+        "rlnTomoNominalStageTiltAngle": [0.0, 3.0],
+        "rlnMicrographName": ["MotionCorr/job001/a.mrc", "MotionCorr/job001/b.mrc"],
+    })
+    starfile.write({"TS_01": series_df}, ctf_dir / "TS_01.star", overwrite=True)
+    global_df = pd.DataFrame({
+        "rlnTomoName": ["TS_01"],
+        "rlnTomoTiltSeriesStarFile": ["CtfFind/job002/tilt_series/TS_01.star"],
+        "rlnVoltage": [300.0],
+    })
+    starfile.write({"global": global_df}, project / "CtfFind" / "job002" / "tilt_series_ctf.star", overwrite=True)
+    return "CtfFind/job002/tilt_series_ctf.star"
+
+
+# --------------------------------------------------------------------------
+# TomoExcludeTiltImages -- same is_picker/stays_running lifecycle as
+# Manualpick above; see exclude_tilts.py for the STAR output this job's
+# reviewer actually writes. run_exclude_tilt_images itself writes a full
+# pass-through default (see its own docstring) rather than leaving the job's
+# output missing until the user opens the reviewer -- unlike Manualpick,
+# whose unpicked job genuinely has no particles yet.
+# --------------------------------------------------------------------------
+
+
+def test_run_exclude_tilt_images_reports_series_count_and_passthrough(tmp_path):
+    project_manager.init_new_project(tmp_path)
+    in_tiltseries = _seed_tilt_series(tmp_path)
+    job_dir = tmp_path / "job001"
+    summary = asyncio.run(
+        custom_jobs.run_exclude_tilt_images(tmp_path, {"in_tiltseries": in_tiltseries}, job_dir))
+    assert "Found 1 tilt series" in summary
+    assert "kept by default" in summary
+    assert (job_dir / "selected_tilt_series.star").is_file()
+    assert (job_dir / "tilt_series" / "TS_01.star").is_file()
+
+
+def test_run_exclude_tilt_images_requires_in_tiltseries(tmp_path):
+    with pytest.raises(ValueError, match="required"):
+        asyncio.run(custom_jobs.run_exclude_tilt_images(tmp_path, {}, tmp_path / "job001"))
+
+
+def test_excludetiltimages_job_registers_in_relions_pipeline_and_stays_running(synced_project):
+    """End-to-end, mirroring test_manualpick_job_registers_in_relions_
+    pipeline_and_gets_an_exit_marker / test_stays_running_job_reaches_
+    running_not_completed above: registers under its real relion.
+    excludetilts label, and a successful run_exclude_tilt_images leaves the
+    run "running" (stays_running=is_picker), not auto-completed."""
+    project = synced_project
+    in_tiltseries = _seed_tilt_series(project)
+    manager = JobRunManager(project)
+    values = {"in_tiltseries": in_tiltseries}
+
+    async def go():
+        async def factory(job_dir):
+            return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
+        run = await manager.start_custom_job(
+            "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status != "pending":
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == "running"
+    assert run.ended_at is None
+    job_dir = Path(run.cwd)
+    assert job_dir.parent.name == "ExcludeTiltImages"
+    assert (job_dir / "selected_tilt_series.star").is_file()
+    pipeline = project_manager.read_relion_pipeline(project)
+    proc = next(p for p in pipeline["processes"] if p["name"] == f"ExcludeTiltImages/{job_dir.name}")
+    assert proc["status_label"] == "Running"
+
+
+def test_excludetiltimages_done_then_continue_preserves_saved_exclusions(synced_project):
+    """Done finishes the session (full completion handshake, like
+    Manualpick's); Continue (resume_run) returns to "running" WITHOUT
+    touching any saved exclusion -- mirrors test_done_button_finishes_a_
+    stays_running_job / test_resume_run_returns_to_running_without_
+    touching_picks above."""
+    project = synced_project
+    in_tiltseries = _seed_tilt_series(project)
+    manager = JobRunManager(project)
+    values = {"in_tiltseries": in_tiltseries}
+
+    async def go():
+        async def factory(job_dir):
+            return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
+        run = await manager.start_custom_job(
+            "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status != "pending":
+                break
+        import exclude_tilts
+        exclude_tilts.save_tilt_series_exclusions(project, Path(run.cwd), in_tiltseries, "TS_01", ["a.mrc"])
+        await manager.set_status(run.run_id, "completed")
+        assert run.status == "completed"
+        assert (Path(run.cwd) / "RELION_JOB_EXIT_SUCCESS").is_file()
+        updated = await manager.resume_run(run.run_id)
+        return run, updated
+
+    run, updated = asyncio.run(go())
+    assert run.status == "running"
+    assert updated["status"] == "running"
+    import exclude_tilts
+    images = exclude_tilts.list_images(project, Path(run.cwd), in_tiltseries, "TS_01")
+    assert [i["movie_name"] for i in images if i["excluded"]] == ["a.mrc"]
+    pipeline = project_manager.read_relion_pipeline(project)
+    proc = next(p for p in pipeline["processes"] if p["name"] == f"ExcludeTiltImages/{Path(run.cwd).name}")
+    assert proc["status_label"] == "Running"
+
+
+def test_excludetiltimages_overwrite_clears_prior_exclusions(synced_project):
+    """Overwrite is the destructive counterpart to Continue -- mirrors
+    test_overwrite_clears_prior_picks_and_resumes_running above: it must
+    genuinely clear the job's prior output (run_exclude_tilt_images calls
+    exclude_tilts.clear_exclusions at the top) and re-seed a fresh
+    pass-through, not just reset run.status."""
+    project = synced_project
+    in_tiltseries = _seed_tilt_series(project)
+    manager = JobRunManager(project)
+    values = {"in_tiltseries": in_tiltseries}
+
+    async def go():
+        async def factory(job_dir):
+            return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
+        run = await manager.start_custom_job(
+            "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if run.status != "pending":
+                break
+        import exclude_tilts
+        exclude_tilts.save_tilt_series_exclusions(project, Path(run.cwd), in_tiltseries, "TS_01", ["a.mrc"])
+        await manager.set_status(run.run_id, "completed")
+
+        overwritten = await manager.start_custom_job(
+            "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values,
+            overwrite_run_id=run.run_id, stays_running=True,
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if overwritten.status != "pending":
+                break
+        return run, overwritten
+
+    run, overwritten = asyncio.run(go())
+    assert overwritten.run_id == run.run_id  # same slot
+    assert overwritten.status == "running"
+    import exclude_tilts
+    images = exclude_tilts.list_images(project, Path(overwritten.cwd), in_tiltseries, "TS_01")
+    assert all(not i["excluded"] for i in images)  # back to the fresh pass-through
+
+
 def test_overwrite_works_directly_on_a_still_running_picking_session(synced_project):
     """A picker's "running" status means "picking session open," not
     "compute in progress" -- Overwrite must be usable straight from that

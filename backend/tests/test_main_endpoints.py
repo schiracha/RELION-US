@@ -26,6 +26,9 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+pd = pytest.importorskip("pandas")
+starfile = pytest.importorskip("starfile")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main
@@ -88,6 +91,31 @@ def client(tmp_path, monkeypatch):
     project_manager.init_new_project(project_dir)
     main.run_manager.set_project_dir(project_dir)
     return TestClient(main.app)
+
+
+@pytest.fixture
+def picker_client(tmp_path, monkeypatch):
+    """Same wiring as `client` above, but enters TestClient's own context
+    manager so its blocking portal (and the event loop it owns) persists
+    across requests within one test.
+
+    Needed specifically for a picker-style custom job (TomoExcludeTiltImages
+    here): start_custom_job schedules its work as a fire-and-forget
+    `asyncio.create_task`. Against the plain `client` fixture (never
+    entered as `with TestClient(...) as client:`), Starlette's TestClient
+    spins up a FRESH portal+event loop for every individual request and
+    tears it down as soon as that request returns -- which cancels any
+    task still in flight. Confirmed for real: the run landed in "aborted"
+    ("Aborted by user.") within about a millisecond of being started,
+    every time. Real subprocess jobs elsewhere in this file don't hit
+    this (their OS-level process runs/exits independent of asyncio task
+    supervision), so `client` stays exactly as it was for them."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    project_dir = tmp_path / "project"
+    project_manager.init_new_project(project_dir)
+    main.run_manager.set_project_dir(project_dir)
+    with TestClient(main.app) as test_client:
+        yield test_client
 
 
 @pytest.fixture
@@ -562,3 +590,116 @@ def test_terminal_websocket_refuses_connection_when_auth_enabled_without_session
                 pass
     finally:
         auth.disable()
+
+
+# ---------------------------------------------------------------------------
+# Exclude Tilt Images (TomoExcludeTiltImages) -- HTTP-level coverage for the
+# /api/exclude-tilts/* routes the reviewer popup actually calls. Module-level
+# STAR-writing coverage lives in test_exclude_tilts.py; this only exercises
+# the route wiring (run_id -> job dir/input resolution, status codes).
+# ---------------------------------------------------------------------------
+
+
+def _seed_tilt_series_project(project_dir):
+    """A CtfFind-shaped global tilt-series-set star + one per-series star,
+    the same minimal shape test_exclude_tilts.py's own `_project` fixture
+    uses -- built by hand here (not shared) since this file has its own
+    `client` fixture wiring a different project_dir per test."""
+    ctf_dir = project_dir / "CtfFind" / "job002" / "tilt_series"
+    ctf_dir.mkdir(parents=True)
+    series_df = pd.DataFrame({
+        "rlnMicrographMovieName": ["a.mrc", "b.mrc"],
+        "rlnTomoNominalStageTiltAngle": [0.0, 3.0],
+        "rlnMicrographName": ["MotionCorr/job001/a.mrc", "MotionCorr/job001/b.mrc"],
+    })
+    starfile.write({"TS_01": series_df}, ctf_dir / "TS_01.star", overwrite=True)
+    global_df = pd.DataFrame({
+        "rlnTomoName": ["TS_01"],
+        "rlnTomoTiltSeriesStarFile": ["CtfFind/job002/tilt_series/TS_01.star"],
+        "rlnVoltage": [300.0],
+    })
+    starfile.write({"global": global_df}, project_dir / "CtfFind" / "job002" / "tilt_series_ctf.star", overwrite=True)
+    return "CtfFind/job002/tilt_series_ctf.star"
+
+
+def _start_exclude_tilts_run(client):
+    in_tiltseries = _seed_tilt_series_project(main.run_manager.project_dir)
+    resp = client.post("/api/runs", json={
+        "internal_name": "TomoExcludeTiltImages",
+        "field_values": {"in_tiltseries": in_tiltseries},
+    })
+    assert resp.status_code == 200, resp.text
+    run_id = resp.json()["run_id"]
+    # "running" fires the instant the run's background task starts (see
+    # job_runner.JobRunManager._run_custom) -- BEFORE run_exclude_tilt_
+    # images has actually written its initial pass-through output.
+    # stdout_lines only gets its summary line once that coroutine returns,
+    # so waiting for both means the pass-through write has genuinely
+    # finished before this helper hands back a run_id to save/list against
+    # -- otherwise a save() issued too early can race the still-in-flight
+    # pass-through write and be silently clobbered by it.
+    deadline = time.monotonic() + 5.0
+    last = None
+    while time.monotonic() < deadline:
+        last = client.get(f"/api/runs/{run_id}").json()
+        if last.get("status") in ("running", "failed") and last.get("stdout_lines"):
+            break
+        time.sleep(0.02)
+    assert last["status"] == "running", last
+    return run_id
+
+
+def test_exclude_tilts_series_and_images_list_the_passthrough_default(picker_client):
+    run_id = _start_exclude_tilts_run(picker_client)
+
+    series = picker_client.get(f"/api/exclude-tilts/{run_id}/series")
+    assert series.status_code == 200
+    assert series.json() == {"series": [{"name": "TS_01", "n_images": 2, "n_excluded": 0}]}
+
+    images = picker_client.get(f"/api/exclude-tilts/{run_id}/images", params={"tomo_name": "TS_01"})
+    assert images.status_code == 200
+    body = images.json()["images"]
+    assert [i["movie_name"] for i in body] == ["a.mrc", "b.mrc"]
+    assert all(not i["excluded"] for i in body)
+
+
+def test_exclude_tilts_save_then_series_reflects_the_exclusion(picker_client):
+    run_id = _start_exclude_tilts_run(picker_client)
+
+    saved = picker_client.post(f"/api/exclude-tilts/{run_id}/save", json={
+        "tomo_name": "TS_01", "excluded_movie_names": ["a.mrc"],
+    })
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["n_excluded"] == 1
+
+    series = picker_client.get(f"/api/exclude-tilts/{run_id}/series").json()["series"]
+    assert series == [{"name": "TS_01", "n_images": 2, "n_excluded": 1}]
+
+    images = picker_client.get(f"/api/exclude-tilts/{run_id}/images", params={"tomo_name": "TS_01"}).json()["images"]
+    assert [i["movie_name"] for i in images if i["excluded"]] == ["a.mrc"]
+
+
+def test_exclude_tilts_images_unknown_tomogram_is_400(picker_client):
+    run_id = _start_exclude_tilts_run(picker_client)
+    resp = picker_client.get(f"/api/exclude-tilts/{run_id}/images", params={"tomo_name": "NOPE"})
+    assert resp.status_code == 400
+
+
+def test_exclude_tilts_unknown_run_id_404s(client):
+    resp = client.get("/api/exclude-tilts/no-such-run/series")
+    assert resp.status_code == 404
+
+
+def test_exclude_tilts_done_button_completes_it_like_a_picker_job(picker_client):
+    """TomoExcludeTiltImages is is_picker=True, so it shares Manualpick's
+    Done/Continue lifecycle (see test_custom_jobs.py for the STAR-writing
+    side) -- this just confirms the SAME /api/runs/{id}/resume gate that
+    used to say "only Manualpick/TomoManualPick" now also accepts it."""
+    run_id = _start_exclude_tilts_run(picker_client)
+    done = picker_client.patch(f"/api/runs/{run_id}", json={"status": "completed"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "completed"
+
+    resumed = picker_client.post(f"/api/runs/{run_id}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "running"
