@@ -2045,6 +2045,28 @@ def test_tomo_recon_part_helix_toolbox_commands_when_do_helix_checked():
     assert "--z_percentage 0.2" in cmd
 
 
+def test_tomo_recon_part_crop_size_and_snr_emitted_when_positive():
+    """Both read into a local variable before their own `if (val > 0.)`
+    guard (getCommandsTomoReconPartJob) -- same shape as Extract-subtomos'
+    crop_size/max_dose/min_frames. Confirmed running the tomography
+    tutorial's own Reconstruct particle step."""
+    raw = job_registry.raw_job("TomoReconPart")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"crop_size": 96, "snr": 2}, "TomoReconPart", "Reconstruct/job009")
+    assert "--crop 96" in cmd
+    assert "--SNR 2" in cmd
+    assert not ({"crop_size", "snr"} & set(unmapped))
+
+
+def test_tomo_recon_part_crop_size_and_snr_omitted_when_not_positive():
+    raw = job_registry.raw_job("TomoReconPart")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw, {"crop_size": -1, "snr": 0}, "TomoReconPart", "Reconstruct/job009")
+    assert "--crop" not in cmd
+    assert "--SNR" not in cmd
+    assert not ({"crop_size", "snr"} & set(unmapped))
+
+
 def test_tomo_recon_part_no_extra_commands_when_do_helix_unchecked():
     raw = job_registry.raw_job("TomoReconPart")
     cmd, _ = job_registry._build_draft_command(raw, {"do_helix": False}, "TomoReconPart", "Reconstruct/job020")

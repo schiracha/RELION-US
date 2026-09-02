@@ -2055,6 +2055,20 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         flags={
             "in_optimisation": FlagOverride("--i"), "in_particles": FlagOverride("--p"),
             "in_tomograms": FlagOverride("--t"), "in_trajectories": FlagOverride("--mot"),
+            # Both read into a local variable before their own `if (val >
+            # 0.)` guard (getCommandsTomoReconPartJob) -- same shape as
+            # Extract-subtomos' crop_size/max_dose/min_frames (see
+            # _emit_if_positive). Confirmed for real running the
+            # tomography tutorial's own Reconstruct particle step
+            # (crop_size=96; snr defaults to 0, correctly omitted either
+            # way, but was unmapped rather than correctly-omitted before
+            # this fix).
+            "crop_size": FlagOverride("--crop"),
+            "snr": FlagOverride("--SNR"),
+        },
+        numeric_transforms={
+            "crop_size": _emit_if_positive,
+            "snr": _emit_if_positive,
         },
         # do_helix's own primary-command flags (helical_nr_asu/twist/rise)
         # are already correctly auto-mapped via the generic per-option loop
