@@ -166,7 +166,12 @@ def test_save_tomo_picks_writes_annotation_and_particles(tmp_path):
     assert optset_path.is_file()
     oblocks = starfile.read(optset_path, always_dict=True)
     odf = oblocks["optimisation_set"]
-    assert odf["rlnTomoParticlesFile"].iloc[0] == "particles.star"
+    # Project-root-relative, matching rlnTomoTomogramsFile's own convention
+    # below -- a bare "particles.star" is unresolvable from where RELION
+    # jobs actually run (the project root, not job_dir). Confirmed for
+    # real: TomoSubtomo failed immediately with "MetaDataTable::read: File
+    # particles.star does not exist" before this fix.
+    assert odf["rlnTomoParticlesFile"].iloc[0] == "Picks/job006/particles.star"
     assert odf["rlnTomoTomogramsFile"].iloc[0] == "tomograms.star"
 
 

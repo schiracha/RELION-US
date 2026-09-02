@@ -352,7 +352,13 @@ def _rebuild_tomo_job_star(project_dir: Path, job_dir: Path, tomograms_star_path
         })
         starfile.write({"particles": particles_df}, particles_path, overwrite=True)
         optset_df = pd.DataFrame({
-            "rlnTomoParticlesFile": [TOMO_PARTICLES_STAR_NAME],
+            # Bare filename here (no job_dir prefix) previously left this
+            # unresolvable from where every RELION job actually runs (the
+            # PROJECT ROOT, not job_dir) -- confirmed for real: TomoSubtomo
+            # failed immediately with "MetaDataTable::read: File
+            # particles.star does not exist". rlnTomoTomogramsFile already
+            # got this right below; this just matches it.
+            "rlnTomoParticlesFile": [_project_relative(project_dir, str(particles_path))],
             "rlnTomoTomogramsFile": [_project_relative(project_dir, tomograms_star_path)],
         })
         starfile.write({"optimisation_set": optset_df}, optset_path, overwrite=True)
