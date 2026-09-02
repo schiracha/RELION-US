@@ -582,6 +582,34 @@ def test_tomo_menu_entry_ignores_a_caller_supplied_is_tomo():
     assert "--use_noDW" in cmd  # still the SPA behavior, despite fields["is_tomo"]
 
 
+def test_inimodel_infers_is_tomo_from_in_optimisation_content():
+    """Class3D/Inimodel/Autorefine/MultiBody share ONE menu entry for both
+    SPA and tomo (no TOMO_VARIANT_OF pair) -- is_tomo must be inferred from
+    real field content (an in_optimisation value), matching the same signal
+    pipeline_bridge._is_tomo_job uses at registration time. Previously this
+    was always forced False here, silently dropping sigma_tilt ("Prior
+    width on tilt angle") even when in_optimisation was genuinely set --
+    confirmed running the tomography tutorial's own De novo 3D model
+    generation step."""
+    raw = job_registry.raw_job("Inimodel")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {"in_optimisation": "Extract/job007/optimisation_set.star", "sigma_tilt": 10},
+        "Inimodel", "InitialModel/job008",
+    )
+    assert "--sigma_tilt 10" in cmd
+    assert "sigma_tilt" not in unmapped
+
+
+def test_inimodel_spa_input_does_not_infer_is_tomo():
+    """The SPA-style fn_img input must NOT trip the same inference -- only
+    a real in_optimisation value (or use_direct_entries) should."""
+    raw = job_registry.raw_job("Inimodel")
+    cmd, _ = job_registry._build_draft_command(
+        raw, {"fn_img": "Extract/job004/particles.star", "sigma_tilt": 10}, "Inimodel", "InitialModel/job008")
+    assert "--sigma_tilt" not in cmd
+
+
 def test_is_continue_combined_with_another_term_stays_unmapped():
     """A condition merely containing "!is_continue" alongside something else
     (e.g. "!is_continue && else") must NOT be treated as unconditional --

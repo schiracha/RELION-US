@@ -1839,7 +1839,19 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "do_run_C1": FlagOverride("--sym C1"),
             # `if (do_solvent) command += " --flatten_solvent ";` (~3529).
             "do_solvent": FlagOverride("--flatten_solvent"),
+            # `if (is_tomo) { ...; float sigma = sigma_tilt.getNumber(...);
+            # if (sigma > 0.) command += " --sigma_tilt " + sigma_tilt.
+            # getString(); }` -- read into a local variable ("sigma") before
+            # its own >0 guard, same shape as TomoSubtomo's crop_size/
+            # max_dose/min_frames (see _emit_if_positive). Needs BOTH the
+            # condition here (is_tomo -- now correctly inferred from real
+            # in_optimisation content, not always-False) and the numeric
+            # transform below; neither alone is enough. Confirmed for real
+            # running the tomography tutorial's own De novo 3D model
+            # generation step with its own "Prior width on tilt angle: 10".
+            "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
         },
+        numeric_transforms={"sigma_tilt": _emit_if_positive},
         suppress=frozenset({"use_direct_entries", "use_gpu"}),
     ),
     "Class3D": JobDraftOverride(

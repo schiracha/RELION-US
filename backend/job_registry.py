@@ -491,9 +491,31 @@ def _build_draft_command(
     own docstring). This overwrites any is_tomo already in field_values --
     internal_name is the single source of truth now, not a caller-supplied
     value.
+
+    For the Class3D/Inimodel/Autorefine/MultiBody family (one menu entry
+    serving both SPA and tomo, no TOMO_VARIANT_OF pair), is_tomo instead
+    comes from the SAME field-content signal pipeline_bridge._is_tomo_job
+    uses to write job.star's _rlnJobIsTomo at registration time (an
+    in_optimisation value, or "OR: use direct entries?" checked) -- see
+    that function's own docstring for why this matters: RELION's own
+    pipeliner validates a registered job against completely different
+    rules depending on this flag. Previously this path always forced
+    is_tomo False for these four job types regardless of input, silently
+    dropping every is_tomo-gated field (e.g. Inimodel's sigma_tilt, "Prior
+    width on tilt angle") whenever they were actually used against real
+    tomography input -- confirmed running the tomography tutorial's own
+    De novo 3D model generation step. Deliberately NOT reusing _is_tomo_job
+    outright: its own third clause (`or bool(values.get("is_tomo"))`) exists
+    for pipeline_bridge's own call sites, where field_values["is_tomo"] may
+    already have been set correctly by an earlier step -- here, field_values
+    is raw caller input that must NOT carry a stray is_tomo through (see
+    test_tomo_menu_entry_ignores_a_caller_supplied_is_tomo).
     """
     base_name, is_tomo_variant = _resolve_tomo_variant(internal_name)
-    field_values = {**field_values, "is_tomo": is_tomo_variant}
+    field_values = {
+        **field_values,
+        "is_tomo": is_tomo_variant or bool(field_values.get("in_optimisation")) or bool(field_values.get("use_direct_entries")),
+    }
     program_override_value = draft_program_override(base_name, field_values)
     program = program_override_value or raw_job.get("program_guess") or "<unknown_program>"
     # A few jobs (DynaMight, ModelAngelo, External) don't hard-code a
