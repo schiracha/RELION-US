@@ -601,6 +601,22 @@ def test_inimodel_infers_is_tomo_from_in_optimisation_content():
     assert "sigma_tilt" not in unmapped
 
 
+def test_class3d_and_autorefine_sigma_tilt_emitted_in_tomo_mode():
+    """Same fix as Inimodel's own sigma_tilt, applied proactively to its
+    two siblings in the same one-menu-entry-for-both-modes family before
+    hitting them later in the tomography tutorial (Initial 3D refinement
+    uses Autorefine; 3D classification uses Class3D)."""
+    for job in ("Class3D", "Autorefine"):
+        raw = job_registry.raw_job(job)
+        cmd, unmapped = job_registry._build_draft_command(
+            raw,
+            {"in_optimisation": "Extract/job007/optimisation_set.star", "sigma_tilt": 10},
+            job, "X/job000",
+        )
+        assert "--sigma_tilt 10" in cmd, job
+        assert "sigma_tilt" not in unmapped, job
+
+
 def test_inimodel_spa_input_does_not_infer_is_tomo():
     """The SPA-style fn_img input must NOT trip the same inference -- only
     a real in_optimisation value (or use_direct_entries) should."""

@@ -1910,6 +1910,14 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # self-guarded boolean, only ever reached inside do_helix's
             # branch (is_continue is always false in this app).
             "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+            # Same shape as Inimodel's own sigma_tilt (see that entry's own
+            # citation) -- a DIFFERENT field from range_tilt above, which
+            # also happens to map to the same real "--sigma_tilt" flag text
+            # under a completely different (do_helix) branch; real RELION
+            # keeps these mutually exclusive by convention (is_tomo vs
+            # do_helix are different job modes), not by any guard this app
+            # enforces either.
+            "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
         },
         numeric_transforms={
             "sigma_angles": _div_by_3,
@@ -1917,6 +1925,7 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "range_psi": _clamp_0_90_then_third,
             "range_rot": _clamp_0_90_then_third,
             "helical_range_distance": _third_if_positive,
+            "sigma_tilt": _emit_if_positive,
         },
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
@@ -1960,9 +1969,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # plain do_helix boolean gate here (~4580-4586).
             "helical_range_distance": FlagOverride("--helical_sigma_distance", condition="do_helix"),
             "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+            # Same shape as Inimodel/Class3D's own sigma_tilt (see
+            # Inimodel's entry for the full citation).
+            "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
         },
         numeric_transforms={
             "helical_range_distance": _third_if_positive,
+            "sigma_tilt": _emit_if_positive,
         },
         # `if (!is_continue) { command += " --auto_refine --split_random_
         # halves"; ... }` (~4357-4359) -- unconditional in this app's
