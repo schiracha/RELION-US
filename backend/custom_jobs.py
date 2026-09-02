@@ -433,8 +433,7 @@ async def run_exclude_tilt_images(project_dir: Path, values: dict, job_dir: Path
         raise ValueError("Input tilt series field is required.")
 
     def work():
-        removed = exclude_tilts.clear_exclusions(job_dir)
-        n_series = exclude_tilts.write_passthrough(project_dir, job_dir, in_tiltseries)
+        removed, n_series = exclude_tilts.reset_and_write_passthrough(project_dir, job_dir, in_tiltseries)
         cleared_note = f"Cleared {removed} existing output file(s) from a previous run.\n" if removed else ""
         return (
             f"{cleared_note}"

@@ -41,6 +41,7 @@ user opens the reviewer at all.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +75,30 @@ class ExcludeTiltsError(Exception):
     the API turns this into a 400."""
 
 
+# Per-job_dir lock guarding every function below that reads-then-writes this
+# job's own output files (write_passthrough, clear_exclusions,
+# save_tilt_series_exclusions). Job start (custom_jobs.run_exclude_tilt_
+# images, via asyncio.to_thread) and a save/overwrite request from the
+# browser (main.py's plain `def` endpoints, which FastAPI already runs in
+# its own threadpool) can genuinely run concurrently on separate threads --
+# without this, one could delete/overwrite files the other is mid-read on
+# (e.g. clear_exclusions unlinking selected_tilt_series.star while a save's
+# _upsert_job_global_star is reading it), corrupting or losing other tilt
+# series' already-saved state.
+_JOB_LOCKS: dict[str, threading.Lock] = {}
+_JOB_LOCKS_GUARD = threading.Lock()
+
+
+def _job_lock(job_dir: Path) -> threading.Lock:
+    key = str(Path(job_dir).resolve())
+    with _JOB_LOCKS_GUARD:
+        lock = _JOB_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _JOB_LOCKS[key] = lock
+        return lock
+
+
 def _sanitize(name: str) -> str:
     """A tilt series name, made safe as a flat filename fragment -- same
     rule as manual_pick._sanitize_relpath, kept collision-free even though
@@ -84,7 +109,13 @@ def _sanitize(name: str) -> str:
 def _read_star_blocks(path: Path) -> dict:
     import starfile
 
-    return starfile.read(path, always_dict=True)
+    # rlnTomoName is often purely numeric (e.g. "01") in real tutorial
+    # datasets -- without this, starfile/pandas infers it as an int column,
+    # silently corrupting any name with a leading zero or non-numeric
+    # variant on round-trip (confirmed against a real CtfFind tilt_series_
+    # ctf.star: rlnTomoName values like "TS_01" survive, but a purely
+    # numeric project's "01" would come back as 1).
+    return starfile.read(path, always_dict=True, parse_as_string=[GLOBAL_TOMO_NAME_COL])
 
 
 def _read_global_table(project_dir: Path, in_tiltseries: str):
@@ -158,50 +189,88 @@ def _read_job_series(job_dir: Path, tomo_name: str):
 def _write_series_output(project_dir: Path, job_dir: Path, tomo_name: str, global_row, df) -> Path:
     """Write one tilt series' own STAR (the block-name/filename convention a
     real relion_tomo_exclude_tilt_images run produces: data_<TomoName>, at
-    <job_dir>/tilt_series/<TomoName>.star) and upsert this tomogram's row in
-    the job-level selected_tilt_series.star (data_global), pointing at the
-    file just written rather than the original input's copy."""
+    <job_dir>/tilt_series/<TomoName>.star) -- ALWAYS, even with zero rows
+    (an empty per-image STAR is what tells _read_job_series/list_images this
+    series has been explicitly fully excluded, as opposed to never touched
+    at all) -- and update this tomogram's row in the job-level
+    selected_tilt_series.star (data_global). A fully-excluded series is
+    DROPPED from that global table rather than kept with zero rows, matching
+    real RELION's own RlnTiltSeriesSet.write_star_file convention (a
+    downstream job like Reconstruct Tomograms has nothing to do with a tilt
+    series that has no images left)."""
     import starfile
 
     job_dir = Path(job_dir)
     series_path = _job_series_path(job_dir, tomo_name)
     series_path.parent.mkdir(parents=True, exist_ok=True)
     starfile.write({tomo_name: df.reset_index(drop=True)}, series_path, overwrite=True)
-    _upsert_job_global_star(project_dir, job_dir, tomo_name, global_row, series_path)
+    if len(df) > 0:
+        _upsert_job_global_star(project_dir, job_dir, tomo_name, global_row, series_path)
+    else:
+        _remove_from_job_global_star(job_dir, tomo_name)
     return series_path
 
 
-def _upsert_job_global_star(project_dir: Path, job_dir: Path, tomo_name: str, global_row, series_path: Path) -> None:
-    import starfile
-
+def _load_job_global_rows(job_dir: Path) -> dict:
+    """This job's own already-written selected_tilt_series.star, as
+    {tomo_name: row_dict}. A read failure (missing/corrupt file, unexpected
+    shape) is NOT swallowed here -- letting it propagate is safer than
+    silently returning {}, which would make the caller's next write discard
+    every other tilt series' already-saved row (confirmed for real:
+    write_passthrough's loop wrote only the LAST series processed, before
+    this was ever guarded, because a broad `except Exception` reset the
+    whole accumulator on any hiccup)."""
     job_dir = Path(job_dir)
     job_star = job_dir / JOB_GLOBAL_STAR_NAME
     rows: dict[str, dict] = {}
     if job_star.is_file():
-        try:
-            blocks = _read_star_blocks(job_star)
-            # NOT `blocks.get(...) or next(...)` -- a DataFrame's truthiness
-            # is ambiguous (raises ValueError), which the except below would
-            # silently swallow, resetting `rows` to {} and losing every
-            # OTHER tilt series' row already written (confirmed for real:
-            # write_passthrough's loop wrote only the LAST series processed
-            # before this fix, discarding the rest on each subsequent call).
-            existing = blocks.get(JOB_GLOBAL_BLOCK_NAME)
-            if existing is None:
-                existing = next(iter(blocks.values()), None)
-            if existing is not None and GLOBAL_TOMO_NAME_COL in existing.columns:
-                for _, r in existing.iterrows():
-                    rows[str(r[GLOBAL_TOMO_NAME_COL])] = r.to_dict()
-        except Exception:  # noqa: BLE001
-            rows = {}
+        blocks = _read_star_blocks(job_star)
+        existing = blocks.get(JOB_GLOBAL_BLOCK_NAME)
+        if existing is None:
+            existing = next(iter(blocks.values()), None)
+        if existing is not None and GLOBAL_TOMO_NAME_COL in existing.columns:
+            for _, r in existing.iterrows():
+                rows[str(r[GLOBAL_TOMO_NAME_COL])] = r.to_dict()
+    return rows
 
+
+def _write_job_global_rows(job_dir: Path, rows: dict) -> None:
+    import starfile
+
+    job_star = Path(job_dir) / JOB_GLOBAL_STAR_NAME
+    if not rows:
+        # No tilt series has any kept image left -- nothing for a
+        # downstream job to read. Drop the file rather than writing a
+        # column-less STAR (there is no schema left to derive columns
+        # from once every row is gone).
+        if job_star.is_file():
+            job_star.unlink()
+        return
+    df = pd.DataFrame(list(rows.values()))
+    starfile.write({JOB_GLOBAL_BLOCK_NAME: df}, job_star, overwrite=True)
+
+
+def _upsert_job_global_star(project_dir: Path, job_dir: Path, tomo_name: str, global_row, series_path: Path) -> None:
+    rows = _load_job_global_rows(job_dir)
     new_row = global_row.to_dict()
     new_row[GLOBAL_TOMO_NAME_COL] = str(tomo_name)
     new_row[GLOBAL_STARFILE_COL] = str(series_path.relative_to(project_dir))
     rows[str(tomo_name)] = new_row
+    _write_job_global_rows(job_dir, rows)
 
-    df = pd.DataFrame(list(rows.values()))
-    starfile.write({JOB_GLOBAL_BLOCK_NAME: df}, job_star, overwrite=True)
+
+def _remove_from_job_global_star(job_dir: Path, tomo_name: str) -> None:
+    rows = _load_job_global_rows(job_dir)
+    rows.pop(str(tomo_name), None)
+    _write_job_global_rows(job_dir, rows)
+
+
+def _write_passthrough_locked(project_dir: Path, job_dir: Path, in_tiltseries: str) -> int:
+    names = list_tilt_series(project_dir, in_tiltseries)
+    for name in names:
+        df, row = _load_original_series(project_dir, in_tiltseries, name)
+        _write_series_output(project_dir, job_dir, name, row, df)
+    return len(names)
 
 
 def write_passthrough(project_dir: Path, job_dir: Path, in_tiltseries: str) -> int:
@@ -210,11 +279,8 @@ def write_passthrough(project_dir: Path, job_dir: Path, in_tiltseries: str) -> i
     Called once at job start (custom_jobs.run_exclude_tilt_images), and
     again (via clear_exclusions first) on Overwrite. Returns the number of
     tilt series written."""
-    names = list_tilt_series(project_dir, in_tiltseries)
-    for name in names:
-        df, row = _load_original_series(project_dir, in_tiltseries, name)
-        _write_series_output(project_dir, job_dir, name, row, df)
-    return len(names)
+    with _job_lock(job_dir):
+        return _write_passthrough_locked(project_dir, job_dir, in_tiltseries)
 
 
 def list_images(project_dir: Path, job_dir: Path, in_tiltseries: str, tomo_name: str) -> list[dict]:
@@ -282,7 +348,8 @@ def save_tilt_series_exclusions(
     filtered = df[mask]
     if TILT_ANGLE_COL in filtered.columns:
         filtered = filtered.sort_values(TILT_ANGLE_COL, kind="stable")
-    series_path = _write_series_output(project_dir, job_dir, tomo_name, global_row, filtered)
+    with _job_lock(job_dir):
+        series_path = _write_series_output(project_dir, job_dir, tomo_name, global_row, filtered)
     return {
         "series_path": str(series_path),
         "n_total": len(df),
@@ -291,14 +358,7 @@ def save_tilt_series_exclusions(
     }
 
 
-def clear_exclusions(job_dir: Path) -> int:
-    """Delete everything this job has written -- every per-series STAR plus
-    the job-level selected_tilt_series.star. Called at the start of an
-    Overwrite (see custom_jobs.run_exclude_tilt_images), mirroring manual_
-    pick.clear_spa_picks/clear_tomo_picks: real RELION's own "Overwrite"
-    re-runs into the SAME directory, so a fresh session needs a clean slate.
-    A fresh (never-run) job's directory has nothing to clear, so this is a
-    safe no-op there too. Returns how many files were removed."""
+def _clear_exclusions_locked(job_dir: Path) -> int:
     job_dir = Path(job_dir)
     removed = 0
     global_star = job_dir / JOB_GLOBAL_STAR_NAME
@@ -315,3 +375,29 @@ def clear_exclusions(job_dir: Path) -> int:
         except OSError:
             pass
     return removed
+
+
+def clear_exclusions(job_dir: Path) -> int:
+    """Delete everything this job has written -- every per-series STAR plus
+    the job-level selected_tilt_series.star. Called at the start of an
+    Overwrite (see custom_jobs.run_exclude_tilt_images), mirroring manual_
+    pick.clear_spa_picks/clear_tomo_picks: real RELION's own "Overwrite"
+    re-runs into the SAME directory, so a fresh session needs a clean slate.
+    A fresh (never-run) job's directory has nothing to clear, so this is a
+    safe no-op there too. Returns how many files were removed."""
+    with _job_lock(job_dir):
+        return _clear_exclusions_locked(job_dir)
+
+
+def reset_and_write_passthrough(project_dir: Path, job_dir: Path, in_tiltseries: str) -> tuple[int, int]:
+    """clear_exclusions() + write_passthrough() as ONE atomic step under a
+    single lock acquisition -- what job start (custom_jobs.
+    run_exclude_tilt_images) actually needs. Calling the two public
+    functions back-to-back would release the lock in between them, leaving
+    a window where a concurrent save request could write into (or read out
+    of) a job directory that has been cleared but not yet reseeded. Returns
+    (n_removed, n_series_written)."""
+    with _job_lock(job_dir):
+        removed = _clear_exclusions_locked(job_dir)
+        n_series = _write_passthrough_locked(project_dir, job_dir, in_tiltseries)
+    return removed, n_series

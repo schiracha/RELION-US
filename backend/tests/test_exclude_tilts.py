@@ -71,6 +71,27 @@ def test_list_tilt_series_missing_star_raises(tmp_path):
         exclude_tilts.list_tilt_series(tmp_path, "nope.star")
 
 
+def test_purely_numeric_tomo_name_survives_round_trip(tmp_path):
+    """rlnTomoName is free text in real RELION-5 tomography STAR files, and
+    some projects name tomograms with plain digits (e.g. "01") -- without
+    parse_as_string, starfile/pandas would infer an int column, silently
+    turning "01" into 1 and breaking every name-keyed lookup in this
+    module."""
+    project = _project(tmp_path, series={"01": (["a.mrc", "b.mrc"], [0.0, 3.0])})
+    assert exclude_tilts.list_tilt_series(project, IN_TILTSERIES) == ["01"]
+    job_dir = project / "ExcludeTiltImages" / "job003"
+    exclude_tilts.write_passthrough(project, job_dir, IN_TILTSERIES)
+    # Read back the way exclude_tilts.py itself reads (parse_as_string on
+    # rlnTomoName) -- a raw starfile.read of the on-disk STAR text, with no
+    # such hint, would infer this column as int (same ambiguity real
+    # RELION's own STAR reader has to guard against), which is exactly the
+    # bug this test exists to catch.
+    gdf = exclude_tilts._read_star_blocks(job_dir / "selected_tilt_series.star")["global"]
+    assert list(gdf["rlnTomoName"]) == ["01"]
+    images = exclude_tilts.list_images(project, job_dir, IN_TILTSERIES, "01")
+    assert len(images) == 2
+
+
 def test_list_images_before_any_save_reports_nothing_excluded(tmp_path):
     project = _project(tmp_path, series={
         "TS_01": (["a.mrc", "b.mrc", "c.mrc"], [0.0, 3.0, -3.0]),
@@ -178,7 +199,14 @@ def test_save_exclusions_never_accumulates_across_calls(tmp_path):
     assert excluded == {"c.mrc"}
 
 
-def test_save_exclusions_all_images_leaves_zero_rows_but_keeps_job_star(tmp_path):
+def test_save_exclusions_all_images_leaves_zero_rows_and_drops_from_global_star(tmp_path):
+    """A fully-excluded tilt series must be DROPPED from the job's global
+    selected_tilt_series.star -- matching real RELION's own RlnTiltSeriesSet.
+    write_star_file, which never emits a row for an empty tilt series (a
+    downstream job has nothing to do with a series that has no images
+    left). The per-series STAR itself is still written, with zero rows --
+    that's what lets list_images/series_summary tell "fully excluded" apart
+    from "never touched"."""
     project = _project(tmp_path, series={"TS_01": (["a.mrc", "b.mrc"], [0.0, 3.0])})
     job_dir = project / "ExcludeTiltImages" / "job003"
     result = exclude_tilts.save_tilt_series_exclusions(
@@ -186,8 +214,21 @@ def test_save_exclusions_all_images_leaves_zero_rows_but_keeps_job_star(tmp_path
     assert result["n_kept"] == 0
     df = starfile.read(Path(result["series_path"]), always_dict=True)["TS_01"]
     assert len(df) == 0
-    gdf = starfile.read(job_dir / "selected_tilt_series.star", always_dict=True)["global"]
-    assert list(gdf["rlnTomoName"]) == ["TS_01"]
+    assert not (job_dir / "selected_tilt_series.star").exists()
+
+
+def test_list_images_all_excluded_after_fully_excluding_a_series(tmp_path):
+    """Regression: once a series has been explicitly fully excluded (empty
+    per-series STAR written, see above), list_images must show every image
+    as excluded -- not silently default back to "kept" just because the
+    tomogram's row is gone from the global star."""
+    project = _project(tmp_path, series={"TS_01": (["a.mrc", "b.mrc"], [0.0, 3.0])})
+    job_dir = project / "ExcludeTiltImages" / "job003"
+    exclude_tilts.save_tilt_series_exclusions(project, job_dir, IN_TILTSERIES, "TS_01", ["a.mrc", "b.mrc"])
+    images = exclude_tilts.list_images(project, job_dir, IN_TILTSERIES, "TS_01")
+    assert all(i["excluded"] for i in images)
+    summary = exclude_tilts.series_summary(project, job_dir, IN_TILTSERIES)
+    assert {s["name"]: s["n_excluded"] for s in summary} == {"TS_01": 2}
 
 
 def test_save_exclusions_one_series_does_not_disturb_another(tmp_path):
@@ -220,6 +261,54 @@ def test_clear_exclusions_removes_everything(tmp_path):
     assert removed == 3  # global star + 2 per-series files
     assert not (job_dir / "selected_tilt_series.star").exists()
     assert not (job_dir / "tilt_series").exists()
+
+
+def test_reset_and_write_passthrough_is_atomic_under_a_concurrent_save(tmp_path):
+    """A save request racing job start's clear+reseed (both run on their own
+    threads -- see main.py's plain `def` endpoints and custom_jobs.
+    run_exclude_tilt_images's asyncio.to_thread) must never observe a
+    half-cleared job directory or corrupt the global star. Runs
+    reset_and_write_passthrough and save_tilt_series_exclusions from real
+    threads many times over and checks the global star is always
+    well-formed and never loses a series that a passthrough write is
+    responsible for."""
+    import threading
+
+    project = _project(tmp_path, series={
+        "TS_01": (["a.mrc", "b.mrc"], [0.0, 3.0]),
+        "TS_02": (["x.mrc", "y.mrc"], [0.0, 3.0]),
+    })
+    job_dir = project / "ExcludeTiltImages" / "job003"
+    exclude_tilts.write_passthrough(project, job_dir, IN_TILTSERIES)
+
+    errors = []
+
+    def reset():
+        try:
+            for _ in range(20):
+                exclude_tilts.reset_and_write_passthrough(project, job_dir, IN_TILTSERIES)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def save():
+        try:
+            for _ in range(20):
+                exclude_tilts.save_tilt_series_exclusions(project, job_dir, IN_TILTSERIES, "TS_02", ["x.mrc"])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reset), threading.Thread(target=save)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    # Whatever the final interleaving, the global star must still be a
+    # well-formed STAR with a row per tilt series that has kept images --
+    # never a partial/corrupted table missing an unrelated series.
+    gdf = exclude_tilts._read_star_blocks(job_dir / "selected_tilt_series.star")["global"]
+    assert set(gdf["rlnTomoName"]) <= {"TS_01", "TS_02"}
 
 
 def test_clear_exclusions_on_a_fresh_job_dir_is_a_noop(tmp_path):
