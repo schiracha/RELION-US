@@ -1563,6 +1563,83 @@ def _motioncorr_grouping_for_ps_flags(field_values: dict, output_subdir: str) ->
     return ["--grouping_for_ps", str(grouping)]
 
 
+# Select is a 5-way mutually-exclusive branch (do_filaments /
+# do_remove_duplicates / do_select_values-or-do_discard-or-do_split /
+# do_class_ranker / interactive-fn_model-or-fn_mic-or-neither), each of
+# which shells out to a DIFFERENT real program with its OWN --o target --
+# see getCommandsSelectJob, src/pipeline_jobs.cpp ~2820-3050. The extractor's
+# program_guess only ever sees the FIRST command="..." literal it scans
+# (`` `which relion_filament_selection` ``, the do_filaments branch), which
+# is wrong for every other branch -- confirmed for real: building a draft
+# for "remove duplicate particles" (this app's Duplicate Particles Removal
+# step) produced `relion_filament_selection --o Select/jobNNN/ --i ...
+# --remove_duplicates 30.0`, an unrunnable command (wrong binary, and a bare
+# directory instead of the real `--o Select/jobNNN/particles.star`).
+def _select_program_override(field_values: dict) -> Optional[str]:
+    """The real per-branch program (see module comment above). The
+    "interactive" branch (`` `which relion_display` `` with a --gui flag, a
+    desktop window) is left unhandled -- same as Manualpick/ExcludeTiltImages
+    before this app grew dedicated browser-based replacements for those, a
+    genuinely different UI paradigm this override doesn't attempt."""
+    if field_values.get("do_filaments"):
+        return "`which relion_filament_selection`"
+    if field_values.get("do_remove_duplicates"):
+        return "`which relion_star_handler`"
+    if field_values.get("do_select_values") or field_values.get("do_discard") or field_values.get("do_split"):
+        return "`which relion_star_handler`"
+    if field_values.get("do_class_ranker"):
+        return "`which relion_class_ranker`"
+    return None  # interactive branch: leave program_guess (wrong, pre-existing) as-is
+
+
+def _select_suppress_output_flag(field_values: dict) -> bool:
+    """Every non-interactive branch computes its own --o (or, for
+    do_filaments, "-o" -- single dash, see below) with a real filename
+    suffix, never the bare output directory the generic mechanism would
+    emit -- see _select_extra_flags for the exact per-branch literal."""
+    return not _select_is_interactive(field_values)
+
+
+def _select_is_interactive(field_values: dict) -> bool:
+    return not (
+        field_values.get("do_filaments")
+        or field_values.get("do_remove_duplicates")
+        or field_values.get("do_select_values")
+        or field_values.get("do_discard")
+        or field_values.get("do_split")
+        or field_values.get("do_class_ranker")
+    )
+
+
+def _select_extra_flags(field_values: dict, output_subdir: str) -> list:
+    """The real --o (or do_filaments' -o) target for each branch, plus the
+    do_class_ranker branch's other pure-literal flags (--fn_sel_parts/
+    --fn_sel_classavgs/--fn_root/--do_granularity_features/--auto_select --
+    none tied to a joboption var, so the extractor never saw them at all)."""
+    if not output_subdir or _select_is_interactive(field_values):
+        return []
+    subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
+    if field_values.get("do_filaments"):
+        # `command += " -o " + outputname;` (~2843) -- single dash, unlike
+        # every other branch's "--o".
+        return ["-o", shlex.quote(subdir)]
+    if field_values.get("do_remove_duplicates"):
+        return ["--o", shlex.quote(subdir + "particles.star")]
+    if field_values.get("do_select_values") or field_values.get("do_discard") or field_values.get("do_split"):
+        fn_out = "micrographs.star" if field_values.get("fn_mic") else "particles.star"
+        return ["--o", shlex.quote(subdir + fn_out)]
+    if field_values.get("do_class_ranker"):
+        return [
+            "--o", shlex.quote(subdir),
+            "--fn_sel_parts", "particles.star",
+            "--fn_sel_classavgs", "class_averages.star",
+            "--fn_root", "rank",
+            "--do_granularity_features",
+            "--auto_select",
+        ]
+    return []
+
+
 DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # getCommandsTomoImportJob, DEFAULT branch (do_coords == false):
     #   command = "relion_python_tomo_import SerialEM ..."
@@ -2605,7 +2682,17 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # this condition only needs to encode the ADDITIONAL fn_model
             # substring check (issue #23).
             "do_recenter": FlagOverride("--recenter", condition='fn_model.contains("Class2D/")'),
+            # `if (joboptions["image_angpix"].getNumber(error_message) > 0)
+            # command += " --image_angpix " + ...;` (~2830, do_remove_
+            # duplicates branch) -- read into its own ">0" guard rather than
+            # a self-guarded presence check, same blind spot as TomoReconPart's
+            # crop_size/snr (see _emit_if_positive).
+            "image_angpix": FlagOverride("--image_angpix", condition="do_remove_duplicates"),
         },
+        numeric_transforms={"image_angpix": _emit_if_positive},
+        program_override=_select_program_override,
+        suppress_output_flag=_select_suppress_output_flag,
+        extra_flags=_select_extra_flags,
     ),
     "Subtract": JobDraftOverride(
         flags={

@@ -2194,6 +2194,69 @@ def test_localres_relion_mode_with_mpi_still_gets_the_mpi_binary_and_prefix():
     assert "`which relion_postprocess_mpi`" in cmd
 
 
+def test_select_remove_duplicates_uses_star_handler_not_filament_selection():
+    """Select is a 5-way branch job (do_filaments/do_remove_duplicates/
+    do_select_values-or-discard-or-split/do_class_ranker/interactive); the
+    extractor's program_guess only ever sees the FIRST command="..." literal
+    (do_filaments' `` `which relion_filament_selection` ``), which is wrong
+    for every other branch -- confirmed for real building this app's own
+    Duplicate Particles Removal tutorial step (do_remove_duplicates)."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_data": "Refine3D/job010/run_data.star",
+            "do_remove_duplicates": True, "duplicate_threshold": 30.0,
+        },
+        "Select", "Select/job011/",
+    )
+    assert cmd == (
+        "`which relion_star_handler` --i Refine3D/job010/run_data.star "
+        "--remove_duplicates 30.0 --o Select/job011/particles.star"
+    )
+    assert "fn_data" not in unmapped
+    assert "duplicate_threshold" not in unmapped
+
+
+def test_select_remove_duplicates_with_positive_image_angpix():
+    raw = job_registry.raw_job("Select")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_data": "Refine3D/job010/run_data.star",
+            "do_remove_duplicates": True, "duplicate_threshold": 30.0,
+            "image_angpix": 1.35,
+        },
+        "Select", "Select/job011/",
+    )
+    assert "--image_angpix 1.35" in cmd
+
+
+def test_select_split_values_branch_uses_star_handler_and_particles_out():
+    raw = job_registry.raw_job("Select")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"fn_data": "particles.star", "do_split": True, "nr_split": 2},
+        "Select", "Select/job012/",
+    )
+    assert cmd.startswith("`which relion_star_handler`")
+    assert "--o Select/job012/particles.star" in cmd
+
+
+def test_select_filaments_branch_uses_single_dash_o():
+    """do_filaments' own `command += " -o " + outputname;` is a single-dash
+    -o, unlike every other branch's --o -- confirmed against getCommandsSelectJob."""
+    raw = job_registry.raw_job("Select")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"fn_model": "InitialModel/job008/run_optimiser.star", "do_filaments": True},
+        "Select", "Select/job013/",
+    )
+    assert cmd.startswith("`which relion_filament_selection`")
+    assert " -o Select/job013/ " in f" {cmd} "
+    assert "--o" not in cmd
+
+
 def test_tomopick_full_three_command_sequence():
     raw = job_registry.raw_job("TomoPickTomograms")
     cmd, _ = job_registry._build_draft_command(
