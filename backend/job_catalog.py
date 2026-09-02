@@ -2199,7 +2199,11 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # draft carried --float16 but never --grouping_for_ps, and
         # CTFFIND-4.1 cannot read float16 images without a power-spectrum
         # sum to fall back on.
-        suppress=frozenset({"do_save_ps"}),
+        # group_for_ps's own value is fully consumed by the computed
+        # --grouping_for_ps above (there's no separate --group_for_ps flag
+        # of its own), so it's suppressed here too rather than showing up
+        # in unmapped_fields as if nothing used it.
+        suppress=frozenset({"do_save_ps", "group_for_ps"}),
         extra_flags=_motioncorr_grouping_for_ps_flags,
     ),
     "Ctffind": JobDraftOverride(
