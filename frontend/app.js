@@ -636,9 +636,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <button class="btn" data-action="collapse" title="Minimize this window">− Collapse</button>
       <button class="btn" data-action="close" title="Close this window">✕ Close</button>
       <button class="btn" data-action="note" title="Edit note">📝 Note</button>
-      ${def.is_picker ? '<button class="btn primary" data-action="picker" hidden title="Open the in-browser picker for this job — double-click to add a pick, right-click to delete one">🔍 Open Picker</button>' : ""}
-      ${def.is_picker ? '<button class="btn" data-action="continue-picking" hidden title="Resume this picking session — keeps every pick already saved">▶ Continue</button>' : ""}
-      <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? "Start a NEW picking session in this same job — deletes every pick already saved here. Use Continue instead to keep them." : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
+      ${def.is_picker ? `<button class="btn primary" data-action="picker" hidden title="${
+        def.picker_kind === "excludetilts"
+          ? "Open the in-browser tilt-image reviewer for this job — check/uncheck images to exclude them"
+          : "Open the in-browser picker for this job — double-click to add a pick, right-click to delete one"
+      }">${def.picker_kind === "excludetilts" ? "🔍 Open Reviewer" : "🔍 Open Picker"}</button>` : ""}
+      ${def.is_picker ? `<button class="btn" data-action="continue-picking" hidden title="Resume this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — keeps everything already saved">▶ Continue</button>` : ""}
+      <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? `Start a NEW ${def.picker_kind === "excludetilts" ? "review" : "picking"} session in this same job — discards everything already saved here. Use Continue instead to keep it.` : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
       <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
       <button class="btn" data-action="mark-finished" hidden title="Manually mark as finished">✓ Mark Finished</button>
@@ -668,7 +672,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     <div class="command-row active" data-role="command-row">
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
-        ${def.is_picker ? '<button class="btn primary" data-role="done-btn" hidden title="Finish this picking session — marks the job complete, including in RELION\'s own pipeline">✓ Done</button>' : ""}
+        ${def.is_picker ? `<button class="btn primary" data-role="done-btn" hidden title="Finish this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — marks the job complete, including in RELION's own pipeline">✓ Done</button>` : ""}
         <span class="status-line" data-role="status-line"></span>
       </div>
     </div>` : `
@@ -1273,16 +1277,21 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   if (pickerBtn) {
     pickerBtn.addEventListener("click", () => {
       if (!currentRun) return;
-      const sourceKey = def.picker_kind === "spa" ? "fn_in" : "in_tomoset";
+      const kind = def.picker_kind;
+      const sourceKey = kind === "spa" ? "fn_in" : kind === "excludetilts" ? "in_tiltseries" : "in_tomoset";
       const sourcePath = (currentRun.field_values || {})[sourceKey];
       if (!sourcePath) {
-        errorDialog(
-          `This job has no ${sourceKey === "fn_in" ? "input micrographs" : "input tomograms.star"} `
-          + `recorded to pick against.`
-        );
+        const label = sourceKey === "fn_in" ? "input micrographs"
+          : sourceKey === "in_tiltseries" ? "input tilt series STAR"
+          : "input tomograms.star";
+        errorDialog(`This job has no ${label} recorded to pick against.`);
         return;
       }
-      openVisualizer({ runId: currentRun.run_id, kind: def.picker_kind, sourcePath });
+      if (kind === "excludetilts") {
+        openExcludeTiltsEditor({ runId: currentRun.run_id, sourcePath });
+      } else {
+        openVisualizer({ runId: currentRun.run_id, kind, sourcePath });
+      }
     });
   }
 
@@ -4652,6 +4661,164 @@ async function openVisualizer(pickingContext = null) {
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", () => openVisualizer());
+
+// ---- Exclude Tilt Images: the in-browser tilt-image reviewer ------------
+// Opened from a TomoExcludeTiltImages job popup's "Open Reviewer" button
+// (def.picker_kind === "excludetilts" -- see openJobPopup's pickerBtn
+// wiring). Replaces relion_tomo_exclude_tilt_images' own napari desktop
+// window (no headless flag at all) with a plain checklist: one tilt series
+// at a time, each of its images as a thumbnail + checkbox row. Checked =
+// kept, unchecked = excluded -- Save posts the FULL current checkbox state
+// for that series (not a diff), matching exclude_tilts.py's own
+// "always re-derive from the original input" contract (see its module
+// docstring), so there's no accumulation across saves and re-checking a
+// previously-excluded image genuinely re-includes it.
+async function openExcludeTiltsEditor({ runId, sourcePath }) {
+  const body = document.createElement("div");
+  body.className = "xt-popup";
+  body.innerHTML = `
+    <aside class="xt-series-list" data-role="xt-series-list">
+      <div class="xt-hint">Loading tilt series…</div>
+    </aside>
+    <div class="xt-main">
+      <div class="xt-toolbar">
+        <span class="xt-series-title" data-role="xt-series-title">Select a tilt series</span>
+        <div class="xt-toolbar-actions">
+          <button type="button" class="btn btn-sm" data-role="xt-select-all">Include all</button>
+          <button type="button" class="btn btn-sm" data-role="xt-select-none">Exclude all</button>
+          <button type="button" class="btn primary btn-sm" data-role="xt-save">💾 Save exclusions</button>
+        </div>
+      </div>
+      <div class="status-line xt-status" data-role="xt-status"></div>
+      <div class="xt-image-list" data-role="xt-image-list">
+        <div class="xt-hint">Pick a tilt series on the left to review its images.</div>
+      </div>
+    </div>
+  `;
+
+  const q = (sel) => body.querySelector(sel);
+  const seriesListEl = q('[data-role="xt-series-list"]');
+  const seriesTitleEl = q('[data-role="xt-series-title"]');
+  const statusEl = q('[data-role="xt-status"]');
+  const imageListEl = q('[data-role="xt-image-list"]');
+
+  let seriesList = [];   // [{name, n_images, n_excluded}]
+  let currentName = null;
+  let currentImages = []; // last-loaded images for currentName
+
+  function renderSeriesList() {
+    seriesListEl.innerHTML = seriesList.map((s) => `
+      <button type="button" class="xt-series-row ${s.name === currentName ? "active" : ""}" data-name="${escapeHtml(s.name)}">
+        <span class="xt-series-name">${escapeHtml(s.name)}</span>
+        <span class="xt-series-badge ${s.n_excluded > 0 ? "xt-series-badge-warn" : ""}">${s.n_images - s.n_excluded}/${s.n_images}</span>
+      </button>
+    `).join("");
+    seriesListEl.querySelectorAll(".xt-series-row").forEach((btn) => {
+      btn.addEventListener("click", () => loadSeries(btn.dataset.name));
+    });
+  }
+
+  async function refreshSeriesList() {
+    const resp = await api(`/api/exclude-tilts/${runId}/series`);
+    seriesList = resp.series || [];
+    renderSeriesList();
+  }
+
+  function renderImages() {
+    if (!currentImages.length) {
+      imageListEl.innerHTML = '<div class="xt-hint">No images in this tilt series.</div>';
+      return;
+    }
+    imageListEl.innerHTML = currentImages.map((img, i) => `
+      <label class="xt-image-row ${img.excluded ? "xt-excluded" : ""}" data-index="${i}">
+        <input type="checkbox" data-role="xt-check" ${img.excluded ? "" : "checked"} />
+        ${img.mic_name
+          ? `<img class="xt-thumb" loading="lazy" alt="" src="/api/viz/slice?mrc_path=${encodeURIComponent(img.mic_name)}&axis=z&index=0&max_dim=160" />`
+          : '<span class="xt-thumb xt-thumb-missing"></span>'}
+        <span class="xt-image-meta">
+          <span class="xt-angle">${img.tilt_angle === null || img.tilt_angle === undefined ? "?" : img.tilt_angle.toFixed(1)}°</span>
+          <span class="xt-sub">${[
+            img.pre_exposure !== null && img.pre_exposure !== undefined ? `dose ${img.pre_exposure.toFixed(1)} e⁻/Å²` : null,
+            img.ctf_max_resolution !== null && img.ctf_max_resolution !== undefined ? `CTF ${img.ctf_max_resolution.toFixed(1)} Å` : null,
+            img.accum_motion_total !== null && img.accum_motion_total !== undefined ? `motion ${img.accum_motion_total.toFixed(1)} Å` : null,
+          ].filter(Boolean).join(" · ")}</span>
+        </span>
+      </label>
+    `).join("");
+    imageListEl.querySelectorAll(".xt-image-row").forEach((row) => {
+      const checkbox = row.querySelector('[data-role="xt-check"]');
+      checkbox.addEventListener("change", () => row.classList.toggle("xt-excluded", !checkbox.checked));
+    });
+  }
+
+  async function loadSeries(name) {
+    currentName = name;
+    renderSeriesList();
+    seriesTitleEl.textContent = name;
+    statusEl.textContent = "Loading images…";
+    imageListEl.innerHTML = "";
+    try {
+      const resp = await api(`/api/exclude-tilts/${runId}/images?tomo_name=${encodeURIComponent(name)}`);
+      currentImages = resp.images || [];
+      renderImages();
+      statusEl.textContent = `${currentImages.length} image(s).`;
+    } catch (err) {
+      statusEl.textContent = "Error: " + err.message;
+    }
+  }
+
+  q('[data-role="xt-select-all"]').addEventListener("click", () => {
+    imageListEl.querySelectorAll('[data-role="xt-check"]').forEach((cb) => {
+      cb.checked = true;
+      cb.closest(".xt-image-row").classList.remove("xt-excluded");
+    });
+  });
+  q('[data-role="xt-select-none"]').addEventListener("click", () => {
+    imageListEl.querySelectorAll('[data-role="xt-check"]').forEach((cb) => {
+      cb.checked = false;
+      cb.closest(".xt-image-row").classList.add("xt-excluded");
+    });
+  });
+
+  q('[data-role="xt-save"]').addEventListener("click", async () => {
+    if (!currentName || !currentImages.length) return;
+    statusEl.textContent = "Saving…";
+    const rows = imageListEl.querySelectorAll(".xt-image-row");
+    const excludedMovieNames = [];
+    rows.forEach((row) => {
+      const i = Number(row.dataset.index);
+      const checked = row.querySelector('[data-role="xt-check"]').checked;
+      if (!checked) excludedMovieNames.push(currentImages[i].movie_name);
+    });
+    try {
+      const result = await api(`/api/exclude-tilts/${runId}/save`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tomo_name: currentName, excluded_movie_names: excludedMovieNames }),
+      });
+      statusEl.textContent = `Saved: ${result.n_kept}/${result.n_total} kept.`;
+      await refreshSeriesList();
+      await loadSeries(currentName);
+    } catch (err) {
+      statusEl.textContent = "Error: " + err.message;
+    }
+  });
+
+  try {
+    await refreshSeriesList();
+    if (seriesList.length) await loadSeries(seriesList[0].name);
+    else seriesListEl.innerHTML = `<div class="xt-hint">No tilt series found in ${escapeHtml(sourcePath)}.</div>`;
+  } catch (err) {
+    seriesListEl.innerHTML = `<div class="xt-hint">Error: ${escapeHtml(err.message)}</div>`;
+  }
+
+  new WinBox({
+    title: "Exclude Tilt Images",
+    width: "1040px", height: "800px",
+    x: "center", y: "center",
+    mount: body,
+    class: ["viz-winbox"],
+  });
+}
 
 // ==========================================================================
 // Server-side FILE picker.

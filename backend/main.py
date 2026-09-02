@@ -160,6 +160,7 @@ from starlette.background import BackgroundTask
 import analyze
 import auth
 import ctf_qc
+import exclude_tilts
 import job_registry
 import progress
 import pipeline_bridge
@@ -519,11 +520,12 @@ async def abort_run(run_id: str):
 
 @app.post("/api/runs/{run_id}/resume")
 async def resume_run(run_id: str):
-    """The picking jobs' "Continue" toolbar action -- see
-    JobRunManager.resume_run's own docstring. Restricted to Manualpick/
-    TomoManualPick here (not exposed generically): resuming a finished
-    subprocess/compute job back to "running" has no real meaning -- there
-    is no process left to have stopped."""
+    """The picker-style custom jobs' "Continue" toolbar action -- see
+    JobRunManager.resume_run's own docstring. Restricted to jobs whose
+    CUSTOM_JOB_DEFINITIONS entry sets is_picker (Manualpick/TomoManualPick/
+    TomoExcludeTiltImages) here (not exposed generically): resuming a
+    finished subprocess/compute job back to "running" has no real meaning --
+    there is no process left to have stopped."""
     _reject_relion_run(run_id, "resumed")
     run = run_manager.get(run_id)
     internal_name = run.internal_name if run else None
@@ -534,7 +536,7 @@ async def resume_run(run_id: str):
     if internal_name is None or not CUSTOM_JOB_DEFINITIONS.get(internal_name, {}).get("is_picker"):
         raise HTTPException(
             status_code=400,
-            detail="Only a manual-picking job (Manualpick/TomoManualPick) can be resumed.",
+            detail="Only a picker-style job (Manualpick/TomoManualPick/TomoExcludeTiltImages) can be resumed.",
         )
     try:
         updated = await run_manager.resume_run(run_id)
@@ -1365,10 +1367,16 @@ def viz_slice(
     # The orthogonal viewer's left panel needs [y, z] rather than [z, y]; see
     # viz.render_slice_png().
     transpose: bool = Query(False),
+    # Overridable so a caller rendering many small thumbnails at once (the
+    # Exclude Tilt Images reviewer's per-image list, dozens of images per
+    # tilt series) can ask for a genuinely small PNG instead of downloading
+    # render_slice_png's full 1200px default and letting CSS scale it down
+    # client-side.
+    max_dim: int = Query(1200),
 ):
     try:
         png = viz.render_slice_png(
-            run_manager.project_dir, mrc_path, axis, index, lo, hi, transpose=transpose
+            run_manager.project_dir, mrc_path, axis, index, lo, hi, max_dim=max_dim, transpose=transpose
         )
     except viz.VizError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1457,6 +1465,65 @@ def manual_pick_tomo_save(run_id: str, req: TomoPickSaveRequest):
         return manual_pick.save_tomo_picks(
             run_manager.project_dir, job_dir, req.tomo_name, req.picks, req.tomograms_star_path)
     except (manual_pick.ManualPickError, viz.VizError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --------------------------------------------------------------------------
+# Exclude Tilt Images (TomoExcludeTiltImages) -- the in-browser tilt-image
+# reviewer, replacing relion_tomo_exclude_tilt_images' own napari GUI (a
+# desktop window with no headless flag at all -- see exclude_tilts.py's
+# module docstring) the same way manual_pick.py replaces relion_manualpick's
+# FLTK canvas above. Saves/loads into a specific job's own output directory
+# -- see exclude_tilts.py for the STAR formats this writes.
+# --------------------------------------------------------------------------
+
+
+def _exclude_tilts_job(run_id: str) -> tuple[Path, str]:
+    """This run's own output dir + its recorded `in_tiltseries` input -- 404
+    if the run doesn't exist, 400 if it has no input recorded (shouldn't
+    happen in practice: the runner requires it -- see custom_jobs.
+    run_exclude_tilt_images -- but a hand-crafted/imported run could lack
+    it)."""
+    run = run_manager.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    in_tiltseries = (run.field_values or {}).get("in_tiltseries", "")
+    if not in_tiltseries:
+        raise HTTPException(status_code=400, detail="This job has no input tilt series STAR recorded.")
+    return Path(run.cwd), in_tiltseries
+
+
+@app.get("/api/exclude-tilts/{run_id}/series")
+def exclude_tilts_series(run_id: str):
+    job_dir, in_tiltseries = _exclude_tilts_job(run_id)
+    try:
+        return {"series": exclude_tilts.series_summary(run_manager.project_dir, job_dir, in_tiltseries)}
+    except exclude_tilts.ExcludeTiltsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/exclude-tilts/{run_id}/images")
+def exclude_tilts_images(run_id: str, tomo_name: str = Query(...)):
+    job_dir, in_tiltseries = _exclude_tilts_job(run_id)
+    try:
+        return {"images": exclude_tilts.list_images(run_manager.project_dir, job_dir, in_tiltseries, tomo_name)}
+    except exclude_tilts.ExcludeTiltsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class ExcludeTiltsSaveRequest(BaseModel):
+    tomo_name: str
+    excluded_movie_names: list[str]
+
+
+@app.post("/api/exclude-tilts/{run_id}/save")
+def exclude_tilts_save(run_id: str, req: ExcludeTiltsSaveRequest):
+    job_dir, in_tiltseries = _exclude_tilts_job(run_id)
+    try:
+        return exclude_tilts.save_tilt_series_exclusions(
+            run_manager.project_dir, job_dir, in_tiltseries, req.tomo_name, req.excluded_movie_names,
+        )
+    except (exclude_tilts.ExcludeTiltsError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
