@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import functools
 import io
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -116,6 +117,22 @@ def _iteration_files(job_dir: Path) -> list[tuple[int, Path]]:
     return sorted(found.items())
 
 
+def _finite_or_none(value: Optional[float]) -> Optional[float]:
+    """RELION writes a literal `inf` into rlnEstimatedResolution/
+    rlnCurrentResolution for a class with essentially no signal yet (common
+    in early iterations, e.g. this app's own tomography stress-test with a
+    single 100%-occupied class) -- `float("inf")` parses that fine, but
+    FastAPI's default JSON encoder then raises ValueError ("Out of range
+    float values are not JSON compliant: inf") the moment /api/progress
+    tries to serialize it, breaking the Progress tab for the rest of that
+    run (confirmed for real running this project's own bin1 C6 Auto-
+    refine). None is the correct "no usable number yet" value here, same as
+    every other not-yet-available field in this module."""
+    if value is None:
+        return None
+    return value if math.isfinite(value) else None
+
+
 @functools.lru_cache(maxsize=512)
 def _parse_model_star_cached(path_str: str, mtime: float, size: int) -> dict:
     """Parse one model.star. Keyed by (path, mtime, size) so polling a run
@@ -157,7 +174,9 @@ def _parse_model_star_cached(path_str: str, mtime: float, size: int) -> dict:
         # rlnCurrentResolution is in 1/Angstrom; convert to Angstrom so both
         # resolution numbers on the chart share one unit.
         inv = num("rlnCurrentResolution")
-        out["current_resolution_A"] = (1.0 / inv) if inv and inv > 0 else None
+        out["current_resolution_A"] = (
+            _finite_or_none(1.0 / inv) if inv and math.isfinite(inv) and inv > 0 else None
+        )
         out["nr_classes"] = int(num("rlnNrClasses") or 0)
         out["dimensionality"] = int(num("rlnReferenceDimensionality") or 0)
         out["pixel_size"] = num("rlnPixelSize")
@@ -178,9 +197,9 @@ def _parse_model_star_cached(path_str: str, mtime: float, size: int) -> dict:
                 "index": i + 1,
                 "reference": str(refs[i]) if refs[i] is not None else "",
                 "distribution": float(dist[i] or 0.0),
-                "resolution_A": float(res[i]) if res[i] is not None else None,
-                "accuracy_rot": float(acc_rot[i]) if acc_rot[i] is not None else None,
-                "accuracy_trans": float(acc_trans[i]) if acc_trans[i] is not None else None,
+                "resolution_A": _finite_or_none(float(res[i])) if res[i] is not None else None,
+                "accuracy_rot": _finite_or_none(float(acc_rot[i])) if acc_rot[i] is not None else None,
+                "accuracy_trans": _finite_or_none(float(acc_trans[i])) if acc_trans[i] is not None else None,
             })
     return out
 

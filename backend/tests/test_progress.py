@@ -98,6 +98,47 @@ def test_reads_2d_iterations_and_converts_resolution_units(tmp_path):
     assert len(out["latest"]["classes"]) == NC
 
 
+def test_inf_resolution_is_reported_as_none_not_a_json_crash(tmp_path):
+    """RELION writes a literal `inf` into rlnEstimatedResolution for a class
+    with essentially no signal yet -- confirmed for real running this app's
+    own bin1 C6 Auto-refine (a single, 100%-occupied class early in
+    refinement). float("inf") parses fine in Python, but FastAPI's default
+    JSON encoder raises ValueError("Out of range float values are not JSON
+    compliant: inf") the moment /api/progress tries to serialize it,
+    breaking the Progress tab for the rest of that run. None is the correct
+    "not available" value here, same as every other not-yet-usable field."""
+    import json
+
+    it = 1
+    blocks = {
+        "model_general": {
+            "rlnCurrentResolution": float("inf"),
+            "rlnNrClasses": 1,
+            "rlnReferenceDimensionality": 3,
+            "rlnPixelSize": 1.35,
+        },
+        "model_classes": pd.DataFrame({
+            "rlnReferenceImage": ["run_it001_class001.mrc"],
+            "rlnClassDistribution": [1.0],
+            "rlnEstimatedResolution": [float("inf")],
+            "rlnAccuracyRotations": [float("inf")],
+            "rlnAccuracyTranslationsAngst": [float("nan")],
+        }),
+    }
+    with mrcfile.new(tmp_path / f"run_it{it:03d}_class001.mrc", overwrite=True) as m:
+        m.set_data(np.random.rand(16, 16, 16).astype(np.float32))
+    starfile.write(blocks, tmp_path / f"run_it{it:03d}_model.star", overwrite=True)
+
+    out = progress.read_progress(tmp_path)
+    assert out["available"] is True
+    assert out["iterations"][0]["resolution_A"] is None
+    assert out["iterations"][0]["best_class_resolution_A"] is None
+    assert out["latest"]["classes"][0]["resolution_A"] is None
+    assert out["latest"]["classes"][0]["accuracy_rot"] is None
+    assert out["latest"]["classes"][0]["accuracy_trans"] is None
+    json.dumps(out)  # must not raise
+
+
 def test_accuracy_rotation_and_translation_are_summarized_per_iteration(tmp_path):
     """rlnAccuracyRotations/rlnAccuracyTranslationsAngst were already parsed
     per class (zero extra file I/O) but never surfaced at the iteration
