@@ -772,6 +772,26 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           <label>Partition <input type="text" placeholder="e.g. gpu, standard" data-role="slurm-partition"></label>
           <label>Time limit <input type="text" placeholder="24:00:00" data-role="slurm-time"></label>
           <label>Memory <input type="text" placeholder="32G" data-role="slurm-mem"></label>
+          <label>Depends on SLURM job ID (optional)
+            <input type="text" placeholder="e.g. 12345" list="slurm-active-jobs" data-role="slurm-depends-on">
+          </label>
+          <datalist data-role="slurm-active-jobs-list" id="slurm-active-jobs"></datalist>
+          <label class="slurm-array-toggle-label">
+            <input type="checkbox" data-role="slurm-array-toggle"> Submit as SLURM array
+          </label>
+          <div class="slurm-array-fields" data-role="slurm-array-fields" hidden>
+            <label>Array items, one per line
+              <textarea class="slurm-array-items" data-role="slurm-array-items"
+                        placeholder="TS_01&#10;TS_02&#10;TS_03"></textarea>
+            </label>
+            <label>Throttle — max simultaneous tasks (optional)
+              <input type="number" min="1" placeholder="e.g. 4" data-role="slurm-array-throttle">
+            </label>
+            <p class="slurm-array-help">Each task runs this same command with its own item resolved into
+              <code>$ARRAY_ITEM</code> (reference it in the command box above). Doesn't split a real RELION
+              job's own input file per task — most directly useful for an External Job whose command can
+              reference <code>$ARRAY_ITEM</code> directly.</p>
+          </div>
         </div>
       </div>
       <div class="command-actions">
@@ -1113,6 +1133,12 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     const slurmPartition = slurmRow.querySelector('[data-role="slurm-partition"]');
     const slurmTime = slurmRow.querySelector('[data-role="slurm-time"]');
     const slurmMem = slurmRow.querySelector('[data-role="slurm-mem"]');
+    const slurmDependsOn = slurmRow.querySelector('[data-role="slurm-depends-on"]');
+    const slurmActiveJobsList = slurmRow.querySelector('[data-role="slurm-active-jobs-list"]');
+    const slurmArrayToggle = slurmRow.querySelector('[data-role="slurm-array-toggle"]');
+    const slurmArrayFields = slurmRow.querySelector('[data-role="slurm-array-fields"]');
+    const slurmArrayItems = slurmRow.querySelector('[data-role="slurm-array-items"]');
+    const slurmArrayThrottle = slurmRow.querySelector('[data-role="slurm-array-throttle"]');
     if (!isReopen || currentRun.slurm_job_id) {
       if (globalSettings["slurm.account"]) slurmAccount.value = globalSettings["slurm.account"];
       if (globalSettings["slurm.partition"]) slurmPartition.value = globalSettings["slurm.partition"];
@@ -1122,6 +1148,51 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     slurmToggle.addEventListener("change", () => {
       slurmFields.hidden = !slurmToggle.checked;
     });
+    slurmArrayToggle.addEventListener("change", () => {
+      slurmArrayFields.hidden = !slurmArrayToggle.checked;
+    });
+    // Convenience only (issue #53) -- a plain typed job ID always works
+    // too. Populated from the Command Center's own already-fetched run
+    // list (ccRuns), not a fresh request, so opening this popup never
+    // waits on the network for it; a job submitted moments ago simply
+    // won't appear until the next Command Center refresh, same
+    // staleness every other ccRuns-derived display in this app already
+    // accepts.
+    (ccRuns || [])
+      .filter((r) => r.slurm_job_id && (r.status === "queued" || r.status === "running"))
+      .forEach((r) => {
+        const opt = document.createElement("option");
+        opt.value = r.slurm_job_id;
+        opt.label = `job${String(r.job_number).padStart(3, "0")} — ${r.display_name || r.internal_name}`;
+        slurmActiveJobsList.appendChild(opt);
+      });
+  }
+
+  // Shared by both submission paths below (Run and Overwrite) so the
+  // growing set of SLURM options (issues #52/#53) is built in exactly
+  // one place rather than drifting between two independent copies.
+  // Returns undefined when the SLURM toggle itself isn't checked (or the
+  // row doesn't exist for this job type) -- callers only set
+  // payload.slurm when this returns a truthy value, same condition the
+  // two inline blocks it replaces already checked.
+  function buildSlurmOptions() {
+    if (!slurmRow || !slurmRow.querySelector('[data-role="slurm-toggle"]').checked) return undefined;
+    const options = {
+      account: slurmRow.querySelector('[data-role="slurm-account"]').value.trim(),
+      partition: slurmRow.querySelector('[data-role="slurm-partition"]').value.trim(),
+      time_limit: slurmRow.querySelector('[data-role="slurm-time"]').value.trim(),
+      mem: slurmRow.querySelector('[data-role="slurm-mem"]').value.trim(),
+    };
+    const dependsOn = slurmRow.querySelector('[data-role="slurm-depends-on"]').value.trim();
+    if (dependsOn) options.depends_on = dependsOn;
+    if (slurmRow.querySelector('[data-role="slurm-array-toggle"]').checked) {
+      const items = slurmRow.querySelector('[data-role="slurm-array-items"]').value
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      options.array_items = items;
+      const throttle = slurmRow.querySelector('[data-role="slurm-array-throttle"]').value.trim();
+      if (throttle) options.array_throttle = throttle;
+    }
+    return options;
   }
 
   // --- Job actions toolbar --------------------------------------------
@@ -1418,14 +1489,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         // job being overwritten, or from a hand-edit -- rather than
         // silently running with whatever --o the text happens to say.
         payload.subdir = popupOutputSubdir;
-        if (slurmRow && slurmRow.querySelector('[data-role="slurm-toggle"]').checked) {
-          payload.slurm = {
-            account: slurmRow.querySelector('[data-role="slurm-account"]').value.trim(),
-            partition: slurmRow.querySelector('[data-role="slurm-partition"]').value.trim(),
-            time_limit: slurmRow.querySelector('[data-role="slurm-time"]').value.trim(),
-            mem: slurmRow.querySelector('[data-role="slurm-mem"]').value.trim(),
-          };
-        }
+        const slurmOptions = buildSlurmOptions();
+        if (slurmOptions) payload.slurm = slurmOptions;
       }
       const run = await api("/api/runs", {
         method: "POST",
@@ -2108,6 +2173,17 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         refreshCommandCenter();
       } else if (msg.type === "error") {
         appendOutputLine(msg.line, true);
+      } else if (msg.type === "slurm_array_progress") {
+        // SLURM array runs (issue #52) poll all N tasks and broadcast
+        // this every interval regardless of whether the OVERALL status
+        // changed -- keeps the popup's own status line showing live
+        // per-task progress ("3/5 tasks done") between the real "status"
+        // transitions (queued -> running -> completed/failed).
+        if (currentRun) currentRun.slurm_array_task_states = msg.slurm_array_task_states;
+        const states = Object.values(msg.slurm_array_task_states || {});
+        const done = states.filter((s) => s === "completed" || s === "failed" || s === "aborted").length;
+        statusLine.textContent = `Status: ${currentRun ? currentRun.status : "running"} (${done}/${states.length} tasks done)`;
+        statusLine.className = statusLineClass(currentRun ? currentRun.status : "running");
       }
     };
     ws.onerror = () => appendOutputLine("[websocket error]", true);
@@ -2145,14 +2221,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           // Tell the backend which <JobDir>/jobNNN this command's --o targets,
           // so it creates/tracks that dir and can renumber if it was taken.
           payload.subdir = popupOutputSubdir;
-          if (slurmRow && slurmRow.querySelector('[data-role="slurm-toggle"]').checked) {
-            payload.slurm = {
-              account: slurmRow.querySelector('[data-role="slurm-account"]').value.trim(),
-              partition: slurmRow.querySelector('[data-role="slurm-partition"]').value.trim(),
-              time_limit: slurmRow.querySelector('[data-role="slurm-time"]').value.trim(),
-              mem: slurmRow.querySelector('[data-role="slurm-mem"]').value.trim(),
-            };
-          }
+          const slurmOptions = buildSlurmOptions();
+          if (slurmOptions) payload.slurm = slurmOptions;
         }
         const run = await api("/api/runs", {
           method: "POST",
@@ -2257,8 +2327,20 @@ try {
   if (savedNetDir === "asc" || savedNetDir === "desc") ccNetworkDirection = savedNetDir;
 } catch (e) { /* fall back to defaults */ }
 
-function statusBadge(status) {
-  return `<span class="cc-status-badge status-${escapeHtml(status || "pending")}">${escapeHtml(status || "pending")}</span>`;
+function statusBadge(status, run) {
+  const badge = `<span class="cc-status-badge status-${escapeHtml(status || "pending")}">${escapeHtml(status || "pending")}</span>`;
+  // SLURM array runs (issue #52) get a live "K/N tasks" count alongside
+  // the overall status badge -- there's no per-task tailing (see GitHub
+  // issue #63), so this progress summary is the only live signal the
+  // Command Center has for an array run beyond its single overall status.
+  if (run && run.slurm_array_size) {
+    const states = run.slurm_array_task_states || {};
+    const done = Object.values(states).filter(
+      (s) => s === "completed" || s === "failed" || s === "aborted"
+    ).length;
+    return `${badge} <span class="cc-array-progress">${done}/${run.slurm_array_size} tasks</span>`;
+  }
+  return badge;
 }
 
 function sortedRuns() {
@@ -2291,7 +2373,7 @@ function renderTable() {
           ? '<span class="cc-relion-tag" title="Run in RELION itself, read from this project\'s default_pipeline.star. Read-only here.">RELION</span>'
           : ""}</td>
       <td>${escapeHtml(run.display_name || run.internal_name)}</td>
-      <td>${statusBadge(run.status)}</td>
+      <td>${statusBadge(run.status, run)}</td>
       <td>${formatTimestamp(run.started_at, run.timestamp_estimated)}</td>
       <td>${formatDuration(run.started_at, run.ended_at, run.timestamp_estimated)}</td>
     `;
@@ -2337,7 +2419,7 @@ function renderTimeline() {
       <div class="cc-card-top">
         <span class="cc-card-name">${escapeHtml(run.job_name || "job???")}</span>
         <span class="cc-card-type">${escapeHtml(run.display_name || run.internal_name)}</span>
-        ${statusBadge(run.status)}
+        ${statusBadge(run.status, run)}
         ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
       </div>
       <div class="cc-card-meta">${
@@ -2427,7 +2509,7 @@ function lineageNodeInnerHtml(run) {
           ${run.source === "relion" ? '<span class="cc-relion-tag" title="Run in RELION itself. Read-only here.">RELION</span>' : ""}
         </div>
         <div class="cc-network-node-type">${escapeHtml(run.display_name || run.internal_name)}</div>
-        ${statusBadge(run.status)}
+        ${statusBadge(run.status, run)}
       `;
 }
 

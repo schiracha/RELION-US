@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import slurm_bridge
 
 TEMPLATE = Path(__file__).resolve().parent.parent.parent / "slurm" / "template_relion_job.sbatch"
+ARRAY_TEMPLATE = Path(__file__).resolve().parent.parent.parent / "slurm" / "template_relion_array_job.sbatch"
 
 
 def _stub(tmp_path, name, script_body):
@@ -244,6 +245,142 @@ def test_cancel_job_raises_on_failure(tmp_path, monkeypatch):
     _put_on_path(monkeypatch, bindir)
     with pytest.raises(RuntimeError, match="Invalid job id"):
         slurm_bridge.cancel_job("99999")
+
+
+# ---------------------------------------------------------------------------
+# submit_sbatch -- depends_on (issue #53)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_sbatch_with_depends_on_adds_dependency_flag(tmp_path, monkeypatch):
+    calls_file = tmp_path / "calls.txt"
+    bindir = _stub(tmp_path, "sbatch", f'echo "$@" >> {calls_file}\necho "12345"')
+    _put_on_path(monkeypatch, bindir)
+    script = tmp_path / "job.sbatch"
+    script.write_text("#!/bin/bash\necho hi\n")
+    job_id = slurm_bridge.submit_sbatch(script, depends_on="11111")
+    assert job_id == "12345"
+    call = calls_file.read_text().strip()
+    assert "--dependency=afterok:11111" in call
+    # The dependency flag must come BEFORE the script path (a trailing
+    # positional arg after the script would be ignored by real sbatch).
+    assert call.index("--dependency=afterok:11111") < call.index(str(script))
+
+
+def test_submit_sbatch_without_depends_on_has_no_dependency_flag(tmp_path, monkeypatch):
+    calls_file = tmp_path / "calls.txt"
+    bindir = _stub(tmp_path, "sbatch", f'echo "$@" >> {calls_file}\necho "12345"')
+    _put_on_path(monkeypatch, bindir)
+    script = tmp_path / "job.sbatch"
+    script.write_text("#!/bin/bash\necho hi\n")
+    slurm_bridge.submit_sbatch(script)
+    assert "--dependency" not in calls_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# fill_sbatch_array_template (issue #52)
+# ---------------------------------------------------------------------------
+
+
+def test_fill_sbatch_array_template_substitutes_every_placeholder():
+    text = slurm_bridge.fill_sbatch_array_template(
+        ARRAY_TEMPLATE,
+        command='my_tool --input "$ARRAY_ITEM"',
+        job_name="external_job013",
+        account="mygroup",
+        partition="standard",
+        ntasks=1,
+        cpus_per_task=4,
+        mem="8G",
+        time_limit="02:00:00",
+        gres_line="",
+        array_range="0-9%3",
+        input_list_path="/proj/External/job013/array_input_list.txt",
+        out_path="/proj/External/job013/array_task_%A_%a.out",
+        err_path="/proj/External/job013/array_task_%A_%a.err",
+    )
+    assert "--job-name=external_job013" in text
+    assert "--array=0-9%3" in text
+    assert "/proj/External/job013/array_input_list.txt" in text
+    assert "--output=/proj/External/job013/array_task_%A_%a.out" in text
+    assert "--error=/proj/External/job013/array_task_%A_%a.err" in text
+    assert 'my_tool --input "$ARRAY_ITEM"' in text
+    for token in ("JOB_NAME", "ACCOUNT_NAME", "PARTITION_NAME", "NTASKS",
+                  "CPUS_PER_TASK", "MEM_SIZE", "TIME_LIMIT", "ARRAY_RANGE",
+                  "INPUT_LIST_PATH", "RELION_COMMAND", "GRES_LINE",
+                  "OUT_PATH", "ERR_PATH"):
+        assert token not in text, f"leftover placeholder {token!r} in filled array template"
+
+
+def test_fill_sbatch_array_template_omits_gres_line_for_cpu_only():
+    text = slurm_bridge.fill_sbatch_array_template(
+        ARRAY_TEMPLATE, command="cmd", job_name="j", account="a", partition="p",
+        ntasks=1, cpus_per_task=4, mem="8G", time_limit="01:00:00", gres_line="",
+        array_range="0-4", input_list_path="/proj/j/list.txt",
+        out_path="/proj/j/array_task_%A_%a.out", err_path="/proj/j/array_task_%A_%a.err",
+    )
+    assert "--gres" not in text
+    assert "GRES_LINE" not in text
+
+
+# ---------------------------------------------------------------------------
+# poll_array_state (issue #52)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_array_state_uses_squeue_for_live_tasks(tmp_path, monkeypatch):
+    bindir = _stub(tmp_path, "squeue", 'echo "0 RUNNING"; echo "1 PENDING"')
+    _put_on_path(monkeypatch, bindir)
+    result = slurm_bridge.poll_array_state("55555", n_tasks=2)
+    assert result == {
+        0: {"raw_state": "RUNNING", "exit_code": None},
+        1: {"raw_state": "PENDING", "exit_code": None},
+    }
+
+
+def test_poll_array_state_falls_back_to_sacct_for_tasks_aged_out_of_squeue(tmp_path, monkeypatch):
+    """Task 0 is still live (squeue); task 1 already finished and aged out
+    (squeue silent for it, sacct has the terminal record) -- the normal,
+    expected mixed state for an array job partway through."""
+    bindir = _stub(tmp_path, "squeue", 'echo "0 RUNNING"')
+    _stub(tmp_path, "sacct", '''
+echo "55555_0|RUNNING||"
+echo "55555_1|COMPLETED|0:0"
+echo "55555_1.batch|COMPLETED|0:0"
+''')
+    _put_on_path(monkeypatch, bindir)
+    result = slurm_bridge.poll_array_state("55555", n_tasks=2)
+    assert result[0] == {"raw_state": "RUNNING", "exit_code": None}
+    assert result[1] == {"raw_state": "COMPLETED", "exit_code": 0}
+
+
+def test_poll_array_state_reports_mixed_terminal_outcomes(tmp_path, monkeypatch):
+    bindir = _stub(tmp_path, "squeue", "true")  # every task aged out
+    _stub(tmp_path, "sacct", '''
+echo "55555_0|COMPLETED|0:0"
+echo "55555_1|FAILED|1:0"
+echo "55555_2|CANCELLED|0:0"
+''')
+    _put_on_path(monkeypatch, bindir)
+    result = slurm_bridge.poll_array_state("55555", n_tasks=3)
+    assert result[0]["raw_state"] == "COMPLETED"
+    assert result[0]["exit_code"] == 0
+    assert result[1]["raw_state"] == "FAILED"
+    assert result[1]["exit_code"] == 1
+    assert result[2]["raw_state"] == "CANCELLED"
+
+
+def test_poll_array_state_omits_a_task_not_yet_reported_by_either_tool(tmp_path, monkeypatch):
+    """sacct can lag right after submission -- a task genuinely absent
+    from both squeue and sacct is left out of the result entirely (the
+    caller treats a missing index as "still queued", not an error)."""
+    bindir = _stub(tmp_path, "squeue", 'echo "0 PENDING"')
+    _stub(tmp_path, "sacct", 'echo "55555_0|PENDING||"')
+    _put_on_path(monkeypatch, bindir)
+    result = slurm_bridge.poll_array_state("55555", n_tasks=3)
+    assert 0 in result
+    assert 1 not in result
+    assert 2 not in result
 
 
 def test_slurm_state_to_status_covers_the_real_terminal_states_that_were_missing():

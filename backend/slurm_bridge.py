@@ -148,7 +148,140 @@ def fill_sbatch_template(
     return text
 
 
-def submit_sbatch(script_path: PathLike, cwd: Optional[PathLike] = None) -> str:
+def fill_sbatch_array_template(
+    template_path: PathLike,
+    *,
+    command: str,
+    job_name: str,
+    account: str,
+    partition: str,
+    ntasks: int,
+    cpus_per_task: int,
+    mem: str,
+    time_limit: str,
+    gres_line: str,
+    array_range: str,
+    input_list_path: str,
+    out_path: str,
+    err_path: str,
+) -> str:
+    """
+    Same literal placeholder substitution as fill_sbatch_template, against
+    the SEPARATE array-job template (slurm/template_relion_array_job.sbatch
+    -- a sibling template, not a conditional branch bolted onto the
+    single-job one, matching this project's existing one-template-per-shape
+    convention). Two new tokens: ARRAY_RANGE ("0-9" or "0-9%3" for a
+    throttled array -- SLURM's own syntax, passed through as-is) and
+    INPUT_LIST_PATH (an absolute path to the one-item-per-line file the
+    template's own $ARRAY_ITEM resolution snippet reads from, indexed by
+    $SLURM_ARRAY_TASK_ID).
+
+    out_path/err_path should contain SLURM's own %A_%a pattern (array job
+    ID / array task ID) rather than a single deterministic path -- unlike
+    the single-job template, N tasks run concurrently and each needs its
+    own output file. See GitHub issue #52.
+    """
+    text = Path(template_path).read_text()
+    replacements = {
+        "JOB_NAME": job_name,
+        "ACCOUNT_NAME": account,
+        "PARTITION_NAME": partition,
+        "NTASKS": str(ntasks),
+        "CPUS_PER_TASK": str(cpus_per_task),
+        "MEM_SIZE": mem,
+        "TIME_LIMIT": time_limit,
+        "ARRAY_RANGE": array_range,
+        "INPUT_LIST_PATH": input_list_path,
+        "OUT_PATH": out_path,
+        "ERR_PATH": err_path,
+        "RELION_COMMAND": command,
+    }
+    for token, value in replacements.items():
+        text = text.replace(token, value)
+    lines = text.splitlines(keepends=True)
+    text = "".join(
+        (gres_line + "\n" if gres_line else "") if line.strip() == "GRES_LINE" else line
+        for line in lines
+    )
+    return text
+
+
+def poll_array_state(job_id: str, n_tasks: int) -> dict[int, dict]:
+    """
+    Per-task state for a SLURM array job, keyed by 0-based task index
+    (matching this app's own array_items list order and SLURM's own
+    SLURM_ARRAY_TASK_ID numbering). `squeue -o "%K %T"` reports the array
+    task index (%K) alongside state for every still-live task; any task
+    NOT present in that output has already aged out of squeue (the normal
+    way a wrapper learns a task finished, same as poll_job_state's own
+    single-job squeue/sacct fallback) and is looked up via `sacct`, which
+    reports one row per "<job_id>_<task_index>" for a real array job.
+
+    Returns {task_index: {"raw_state": ..., "exit_code": ...}} for every
+    index in range(n_tasks) -- a task genuinely not found in EITHER
+    squeue or sacct (e.g. sacct not yet caught up right after submission)
+    is simply absent from the returned dict, left for the next poll.
+    """
+    results: dict[int, dict] = {}
+
+    squeue = shutil.which("squeue")
+    if squeue is not None:
+        result = subprocess.run(
+            [squeue, "-h", "-o", "%K %T", "-j", job_id],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            task_index, state = int(parts[0]), parts[1].strip()
+            results[task_index] = {"raw_state": state, "exit_code": None}
+
+    missing = [i for i in range(n_tasks) if i not in results]
+    if not missing:
+        return results
+
+    sacct = _require_binary("sacct")
+    result = subprocess.run(
+        [sacct, "-j", job_id, "--format=JobID,State,ExitCode", "-n", "-P"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"sacct failed (exit {result.returncode}) for array job {job_id}:\n{result.stderr}")
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        row_job_id, state_field, exit_field = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        # Real sacct array-task rows look like "<job_id>_<task_index>"
+        # (plus "<job_id>_<task_index>.batch"/".extern" step rows this
+        # loop skips, same as poll_job_state's own single-job filtering) --
+        # only the bare "<job_id>_<task_index>" row is the task's own
+        # overall state.
+        prefix = f"{job_id}_"
+        if not row_job_id.startswith(prefix):
+            continue
+        suffix = row_job_id[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        task_index = int(suffix)
+        if task_index not in missing:
+            continue
+        exit_code = None
+        if ":" in exit_field:
+            try:
+                exit_code = int(exit_field.split(":", 1)[0])
+            except ValueError:
+                exit_code = None
+        raw_state = state_field.split()[0] if state_field else state_field
+        results[task_index] = {"raw_state": raw_state, "exit_code": exit_code}
+
+    return results
+
+
+def submit_sbatch(
+    script_path: PathLike, cwd: Optional[PathLike] = None, *, depends_on: Optional[str] = None,
+) -> str:
     """
     Submit an already-filled .sbatch script via `sbatch --parsable`
     (prints just the bare job ID, optionally "<id>;<cluster>" on a
@@ -161,12 +294,21 @@ def submit_sbatch(script_path: PathLike, cwd: Optional[PathLike] = None) -> str:
     orphaned and untracked on the cluster. Raises RuntimeError with
     sbatch's own stderr on failure (or, for the unparsable-success case,
     a message saying the job WAS submitted but couldn't be tracked).
+
+    depends_on: another job's ID to chain after (see GitHub issue #53).
+    Passed as `--dependency=afterok:<id>` -- afterok (only start if the
+    dependency exited cleanly) rather than afternotok/afterany, which are
+    real SLURM options but the wrong default for a processing pipeline and
+    easy to reach for by mistake. The dependent job is submitted
+    immediately but stays queued/pending in SLURM until the dependency
+    resolves -- this call itself never blocks waiting for that.
     """
     sbatch = _require_binary("sbatch")
     script_path = Path(script_path)
+    dependency_args = [f"--dependency=afterok:{depends_on}"] if depends_on else []
 
     result = subprocess.run(
-        [sbatch, "--parsable", str(script_path)],
+        [sbatch, "--parsable", *dependency_args, str(script_path)],
         capture_output=True, text=True, cwd=str(cwd) if cwd else None,
     )
     if result.returncode == 0:
@@ -186,7 +328,7 @@ def submit_sbatch(script_path: PathLike, cwd: Optional[PathLike] = None) -> str:
     # --parsable itself was rejected/unsupported (nonzero exit) -- nothing
     # was submitted above, so retrying with the plain invocation is safe.
     result = subprocess.run(
-        [sbatch, str(script_path)],
+        [sbatch, *dependency_args, str(script_path)],
         capture_output=True, text=True, cwd=str(cwd) if cwd else None,
     )
     match = _SUBMITTED_RE.search(result.stdout)

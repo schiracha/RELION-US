@@ -442,11 +442,15 @@ class StartRunRequest(BaseModel):
     # allocating a new one.
     overwrite_run_id: str | None = None
     # "Submit to SLURM cluster" (see job_runner.start_subprocess_job's
-    # slurm_options param / _run_slurm_job). Only meaningful for a real
-    # RELION job (never a custom job -- see the branch below); left None
-    # (the default, most common case) runs the command locally exactly as
-    # before. Shape: {"account", "partition", "time_limit", "mem"}, all
-    # optional strings.
+    # slurm_options param / _run_slurm_job / _run_slurm_array_job). Only
+    # meaningful for a real RELION job (never a custom job -- see the
+    # branch below); left None (the default, most common case) runs the
+    # command locally exactly as before. Shape: {"account", "partition",
+    # "time_limit", "mem", "depends_on", "array_items", "array_throttle"},
+    # all optional -- "depends_on" chains after another SLURM job ID
+    # (issue #53); a non-empty "array_items" (list of strings) submits as
+    # a SLURM array instead of a single job (issue #52), with
+    # "array_throttle" capping simultaneous tasks.
     slurm: dict | None = None
 
 

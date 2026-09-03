@@ -251,6 +251,15 @@ class JobRun:
     # decision (that's slurm_bridge.SLURM_STATE_TO_STATUS, applied fresh
     # each poll); surfaced in to_summary() for the Command Center to show.
     slurm_state: Optional[str] = None
+    # Set only for a SLURM ARRAY run (see _run_slurm_array_job / GitHub
+    # issue #52) -- the number of tasks the array was submitted with, and
+    # each task's own RELION-US status string (job_runner.STATUS_*) keyed
+    # by its 0-based array-task index as a string (JSON object keys are
+    # always strings; kept as str here rather than int so to_summary()'s
+    # dict round-trips through JSON without a separate re-keying step).
+    # None for an ordinary single-job run (local or non-array SLURM).
+    slurm_array_size: Optional[int] = None
+    slurm_array_task_states: Optional[dict[str, str]] = None
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
     subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
@@ -319,6 +328,8 @@ class JobRun:
             "pid": self.pid,
             "slurm_job_id": self.slurm_job_id,
             "slurm_state": self.slurm_state,
+            "slurm_array_size": self.slurm_array_size,
+            "slurm_array_task_states": self.slurm_array_task_states,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "project_dir": self.project_dir,
@@ -941,13 +952,19 @@ class JobRunManager:
         different project than the one currently active.
 
         slurm_options: when given (shape: {"account", "partition",
-        "time_limit", "mem"}, all optional strings), this run is submitted
-        to SLURM (_run_slurm_job) instead of launched as a local subprocess
-        (_run_subprocess) -- everything ABOVE this docstring's own concerns
-        (job numbering, Overwrite, RELION pipeline registration) is
-        identical either way; only the actual execution mechanism differs,
-        at the single branch point where `run.task` is created below. See
-        _run_slurm_job's own docstring for why local-subprocess abort/
+        "time_limit", "mem", "depends_on", "array_items", "array_throttle"},
+        all optional), this run is submitted to SLURM instead of launched
+        as a local subprocess (_run_subprocess) -- everything ABOVE this
+        docstring's own concerns (job numbering, Overwrite, RELION
+        pipeline registration) is identical either way; only the actual
+        execution mechanism differs, at the single branch point where
+        `run.task` is created below. A non-empty "array_items" (list of
+        strings, one per SLURM array task -- see GitHub issue #52) routes
+        to _run_slurm_array_job instead of the single-job _run_slurm_job;
+        "depends_on" (another job's SLURM ID, GitHub issue #53) and
+        "array_throttle" (max simultaneous array tasks) are read by
+        whichever of the two actually runs. See _run_slurm_job's own
+        docstring for why local-subprocess abort/
         status-polling logic (deeply PID/process-group-based) isn't reused
         for this path at all.
         """
@@ -1105,7 +1122,10 @@ class JobRunManager:
         self.runs[run_id] = run
         self._persist(run)
         if slurm_options is not None:
-            run.task = asyncio.create_task(self._run_slurm_job(run, slurm_options))
+            if slurm_options.get("array_items"):
+                run.task = asyncio.create_task(self._run_slurm_array_job(run, slurm_options))
+            else:
+                run.task = asyncio.create_task(self._run_slurm_job(run, slurm_options))
         else:
             run.task = asyncio.create_task(self._run_subprocess(run))
         return run
@@ -1396,6 +1416,7 @@ class JobRunManager:
         )
 
     SLURM_TEMPLATE = Path(__file__).resolve().parent.parent / "slurm" / "template_relion_job.sbatch"
+    SLURM_ARRAY_TEMPLATE = Path(__file__).resolve().parent.parent / "slurm" / "template_relion_array_job.sbatch"
 
     async def _tail_new_lines(
         self, run: JobRun, path: Path, pos: int, msg_type: str, flush_partial: bool = False
@@ -1530,7 +1551,9 @@ class JobRunManager:
             # The only real await point before a job ID exists -- see this
             # method's own docstring on the abort-during-submission race.
             job_id = await asyncio.to_thread(
-                slurm_bridge.submit_sbatch, script_path, cwd=Path(run.project_dir))
+                slurm_bridge.submit_sbatch, script_path, cwd=Path(run.project_dir),
+                depends_on=str(slurm_options.get("depends_on", "") or "") or None,
+            )
             run.slurm_job_id = job_id
 
             if run.status == STATUS_ABORTED:
@@ -1606,6 +1629,187 @@ class JobRunManager:
             # unexpected error here must not strand the run "queued"/
             # "running" forever with nothing tracking it.
             msg = f"[RELION-US] error while managing SLURM job: {type(exc).__name__}: {exc}"
+            run.stderr_lines.append(msg)
+            await run.broadcast({"type": "stderr", "line": msg})
+            if exit_code is None:
+                exit_code = 1
+            await self._finalize_run(run, exit_code)
+
+    async def _run_slurm_array_job(self, run: JobRun, slurm_options: dict) -> None:
+        """
+        SLURM ARRAY counterpart to _run_slurm_job -- a deliberately
+        SEPARATE method, not a variant folded into it (same reasoning as
+        _run_subprocess vs _run_slurm_job being separate: genuinely
+        different execution shapes). See GitHub issue #52 and this
+        file's own module-level notes there for the scope this covers:
+        a generic "run the same command as N independent SLURM tasks,
+        each resolving its own item from slurm_options['array_items'] via
+        $ARRAY_ITEM" primitive -- NOT auto-splitting/merging a real
+        RELION job's own input STAR file per task (that's job-type-
+        specific and deliberately out of scope here).
+
+        Tracks the array by its base job ID (run.slurm_job_id, same field
+        _run_slurm_job uses -- `scancel <base_id>` already cancels a
+        real SLURM array's every task, so abort_run()'s existing
+        `if run.slurm_job_id is not None` branch needs no changes to
+        cover this) plus run.slurm_array_size/slurm_array_task_states for
+        the per-task breakdown. No live per-task output tailing in this
+        pass (see GitHub issue #63) -- each task's own output/error file
+        lands in run.cwd and is reachable via the Outputs tab like any
+        other file; this loop only polls state.
+        """
+        exit_code = None
+        try:
+            items = [str(x) for x in (slurm_options.get("array_items") or []) if str(x).strip()]
+            if not items:
+                raise ValueError("SLURM array submission requires at least one array item.")
+            n_tasks = len(items)
+            run.slurm_array_size = n_tasks
+
+            field_values = run.field_values or {}
+            ntasks = int(float(field_values.get("nr_mpi", 1) or 1))
+            cpus_per_task = int(float(field_values.get("nr_threads", 1) or 1))
+            gres_line = ""
+            if field_values.get("use_gpu"):
+                gpu_ids = str(field_values.get("gpu_ids", "") or "")
+                n_gpus = len([g for g in gpu_ids.replace(":", ",").split(",") if g.strip()]) or 1
+                gres_line = f"#SBATCH --gres=gpu:{n_gpus}"
+
+            job_name = f"relion_us_job{run.job_number:03d}"
+            input_list_path = Path(run.cwd) / "array_input_list.txt"
+            input_list_path.write_text("\n".join(items) + "\n")
+
+            array_range = f"0-{n_tasks - 1}"
+            throttle = slurm_options.get("array_throttle")
+            try:
+                throttle_n = int(float(throttle)) if throttle not in (None, "") else 0
+            except (TypeError, ValueError):
+                throttle_n = 0
+            if throttle_n > 0:
+                array_range += f"%{throttle_n}"
+
+            out_path = Path(run.cwd) / "array_task_%A_%a.out"
+            err_path = Path(run.cwd) / "array_task_%A_%a.err"
+            filled = slurm_bridge.fill_sbatch_array_template(
+                self.SLURM_ARRAY_TEMPLATE,
+                command=run.command,
+                job_name=job_name,
+                account=str(slurm_options.get("account", "") or ""),
+                partition=str(slurm_options.get("partition", "") or ""),
+                ntasks=ntasks,
+                cpus_per_task=cpus_per_task,
+                mem=str(slurm_options.get("mem", "") or "4G"),
+                time_limit=str(slurm_options.get("time_limit", "") or "24:00:00"),
+                gres_line=gres_line,
+                array_range=array_range,
+                input_list_path=str(input_list_path),
+                out_path=str(out_path),
+                err_path=str(err_path),
+            )
+            script_path = Path(run.cwd) / "run_submit_array.sbatch"
+            script_path.write_text(filled)
+
+            # The only real await point before a job ID exists -- see
+            # _run_slurm_job's own docstring on the identical
+            # abort-during-submission race.
+            job_id = await asyncio.to_thread(
+                slurm_bridge.submit_sbatch, script_path, cwd=Path(run.project_dir),
+                depends_on=str(slurm_options.get("depends_on", "") or "") or None,
+            )
+            run.slurm_job_id = job_id
+
+            if run.status == STATUS_ABORTED:
+                note = f"[RELION-US] Abort arrived during submission; cancelling SLURM array job {job_id}."
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+                await asyncio.to_thread(slurm_bridge.cancel_job, job_id)
+                exit_code = 1
+            else:
+                run.status = STATUS_QUEUED
+                self._persist(run)
+                note = f"[RELION-US] Submitted to SLURM as array job {job_id} ({n_tasks} tasks)."
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+                await run.broadcast({"type": "status", "status": run.status})
+
+                last_status = STATUS_QUEUED
+                task_exit_codes: dict[int, int] = {}
+
+                while True:
+                    await asyncio.sleep(SLURM_POLL_INTERVAL_S)
+                    try:
+                        info = await asyncio.to_thread(slurm_bridge.poll_array_state, job_id, n_tasks)
+                    except Exception as exc:  # noqa: BLE001
+                        msg = f"[RELION-US] SLURM array status check failed: {exc}"
+                        run.stderr_lines.append(msg)
+                        await run.broadcast({"type": "stderr", "line": msg})
+                        continue
+
+                    task_states = {}
+                    for i in range(n_tasks):
+                        entry = info.get(i)
+                        if entry is None:
+                            # Not yet reported by squeue or sacct (e.g.
+                            # sacct hasn't caught up right after
+                            # submission) -- treat as still queued rather
+                            # than guessing at a terminal state.
+                            task_states[str(i)] = STATUS_QUEUED
+                            continue
+                        task_status = slurm_bridge.SLURM_STATE_TO_STATUS.get(
+                            entry["raw_state"], STATUS_RUNNING)
+                        task_states[str(i)] = task_status
+                        if task_status in (STATUS_COMPLETED, STATUS_FAILED, STATUS_ABORTED):
+                            if entry.get("exit_code") is not None:
+                                task_exit_codes[i] = entry["exit_code"]
+                            elif i not in task_exit_codes:
+                                task_exit_codes[i] = 0 if task_status == STATUS_COMPLETED else 1
+                    run.slurm_array_task_states = task_states
+                    self._persist(run)
+                    # Progress update every poll, distinct from the
+                    # "status" message type -- the frontend's "K/N tasks"
+                    # display reads this regardless of whether the
+                    # OVERALL run.status changed this round.
+                    await run.broadcast({
+                        "type": "slurm_array_progress", "slurm_array_task_states": task_states,
+                    })
+
+                    all_terminal = all(
+                        s in (STATUS_COMPLETED, STATUS_FAILED, STATUS_ABORTED)
+                        for s in task_states.values()
+                    )
+                    if all_terminal:
+                        # Deliberately no intermediate "status" broadcast
+                        # here: run.status isn't updated to a terminal
+                        # value until _finalize_run (right after this
+                        # loop) determines the real outcome from every
+                        # task's actual exit code -- broadcasting a
+                        # provisional guess here could show e.g.
+                        # "completed" for a run seconds before it's
+                        # correctly flipped to "failed".
+                        break
+
+                    any_running = any(s == STATUS_RUNNING for s in task_states.values())
+                    new_status = STATUS_RUNNING if any_running else STATUS_QUEUED
+                    if new_status != last_status:
+                        if run.status != STATUS_ABORTED:
+                            run.status = new_status
+                        self._persist(run)
+                        await run.broadcast({"type": "status", "status": run.status})
+                        last_status = new_status
+
+                # Overall exit code: 0 only if every task actually
+                # succeeded -- _finalize_run derives run.status from this,
+                # same as the single-job path.
+                exit_code = 0 if all(c == 0 for c in task_exit_codes.values()) else 1
+            await self._finalize_run(run, exit_code)
+        except asyncio.CancelledError:
+            # Same reasoning as _run_slurm_job's own identical handler:
+            # this task's cancellation has no effect on the real array
+            # job, which keeps existing on the scheduler independent of
+            # this app's process lifetime. Just stop tracking it.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            msg = f"[RELION-US] error while managing SLURM array job: {type(exc).__name__}: {exc}"
             run.stderr_lines.append(msg)
             await run.broadcast({"type": "stderr", "line": msg})
             if exit_code is None:
@@ -2346,6 +2550,8 @@ class JobRunManager:
             detected_inputs=summary.get("detected_inputs", []),
             exit_code=summary.get("exit_code"), pid=summary.get("pid"),
             slurm_job_id=summary.get("slurm_job_id"), slurm_state=summary.get("slurm_state"),
+            slurm_array_size=summary.get("slurm_array_size"),
+            slurm_array_task_states=summary.get("slurm_array_task_states"),
             started_at=summary.get("started_at"), ended_at=summary.get("ended_at"),
             pipeline_registered=summary.get("pipeline_registered", False),
         )

@@ -621,6 +621,12 @@ html, body {
 .star-preview-body { max-height: 320px; overflow: auto; padding: 8px; }
 .output-preview-image-wrap { display: flex; justify-content: center; }
 .output-preview-image { max-width: 100%; height: auto; display: block; border-radius: 3px; }
+.slurm-array-toggle-label { display: block; margin-top: 8px; }
+.slurm-array-fields { margin-top: 4px; padding-left: 4px; }
+.slurm-array-items { width: 100%; min-height: 60px; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; }
+.slurm-array-help { font-size: 11px; color: var(--text-dim); margin: 4px 0 0; }
+.slurm-array-help code { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+.cc-array-progress { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
 .star-block { margin-bottom: 14px; }
 .star-block:last-child { margin-bottom: 0; }
 .star-block-name {

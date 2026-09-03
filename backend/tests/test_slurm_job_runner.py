@@ -344,6 +344,243 @@ def test_local_subprocess_jobs_are_unaffected_by_slurm_wiring(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# depends_on (issue #53)
+# ---------------------------------------------------------------------------
+
+
+def test_slurm_depends_on_reaches_the_real_sbatch_invocation(tmp_path, monkeypatch):
+    project_manager.init_new_project(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls_file = tmp_path / "calls.txt"
+    _stub(bindir, "sbatch", 'echo "$@" >> ' + str(calls_file) + '\necho "22222"')
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", "echo hello", subdir="run1",
+            slurm_options={"account": "mygroup", "depends_on": "11111"},
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    assert run.slurm_job_id == "22222"
+    assert "--dependency=afterok:11111" in calls_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# SLURM arrays (issue #52)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slurm_array_stubs(tmp_path, monkeypatch):
+    """Stub sbatch/squeue/sacct/scancel for an array job. Per-task state
+    lives in tmp_path/array_state/task_<idx>_squeue (a raw SLURM state
+    string, or "GONE" once aged out of squeue) and task_<idx>_sacct
+    ("STATE|EXITCODE:0", written once sacct has the terminal record) --
+    the test drives the lifecycle by calling the returned set_task()
+    helper between polls, same shape as the single-job slurm_stubs
+    fixture's state_file/sacct_file, just per-task."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    task_dir = tmp_path / "array_state"
+    task_dir.mkdir()
+    scancel_calls = tmp_path / "scancel_calls.txt"
+
+    _stub(bindir, "sbatch", 'echo "99999"')
+    squeue_body = (
+        'for f in "' + str(task_dir) + '"/task_*_squeue; do\n'
+        '  [ -e "$f" ] || continue\n'
+        '  base=$(basename "$f")\n'
+        '  idx=${base#task_}\n'
+        '  idx=${idx%_squeue}\n'
+        '  state=$(cat "$f")\n'
+        '  [ "$state" = "GONE" ] && continue\n'
+        '  echo "$idx $state"\n'
+        'done\n'
+    )
+    _stub(bindir, "squeue", squeue_body)
+    sacct_body = (
+        'for f in "' + str(task_dir) + '"/task_*_sacct; do\n'
+        '  [ -e "$f" ] || continue\n'
+        '  base=$(basename "$f")\n'
+        '  idx=${base#task_}\n'
+        '  idx=${idx%_sacct}\n'
+        '  content=$(cat "$f")\n'
+        '  [ -z "$content" ] && continue\n'
+        '  echo "99999_${idx}|${content}"\n'
+        'done\n'
+    )
+    _stub(bindir, "sacct", sacct_body)
+    _stub(bindir, "scancel", 'echo "$@" >> ' + str(scancel_calls))
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr(job_runner, "SLURM_POLL_INTERVAL_S", 0.02)
+
+    def set_task(idx, squeue_state=None, sacct_state=None, exit_code=0):
+        if squeue_state is not None:
+            (task_dir / f"task_{idx}_squeue").write_text(squeue_state)
+        if sacct_state is not None:
+            (task_dir / f"task_{idx}_sacct").write_text(f"{sacct_state}|{exit_code}:0")
+
+    return {"set_task": set_task, "scancel_calls": scancel_calls}
+
+
+async def _wait_for_array_task_states(run, predicate, timeout_s=5.0):
+    for _ in range(int(timeout_s / 0.01)):
+        states = run.slurm_array_task_states
+        if states is not None and predicate(states):
+            return states
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"array task states never satisfied predicate, last seen: {run.slurm_array_task_states}")
+
+
+def test_slurm_array_submission_writes_input_list_and_tracks_size(tmp_path, slurm_array_stubs):
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", 'echo "$ARRAY_ITEM"', subdir="run1",
+            slurm_options={
+                "account": "mygroup",
+                "array_items": ["TS_01", "TS_02", "TS_03"],
+            },
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    assert run.slurm_job_id == "99999"
+    assert run.slurm_array_size == 3
+    input_list = (Path(run.cwd) / "array_input_list.txt").read_text()
+    assert input_list.splitlines() == ["TS_01", "TS_02", "TS_03"]
+    script = (Path(run.cwd) / "run_submit_array.sbatch").read_text()
+    assert "--array=0-2" in script
+    assert 'echo "$ARRAY_ITEM"' in script
+
+
+def test_slurm_array_throttle_appended_to_array_range(tmp_path, slurm_array_stubs):
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", "echo hi", subdir="run1",
+            slurm_options={"account": "mygroup", "array_items": ["a", "b", "c", "d"], "array_throttle": "2"},
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    script = (Path(run.cwd) / "run_submit_array.sbatch").read_text()
+    assert "--array=0-3%2" in script
+
+
+def test_slurm_array_all_tasks_succeed_completes_the_run(tmp_path, slurm_array_stubs):
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    set_task = slurm_array_stubs["set_task"]
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", "echo hi", subdir="run1",
+            slurm_options={"account": "mygroup", "array_items": ["a", "b"]},
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+
+        set_task(0, squeue_state="RUNNING")
+        set_task(1, squeue_state="PENDING")
+        await _wait_for_array_task_states(
+            run, lambda s: s.get("0") == STATUS_RUNNING and s.get("1") == STATUS_QUEUED)
+        assert run.status == STATUS_RUNNING
+
+        # Both tasks finish successfully -- age out of squeue, land in sacct.
+        set_task(0, squeue_state="GONE", sacct_state="COMPLETED", exit_code=0)
+        set_task(1, squeue_state="GONE", sacct_state="COMPLETED", exit_code=0)
+        await _wait_for_status(run, {STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == STATUS_COMPLETED
+    assert run.exit_code == 0
+    assert run.slurm_array_task_states == {"0": STATUS_COMPLETED, "1": STATUS_COMPLETED}
+
+
+def test_slurm_array_one_task_failing_fails_the_whole_run(tmp_path, slurm_array_stubs):
+    """A partial failure must NOT be reported as an overall success -- one
+    bad task means the run as a whole is STATUS_FAILED, even though the
+    other tasks genuinely completed."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    set_task = slurm_array_stubs["set_task"]
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", "echo hi", subdir="run1",
+            slurm_options={"account": "mygroup", "array_items": ["a", "b"]},
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+
+        set_task(0, squeue_state="GONE", sacct_state="COMPLETED", exit_code=0)
+        set_task(1, squeue_state="GONE", sacct_state="FAILED", exit_code=1)
+        await _wait_for_status(run, {STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == STATUS_FAILED
+    assert run.slurm_array_task_states == {"0": STATUS_COMPLETED, "1": STATUS_FAILED}
+
+
+def test_slurm_array_abort_calls_scancel_on_the_base_job_id(tmp_path, slurm_array_stubs):
+    """scancel on an array's base job ID cancels every task on real SLURM
+    -- abort_run()'s existing `slurm_job_id is not None` branch (shared
+    with the single-job path) needs no array-specific code at all."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", "echo hi", subdir="run1",
+            slurm_options={"account": "mygroup", "array_items": ["a", "b"]},
+        )
+        await _wait_for_status(run, {STATUS_QUEUED, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED})
+        assert run.status == STATUS_QUEUED
+
+        ok = await manager.abort_run(run.run_id)
+        assert ok is True
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == STATUS_ABORTED
+    assert slurm_array_stubs["scancel_calls"].read_text().strip() == "99999"
+
+
+def test_slurm_array_submission_requires_at_least_one_item(tmp_path, monkeypatch):
+    project_manager.init_new_project(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "External", "External Job", "echo hi", subdir="run1",
+            slurm_options={"account": "mygroup", "array_items": []},
+        )
+        await _wait_for_status(run, {STATUS_COMPLETED, STATUS_FAILED})
+        return run
+
+    run = asyncio.run(go())
+    # An empty array_items list must fall through to the ORDINARY
+    # single-job SLURM path (start_subprocess_job's own dispatch checks
+    # truthiness), not attempt an array submission with zero tasks.
+    assert run.slurm_array_size is None
+
+
+# ---------------------------------------------------------------------------
 # _tail_new_lines -- direct tests of the byte-first line-splitting logic
 # ---------------------------------------------------------------------------
 
