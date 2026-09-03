@@ -1668,6 +1668,16 @@ def _select_is_interactive(field_values: dict) -> bool:
     )
 
 
+def select_is_interactive(field_values: dict) -> bool:
+    """Public wrapper around _select_is_interactive -- main.py's dispatch
+    uses this (not the leading-underscore internal above) to decide whether
+    a Select run should route through the in-browser class-selector
+    (select_interactive.py) instead of building a subprocess command. See
+    _select_program_override's docstring for why the interactive branch has
+    no real command to build in the first place."""
+    return _select_is_interactive(field_values)
+
+
 def _select_extra_flags(field_values: dict, output_subdir: str) -> list:
     """The real --o (or do_filaments' -o) target for each branch, the
     select_values/discard/split branch's own --i (see below -- its

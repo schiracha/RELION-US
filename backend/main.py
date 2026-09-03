@@ -161,12 +161,14 @@ import analyze
 import auth
 import ctf_qc
 import exclude_tilts
+import job_catalog
 import job_registry
 import progress
 import pipeline_bridge
 import program_help
 import project_manager
 import manual_pick
+import select_interactive
 import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
@@ -494,6 +496,43 @@ async def start_run(req: StartRunRequest):
                 # stays_running docstring; the "Done" button (set_status)
                 # is what actually finishes it.
                 stays_running=CUSTOM_JOB_DEFINITIONS[req.internal_name].get("is_picker", False),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return run.to_summary()
+
+    if req.internal_name == "Select" and job_catalog.select_is_interactive(req.field_values or {}):
+        # Select is a 6-way branch (see job_catalog._select_program_override)
+        # and only ONE branch -- no do_select_values/do_discard/do_split/
+        # do_class_ranker/do_filaments/do_remove_duplicates checked -- is
+        # this interactive one. It stays a normal JOB_CATALOG entry (the
+        # other 5 branches are real, already-correct subprocess commands,
+        # issue #55) rather than moving into CUSTOM_JOB_DEFINITIONS like
+        # Manualpick/TomoExcludeTiltImages, so the routing decision has to
+        # happen HERE, per-request, from field_values -- unlike every other
+        # custom job, which is custom by internal_name alone.
+        #
+        # start_custom_job has no requirement that "Select" be a
+        # CUSTOM_JOBS member: job_catalog.job_dirname/_register_in_relion_
+        # pipeline both check JOB_CATALOG first, so this still registers
+        # under the real relion.select label when two-way sync is on, and
+        # JobRun.is_custom_job is derived from the command string
+        # start_custom_job itself sets -- see select_interactive.py's
+        # module docstring for the real-RELION behavior this reproduces.
+        values = req.field_values or {}
+        display_name = job_catalog.JOB_CATALOG["Select"][1]
+
+        async def factory(job_dir):
+            return await select_interactive.run_select_interactive(run_manager.project_dir, values, job_dir)
+
+        try:
+            run = await run_manager.start_custom_job(
+                "Select", display_name, factory,
+                field_values=values, overwrite_run_id=req.overwrite_run_id,
+                # Same reasoning as the picking jobs above: the real work
+                # (choosing classes) happens afterward through the Picker
+                # button, not this validate-only coroutine.
+                stays_running=True,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -1587,6 +1626,76 @@ def exclude_tilts_save(run_id: str, req: ExcludeTiltsSaveRequest):
             run_manager.project_dir, job_dir, in_tiltseries, req.tomo_name, req.excluded_movie_names,
         )
     except (exclude_tilts.ExcludeTiltsError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --------------------------------------------------------------------------
+# Select (interactive class selection) -- the in-browser class-average
+# selector, replacing relion_display's own --gui desktop window for the
+# Select job's interactive branch (see job_catalog._select_program_override
+# and select_interactive.py's module docstring). Only the fn_model
+# (Class2D/Class3D class-average selection) variant is implemented -- see
+# select_interactive.run_select_interactive for the fn_mic/fn_data rejection
+# message.
+# --------------------------------------------------------------------------
+
+
+def _select_job(run_id: str) -> tuple[Path, str]:
+    """This run's own output dir + its recorded `fn_model` input -- 404 if
+    the run doesn't exist, 400 if it has no fn_model recorded (shouldn't
+    happen in practice: the runner requires it -- see select_interactive.
+    run_select_interactive -- but a hand-crafted/imported run could lack
+    it)."""
+    run = run_manager.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    fn_model = (run.field_values or {}).get("fn_model", "")
+    if not fn_model:
+        raise HTTPException(status_code=400, detail="This job has no fn_model (source Class2D/Class3D job) recorded.")
+    return Path(run.cwd), fn_model
+
+
+@app.get("/api/select/{run_id}/classes")
+def select_classes(run_id: str):
+    job_dir, fn_model = _select_job(run_id)
+    try:
+        return {
+            "classes": select_interactive.list_classes(run_manager.project_dir, fn_model),
+            "class_averages_will_be_written": select_interactive.is_class2d_source(fn_model),
+        }
+    except select_interactive.SelectInteractiveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/select/{run_id}/thumbnail")
+def select_thumbnail(run_id: str, reference: str = Query(...)):
+    job_dir, fn_model = _select_job(run_id)
+    try:
+        source_dir = select_interactive.thumbnail_source(run_manager.project_dir, fn_model)
+        png = progress.render_class_thumbnail(source_dir, reference)
+    except (select_interactive.SelectInteractiveError, progress.ProgressError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Immutable, same reasoning as /api/runs/{run_id}/progress/thumbnail:
+    # RELION never rewrites a completed iteration's class images.
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+class SelectSaveRequest(BaseModel):
+    selected_class_numbers: list[int]
+
+
+@app.post("/api/select/{run_id}/save")
+def select_save(run_id: str, req: SelectSaveRequest):
+    job_dir, fn_model = _select_job(run_id)
+    try:
+        return select_interactive.save_selection(
+            run_manager.project_dir, job_dir, fn_model, req.selected_class_numbers,
+        )
+    except (select_interactive.SelectInteractiveError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 

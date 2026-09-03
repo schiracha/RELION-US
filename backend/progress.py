@@ -300,6 +300,15 @@ def read_iteration(job_dir: Path, iteration: int) -> dict:
     raise ProgressError(f"iteration {iteration} not found in {job_dir}")
 
 
+def classes_for_model_star(path: Path) -> list[dict]:
+    """Public entry point for a caller that already has a resolved
+    model.star path in hand (select_interactive.py, for the Select job's
+    interactive class-selection branch), rather than an iteration number
+    within a still-running job's own directory (see read_iteration above for
+    that path). Same per-class shape read_iteration's "classes" field has."""
+    return _parse_model_star(path).get("classes", [])
+
+
 # --------------------------------------------------------------------------
 # Thumbnails
 # --------------------------------------------------------------------------

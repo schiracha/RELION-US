@@ -28,6 +28,8 @@ from fastapi.testclient import TestClient
 
 pd = pytest.importorskip("pandas")
 starfile = pytest.importorskip("starfile")
+np = pytest.importorskip("numpy")
+mrcfile = pytest.importorskip("mrcfile")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -703,3 +705,140 @@ def test_exclude_tilts_done_button_completes_it_like_a_picker_job(picker_client)
     resumed = picker_client.post(f"/api/runs/{run_id}/resume")
     assert resumed.status_code == 200
     assert resumed.json()["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# Select (interactive class selection) -- HTTP-level coverage for the
+# /api/select/* routes the class-selector popup calls, plus the /api/runs
+# dispatch condition that routes an interactive Select run there instead of
+# building a subprocess command. Module-level STAR-writing coverage lives in
+# test_select_interactive.py; this exercises route wiring and the POST
+# /api/runs branch condition.
+# ---------------------------------------------------------------------------
+
+
+def _seed_class2d_project(project_dir, nc=3, n_particles=6):
+    """A Class2D/job010 directory shaped like a real completed run (model +
+    optimiser + data STAR + a class-average stack) -- same fixture shape as
+    test_select_interactive.py's own `_write_class2d_source`, built by hand
+    here for the same reason _seed_tilt_series_project above is: this file
+    wires its own project_dir per test."""
+    job = project_dir / "Class2D" / "job010"
+    job.mkdir(parents=True)
+    prefix = "run_it025"
+
+    stack = np.random.rand(nc, 8, 8).astype(np.float32)
+    with mrcfile.new(job / f"{prefix}_classes.mrcs", overwrite=True) as m:
+        m.set_data(stack)
+    refs = [f"{k + 1:06d}@{prefix}_classes.mrcs" for k in range(nc)]
+
+    starfile.write({
+        "model_general": {"rlnCurrentResolution": 0.1, "rlnNrClasses": nc, "rlnReferenceDimensionality": 2, "rlnPixelSize": 1.4},
+        "model_classes": pd.DataFrame({
+            "rlnReferenceImage": refs,
+            "rlnClassDistribution": [1.0 / nc] * nc,
+            "rlnEstimatedResolution": [10.0] * nc,
+            "rlnAccuracyRotations": [3.0] * nc,
+            "rlnAccuracyTranslationsAngst": [1.1] * nc,
+        }),
+    }, job / f"{prefix}_model.star", overwrite=True)
+    starfile.write(
+        {"optimiser_general": {"rlnModelStarFile": f"Class2D/job010/{prefix}_model.star"}},
+        job / f"{prefix}_optimiser.star", overwrite=True,
+    )
+    class_numbers = [(i % nc) + 1 for i in range(n_particles)]
+    starfile.write({
+        "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+        "particles": pd.DataFrame({
+            "rlnImageName": [f"{i + 1:06d}@Extract/job005/particles.mrcs" for i in range(n_particles)],
+            "rlnClassNumber": class_numbers,
+            "rlnOpticsGroup": [1] * n_particles,
+        }),
+    }, job / f"{prefix}_data.star", overwrite=True)
+    return "Class2D/job010/run_it025_optimiser.star"
+
+
+def _start_select_interactive_run(client, fn_model):
+    resp = client.post("/api/runs", json={
+        "internal_name": "Select",
+        "field_values": {"fn_model": fn_model},
+    })
+    assert resp.status_code == 200, resp.text
+    run_id = resp.json()["run_id"]
+    deadline = time.monotonic() + 5.0
+    last = None
+    while time.monotonic() < deadline:
+        last = client.get(f"/api/runs/{run_id}").json()
+        if last.get("status") in ("running", "failed") and last.get("stdout_lines"):
+            break
+        time.sleep(0.02)
+    assert last["status"] == "running", last
+    return run_id
+
+
+def test_select_run_with_no_mode_flags_routes_to_the_interactive_picker(picker_client):
+    """The core dispatch condition (main.py's job_catalog.select_is_
+    interactive check): a Select run with no do_select_values/do_discard/
+    etc. and an fn_model becomes a custom (in-process) job, not a
+    subprocess -- confirmed via the command string prefix start_custom_job
+    sets (job_runner.JobRun.is_custom_job)."""
+    fn_model = _seed_class2d_project(main.run_manager.project_dir)
+    run_id = _start_select_interactive_run(picker_client, fn_model)
+    run = picker_client.get(f"/api/runs/{run_id}").json()
+    assert run["command"].startswith("<in-process:")
+
+
+def test_select_classes_lists_the_source_jobs_classes(picker_client):
+    fn_model = _seed_class2d_project(main.run_manager.project_dir, nc=3, n_particles=6)
+    run_id = _start_select_interactive_run(picker_client, fn_model)
+
+    resp = picker_client.get(f"/api/select/{run_id}/classes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["class_averages_will_be_written"] is True
+    assert [c["class_number"] for c in body["classes"]] == [1, 2, 3]
+    assert sum(c["nr_particles"] for c in body["classes"]) == 6
+
+
+def test_select_thumbnail_returns_a_png(picker_client):
+    fn_model = _seed_class2d_project(main.run_manager.project_dir)
+    run_id = _start_select_interactive_run(picker_client, fn_model)
+    classes = picker_client.get(f"/api/select/{run_id}/classes").json()["classes"]
+
+    resp = picker_client.get(f"/api/select/{run_id}/thumbnail", params={"reference": classes[0]["reference"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_select_save_writes_particles_and_class_averages(picker_client):
+    fn_model = _seed_class2d_project(main.run_manager.project_dir, nc=3, n_particles=6)
+    run_id = _start_select_interactive_run(picker_client, fn_model)
+
+    saved = picker_client.post(f"/api/select/{run_id}/save", json={"selected_class_numbers": [1, 2]})
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert body["n_classes_selected"] == 2
+    assert body["class_averages_written"] is True
+
+    run = picker_client.get(f"/api/runs/{run_id}").json()
+    job_dir = Path(run["cwd"])
+    assert (job_dir / "particles.star").is_file()
+    assert (job_dir / "class_averages.star").is_file()
+
+
+def test_select_classes_unknown_run_id_404s(client):
+    resp = client.get("/api/select/no-such-run/classes")
+    assert resp.status_code == 404
+
+
+def test_select_classes_missing_fn_model_is_400(picker_client):
+    """A run with no fn_model recorded -- shouldn't happen via the normal
+    Select Run flow (run_select_interactive requires it), but the endpoint
+    should still fail cleanly rather than KeyError. Reuses an
+    ExcludeTiltImages run (also a stays_running custom job, so the
+    picker_client fixture is needed the same way) purely because it's an
+    existing run whose field_values genuinely have no fn_model key."""
+    run_id = _start_exclude_tilts_run(picker_client)
+    resp = picker_client.get(f"/api/select/{run_id}/classes")
+    assert resp.status_code == 400

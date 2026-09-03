@@ -1098,6 +1098,25 @@ html, body {
   image-rendering: auto; display: block;
 }
 .thumb figcaption { font-size: 10px; color: var(--text-dim); margin-top: 2px; font-variant-numeric: tabular-nums; }
+/* Select-classes-specific modifiers on the SAME .thumb card the Progress
+   tab's (read-only) class grid uses -- see openSelectClassPicker in app.js. */
+.thumb.sel-clickable { cursor: pointer; padding: 3px; border-radius: 5px; border: 2px solid transparent; }
+.thumb.sel-clickable:hover { background: var(--accent-dim); }
+.thumb.sel-clickable.sel-selected { border-color: var(--accent); background: var(--accent-dim); }
+.thumb.sel-clickable.sel-selected figcaption { color: var(--text); font-weight: 600; }
+
+/* ---- Select: the in-browser class-average selector ----
+   A toolbar (status + select-all/none/save) above a thumbnail grid -- see
+   openSelectClassPicker in app.js. */
+.sel-popup {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; height: 100%; box-sizing: border-box; overflow-y: auto;
+}
+.sel-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.sel-toolbar-actions { display: flex; gap: 6px; }
+.sel-status { font-size: 12px; color: var(--text-dim); min-height: 14px; }
+.sel-grid { flex: 1; min-height: 0; }
+.sel-hint { font-size: 11px; color: var(--text-dim); padding: 8px 2px; }
 
 /* ---- File picker + Browse buttons ----
    (.viz-input-row is defined with the visualizer's side rail above.) */

@@ -726,6 +726,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           : "Open the in-browser picker for this job — double-click to add a pick, right-click to delete one"
       }">${def.picker_kind === "excludetilts" ? "🔍 Open Reviewer" : "🔍 Open Picker"}</button>` : ""}
       ${def.is_picker ? `<button class="btn" data-action="continue-picking" hidden title="Resume this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — keeps everything already saved">▶ Continue</button>` : ""}
+      ${internalName === "Select" ? `<button class="btn primary" data-action="select-picker" hidden title="Open the in-browser class selector — this job has no do_select_values/do_discard/do_split/do_class_ranker/do_filaments mode checked, so it ran as an interactive class-average selection instead of a subprocess command">🎯 Select Classes</button>` : ""}
       <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? `Start a NEW ${def.picker_kind === "excludetilts" ? "review" : "picking"} session in this same job — discards everything already saved here. Use Continue instead to keep it.` : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
       <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
@@ -1202,6 +1203,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const overwriteBtn = toolbar.querySelector('[data-action="overwrite"]');
   const pickerBtn = toolbar.querySelector('[data-action="picker"]');
   const continueBtn = toolbar.querySelector('[data-action="continue-picking"]');
+  const selectPickerBtn = toolbar.querySelector('[data-action="select-picker"]');
   const cloneBtn = toolbar.querySelector('[data-action="clone"]');
   const abortBtn = toolbar.querySelector('[data-action="abort"]');
   const markFinishedBtn = toolbar.querySelector('[data-action="mark-finished"]');
@@ -1254,6 +1256,19 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // status -- you can review/add picks whether the session is still
     // "running" or already marked Done.
     if (pickerBtn) pickerBtn.hidden = !hasRun || fromRelion;
+    // Select's interactive branch (see job_catalog.select_is_interactive)
+    // isn't a static is_picker job type -- the SAME "Select" job popup can
+    // run as a real subprocess (do_select_values/do_discard/etc. checked)
+    // OR as this in-browser class selector, decided server-side per run
+    // from field_values. Rather than duplicating that condition here, this
+    // just checks what actually happened: start_custom_job stamps every
+    // custom run's command as "<in-process: ...>" (job_runner.py's
+    // IN_PROCESS_COMMAND_PREFIX) -- a real subprocess Select run never has
+    // that prefix, so this only shows for a run that server-side dispatch
+    // already routed into the picker.
+    if (selectPickerBtn) {
+      selectPickerBtn.hidden = !hasRun || fromRelion || !(currentRun.command || "").startsWith("<in-process:");
+    }
     // Continue (resume "running" with existing picks kept -- job_runner.
     // resume_run) only makes sense once a picking session has actually been
     // marked Done/Failed; RESUMABLE_STATUSES on the backend is the same set.
@@ -1447,6 +1462,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       } else {
         openVisualizer({ runId: currentRun.run_id, kind, sourcePath });
       }
+    });
+  }
+
+  if (selectPickerBtn) {
+    selectPickerBtn.addEventListener("click", () => {
+      if (!currentRun) return;
+      openSelectClassPicker({ runId: currentRun.run_id });
     });
   }
 
@@ -5012,6 +5034,118 @@ async function openExcludeTiltsEditor({ runId, sourcePath }) {
   new WinBox({
     title: "Exclude Tilt Images",
     width: "1040px", height: "800px",
+    x: "center", y: "center",
+    mount: body,
+    class: ["viz-winbox"],
+  });
+}
+
+// ---- Select: the in-browser class-average selector -----------------------
+// Opened from a Select job popup's "🎯 Select Classes" button, shown only
+// once the run's own command confirms the server routed it into the
+// interactive branch (see openJobPopup's selectPickerBtn wiring). Replaces
+// relion_display's own --gui desktop window for choosing which 2D/3D
+// classes to keep: a thumbnail grid, click-to-toggle selected (no
+// pre-selection, matching real RELION -- see select_interactive.py's
+// module docstring), Save writes particles.star (+ class_averages.star for
+// a Class2D source) fresh from the original _data.star/model.star every
+// time, so re-saving with a different pick never accumulates.
+async function openSelectClassPicker({ runId }) {
+  const body = document.createElement("div");
+  body.className = "sel-popup";
+  body.innerHTML = `
+    <div class="sel-toolbar">
+      <span class="sel-status" data-role="sel-status">Loading classes…</span>
+      <div class="sel-toolbar-actions">
+        <button type="button" class="btn btn-sm" data-role="sel-select-all">Select all</button>
+        <button type="button" class="btn btn-sm" data-role="sel-select-none">Select none</button>
+        <button type="button" class="btn primary btn-sm" data-role="sel-save">💾 Save selection</button>
+      </div>
+    </div>
+    <div class="sel-grid" data-role="sel-grid">
+      <div class="sel-hint">Loading classes…</div>
+    </div>
+  `;
+
+  const q = (sel) => body.querySelector(sel);
+  const statusEl = q('[data-role="sel-status"]');
+  const gridEl = q('[data-role="sel-grid"]');
+
+  let classes = [];              // [{class_number, reference, distribution, resolution_A, nr_particles, ...}]
+  const selected = new Set();    // class_number values currently toggled on
+
+  function summaryText() {
+    const nParticles = classes
+      .filter((c) => selected.has(c.class_number))
+      .reduce((sum, c) => sum + (c.nr_particles || 0), 0);
+    return `${selected.size}/${classes.length} classes selected (${nParticles} particles)`;
+  }
+
+  function renderGrid() {
+    if (!classes.length) {
+      gridEl.innerHTML = '<div class="sel-hint">No classes found.</div>';
+      return;
+    }
+    // Reuses the Progress tab's own .thumb-grid/.thumb/figcaption shape
+    // (thumbGridHtml, above) so a class-average grid looks the same
+    // whether it's read-only (mid-run progress) or this selectable one --
+    // sel-clickable/sel-selected are the only new modifiers.
+    gridEl.className = "thumb-grid";
+    gridEl.innerHTML = classes.map((c) => `
+      <figure class="thumb sel-clickable ${selected.has(c.class_number) ? "sel-selected" : ""}" data-class="${c.class_number}">
+        <img loading="lazy" alt="Class ${c.class_number}" src="/api/select/${runId}/thumbnail?reference=${encodeURIComponent(c.reference)}" />
+        <figcaption>#${c.class_number} · ${(c.distribution * 100).toFixed(1)}%${
+          c.resolution_A ? ` · ${c.resolution_A.toFixed(1)} Å` : ""}<br>${c.nr_particles} particles</figcaption>
+      </figure>
+    `).join("");
+    gridEl.querySelectorAll(".sel-clickable").forEach((card) => {
+      card.addEventListener("click", () => {
+        const num = Number(card.dataset.class);
+        if (selected.has(num)) selected.delete(num); else selected.add(num);
+        card.classList.toggle("sel-selected", selected.has(num));
+        statusEl.textContent = summaryText();
+      });
+    });
+  }
+
+  q('[data-role="sel-select-all"]').addEventListener("click", () => {
+    classes.forEach((c) => selected.add(c.class_number));
+    renderGrid();
+    statusEl.textContent = summaryText();
+  });
+  q('[data-role="sel-select-none"]').addEventListener("click", () => {
+    selected.clear();
+    renderGrid();
+    statusEl.textContent = summaryText();
+  });
+
+  q('[data-role="sel-save"]').addEventListener("click", async () => {
+    statusEl.textContent = "Saving…";
+    try {
+      const result = await api(`/api/select/${runId}/save`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selected_class_numbers: Array.from(selected) }),
+      });
+      statusEl.textContent = `Saved: ${result.n_classes_selected} classes, ${result.n_particles} particles`
+        + (result.class_averages_written ? " (particles.star + class_averages.star written)." : " (particles.star written).");
+    } catch (err) {
+      statusEl.textContent = "Error: " + err.message;
+    }
+  });
+
+  try {
+    const resp = await api(`/api/select/${runId}/classes`);
+    classes = resp.classes || [];
+    renderGrid();
+    statusEl.textContent = summaryText();
+  } catch (err) {
+    gridEl.innerHTML = `<div class="sel-hint">Error: ${escapeHtml(err.message)}</div>`;
+    statusEl.textContent = "";
+  }
+
+  new WinBox({
+    title: "Select Classes",
+    width: "900px", height: "700px",
     x: "center", y: "center",
     mount: body,
     class: ["viz-winbox"],

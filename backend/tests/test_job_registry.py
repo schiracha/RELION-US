@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import job_registry
-from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY, pipeline_type
+from job_catalog import CUSTOM_JOBS, JOB_CATALOG, PIPELINE_SPA_ONLY, PIPELINE_TOMO_ONLY, pipeline_type, select_is_interactive
 
 CPP_ARTIFACT_RE = re.compile(r"std::|\(\(|\)\)")
 
@@ -2400,6 +2400,22 @@ def test_select_class_ranker_prefers_nr_parts_over_nr_classes_when_both_positive
     )
     assert "--select_min_nr_particles 100.0" in cmd
     assert "--select_min_nr_classes" not in cmd
+
+
+def test_select_is_interactive_true_only_when_no_mode_flag_is_set():
+    """select_is_interactive (main.py's dispatch condition, routing to the
+    browser-based class selector) must agree exactly with the 5 real
+    subprocess branches _select_program_override already builds commands
+    for -- see job_catalog.py's public wrapper docstring."""
+    assert select_is_interactive({}) is True
+    assert select_is_interactive({"fn_model": "Class2D/job010/run_it025_optimiser.star"}) is True
+    for flag in (
+        "do_filaments", "do_remove_duplicates", "do_select_values",
+        "do_discard", "do_split", "do_class_ranker",
+    ):
+        assert select_is_interactive({flag: True}) is False, flag
+    # multiple flags set at once: still non-interactive
+    assert select_is_interactive({"do_split": True, "do_discard": True}) is False
 
 
 def test_tomopick_full_three_command_sequence():
