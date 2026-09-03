@@ -170,6 +170,7 @@ import manual_pick
 import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
+from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command
 from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
 
 APP_DIR = Path(__file__).resolve().parent
@@ -290,10 +291,29 @@ def _custom_job_definition(internal_name: str) -> dict:
     return definition
 
 
+def _isonet_job_definition(internal_name: str, output_subdir: str) -> dict:
+    """IsoNet2 job counterpart of _custom_job_definition above. Unlike a
+    custom job, an IsoNet2 job DOES have a real draft command (built by
+    isonet_jobs.build_isonet_command, shown/editable exactly like a real
+    RELION job's) -- included here too so the popup can render it
+    immediately on open, before the user has changed any field."""
+    definition = dict(ISONET_JOB_DEFINITIONS[internal_name])
+    definition["default_values"] = {
+        opt["key"]: opt.get("default", "") for opt in definition.get("options", [])
+    }
+    definition["draft_command"] = build_isonet_command(
+        internal_name, definition["default_values"], output_subdir)
+    definition["output_subdir"] = output_subdir
+    return definition
+
+
 @app.get("/api/jobs/{internal_name}")
 def get_job_definition(internal_name: str):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         return _custom_job_definition(internal_name)
+    if internal_name in ISONET_JOB_DEFINITIONS:
+        output_subdir = run_manager.prospective_subdir(internal_name)
+        return _isonet_job_definition(internal_name, output_subdir)
     try:
         # Prospective RELION-style output dir (<JobDir>/jobNNN) for the draft's
         # --o, matching RELION's run-from-project-root convention. Finalized at
@@ -338,6 +358,14 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
                        "program — it has no extra CLI options.",
             "options": [],
         }
+    if internal_name in ISONET_JOB_DEFINITIONS:
+        return {
+            "available": False,
+            "reason": "isonet_job",
+            "message": "Every isonet.py flag for this module is already exposed as a field above "
+                       "— there's no separate Advanced section to discover here.",
+            "options": [],
+        }
     try:
         raw = job_registry.raw_job(internal_name)
     except KeyError:
@@ -364,6 +392,16 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
 def recompute_draft(internal_name: str, req: DraftRequest):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         raise HTTPException(status_code=400, detail="Custom jobs don't use draft commands")
+    if internal_name in ISONET_JOB_DEFINITIONS:
+        if req.overwrite_run_id:
+            try:
+                output_subdir = run_manager.overwrite_target_subdir(req.overwrite_run_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+        else:
+            output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
+        draft = build_isonet_command(internal_name, req.field_values, output_subdir)
+        return {"draft_command": draft, "unmapped_fields": [], "output_subdir": output_subdir}
     try:
         # raw_job() (not _load_raw()[internal_name] directly) resolves a
         # job_catalog.TOMO_VARIANT_OF entry (TomoMotioncorr/TomoCtffind) to
@@ -452,6 +490,27 @@ async def start_run(req: StartRunRequest):
                 # stays_running docstring; the "Done" button (set_status)
                 # is what actually finishes it.
                 stays_running=CUSTOM_JOB_DEFINITIONS[req.internal_name].get("is_picker", False),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return run.to_summary()
+
+    if req.internal_name in ISONET_JOB_DEFINITIONS:
+        # An IsoNet2 job runs through the SAME execution primitive a real
+        # RELION job does (start_subprocess_job -- local or SLURM,
+        # identically), just with isonet_jobs.build_isonet_command in place
+        # of job_registry._build_draft_command. req.command is the user's
+        # (possibly hand-edited) command box content, same as a real job --
+        # only fall back to rebuilding it here if it's somehow missing.
+        display_name = ISONET_JOB_DEFINITIONS[req.internal_name]["display_name"]
+        subdir = req.subdir or run_manager.prospective_subdir(req.internal_name)
+        command = req.command or build_isonet_command(req.internal_name, req.field_values or {}, subdir)
+        try:
+            run = await run_manager.start_subprocess_job(
+                req.internal_name, display_name, command,
+                subdir=subdir, field_values=req.field_values,
+                overwrite_run_id=req.overwrite_run_id,
+                slurm_options=req.slurm,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))

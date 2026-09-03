@@ -141,6 +141,26 @@ function promptDialog(message, defaultValue = "") {
 
 // --- Sidebar -------------------------------------------------------------
 
+// Which category headers are collapsed, persisted the same way
+// PIPELINE_STORAGE_KEY is below — a UI preference, not job data, so it
+// survives reloads but never affects which jobs exist or are reachable.
+const CATEGORY_COLLAPSE_STORAGE_KEY = "relion_us_collapsed_categories";
+let collapsedCategories = new Set();
+try {
+  const saved = JSON.parse(localStorage.getItem(CATEGORY_COLLAPSE_STORAGE_KEY) || "[]");
+  if (Array.isArray(saved)) collapsedCategories = new Set(saved);
+} catch (e) {
+  // Storage unavailable or corrupt — just start with nothing collapsed.
+}
+
+function persistCollapsedCategories() {
+  try {
+    localStorage.setItem(CATEGORY_COLLAPSE_STORAGE_KEY, JSON.stringify(Array.from(collapsedCategories)));
+  } catch (e) {
+    // Non-fatal — collapse state just won't be remembered across reloads.
+  }
+}
+
 async function loadCatalog() {
   const data = await api("/api/catalog");
   const container = document.getElementById("jobCategories");
@@ -152,11 +172,31 @@ async function loadCatalog() {
 
     const block = document.createElement("div");
     block.className = "category-block";
+    block.dataset.category = category;
+    if (collapsedCategories.has(category)) block.classList.add("collapsed");
 
-    const title = document.createElement("div");
+    const title = document.createElement("button");
+    title.type = "button";
     title.className = "category-title";
-    title.textContent = category;
+    title.setAttribute("aria-expanded", String(!collapsedCategories.has(category)));
+    title.innerHTML = `<span class="category-chevron">▾</span><span class="category-name"></span>`;
+    title.querySelector(".category-name").textContent = category;
+    title.addEventListener("click", () => {
+      const isCollapsed = block.classList.toggle("collapsed");
+      title.setAttribute("aria-expanded", String(!isCollapsed));
+      if (isCollapsed) collapsedCategories.add(category);
+      else collapsedCategories.delete(category);
+      persistCollapsedCategories();
+    });
     block.appendChild(title);
+
+    // A separate wrapper (not just individual .job-item elements) so
+    // collapsing a category is one display:none on this one element,
+    // independent of the per-item inline `style.display` applyJobFilters()
+    // below sets for search/pipeline matching — the two mechanisms would
+    // otherwise fight over the same property on the same elements.
+    const jobsWrap = document.createElement("div");
+    jobsWrap.className = "category-jobs";
 
     for (const job of jobsInCategory) {
       const item = document.createElement("div");
@@ -169,8 +209,9 @@ async function loadCatalog() {
       item.innerHTML = `<span class="job-name">${escapeHtml(job.display_name)}</span>
                          <span class="job-desc">${escapeHtml(job.description)}</span>`;
       item.addEventListener("click", () => openJobPopup(job.internal_name, job.display_name));
-      block.appendChild(item);
+      jobsWrap.appendChild(item);
     }
+    block.appendChild(jobsWrap);
     container.appendChild(block);
   }
 
@@ -210,6 +251,13 @@ function applyJobFilters() {
     );
     block.style.display = anyVisible ? "" : "none";
   });
+  // A search in progress bypasses a collapsed category too, same as it
+  // already bypasses the SPA/Tomo pipeline filter above — collapsing a
+  // category hides jobs you're not looking for right now, not ones you're
+  // actively searching for. #jobCategories.searching's CSS override (not
+  // touching collapsedCategories/localStorage) means this is purely visual
+  // and reverts the instant the search box is cleared.
+  document.getElementById("jobCategories").classList.toggle("searching", !!q);
 }
 
 function setPipelineFilter(value, { persist = true } = {}) {

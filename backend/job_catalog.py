@@ -30,6 +30,7 @@ from typing import Callable, Optional
 
 CATEGORIES = [
     "Import & Conversion",
+    "IsoNet (Beta)",
     "Motion Correction",
     "CTF",
     "Particle Picking",
@@ -250,6 +251,54 @@ CUSTOM_JOBS = {
         "category": "Import & Conversion",
         "description": "Convert an AreTomo2 .aln alignment into IMOD-style .xf/.tlt for RELION's IMOD import",
     },
+    # IsoNet2 (github.com/IsoNet-cryoET/IsoNet2) -- six job types, one per
+    # isonet.py CLI module, chained prepare_star -> deconv -> make_mask ->
+    # denoise/refine -> predict. Unlike the import bridges above, these
+    # aren't in-process Python -- they run isonet.py as a real conda-env
+    # subprocess (including SLURM submission) via job_runner.
+    # start_subprocess_job, exactly like a real RELION job. Their options/
+    # command-building live in isonet_jobs.py, not custom_jobs.py -- see
+    # that module's own docstring for why. They're registered here (not in
+    # JOB_CATALOG) for the same reason the import bridges are: no compiled
+    # RELION job class exists for IsoNet2, so there's no real RELION type
+    # label to use -- custom.isonet_* follows the same fabricated-label
+    # convention, with the same harmless pipeline-registration fallback.
+    "IsonetPrepareStar": {
+        "label_new": "custom.isonet_prepare_star",
+        "display_name": "IsoNet2 – Prepare Star",
+        "category": "IsoNet (Beta)",
+        "description": "Generate a tomograms.star file for IsoNet2 from folder(s) of reconstructed tomograms",
+    },
+    "IsonetDeconv": {
+        "label_new": "custom.isonet_deconv",
+        "display_name": "IsoNet2 – CTF Deconvolution",
+        "category": "IsoNet (Beta)",
+        "description": "CTF deconvolution preprocessing for tomograms (enhances low-resolution contrast)",
+    },
+    "IsonetMakeMask": {
+        "label_new": "custom.isonet_make_mask",
+        "display_name": "IsoNet2 – Make Mask",
+        "category": "IsoNet (Beta)",
+        "description": "Generate sampling masks for tomograms, to prioritize regions of interest during training",
+    },
+    "IsonetDenoise": {
+        "label_new": "custom.isonet_denoise",
+        "display_name": "IsoNet2 – Denoise (Train)",
+        "category": "IsoNet (Beta)",
+        "description": "Train a Noise2Noise denoising model on even/odd tomogram pairs",
+    },
+    "IsonetRefine": {
+        "label_new": "custom.isonet_refine",
+        "display_name": "IsoNet2 – Refine (Train)",
+        "category": "IsoNet (Beta)",
+        "description": "Train IsoNet2's missing-wedge correction model (isonet2 / isonet2-n2n)",
+    },
+    "IsonetPredict": {
+        "label_new": "custom.isonet_predict",
+        "display_name": "IsoNet2 – Predict",
+        "category": "IsoNet (Beta)",
+        "description": "Apply a trained IsoNet2 model to tomograms (missing-wedge correction / denoising)",
+    },
 }
 
 # --------------------------------------------------------------------------
@@ -313,6 +362,8 @@ PIPELINE_TOMO_ONLY = {
     "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
     "TomoSubtomo", "TomoAlign", "TomoReconPart",
     "ImodImport", "WarpImport", "DeepETPickerImport", "AreTomoImport",
+    "IsonetPrepareStar", "IsonetDeconv", "IsonetMakeMask",
+    "IsonetDenoise", "IsonetRefine", "IsonetPredict",
 }
 
 
@@ -401,6 +452,12 @@ JOB_DIRNAME = {
     "ImodImport": "ImodImport",
     "WarpImport": "WarpImport",
     "DeepETPickerImport": "DeepETPickerImport",
+    "IsonetPrepareStar": "IsonetPrepareStar",
+    "IsonetDeconv": "IsonetDeconv",
+    "IsonetMakeMask": "IsonetMakeMask",
+    "IsonetDenoise": "IsonetDenoise",
+    "IsonetRefine": "IsonetRefine",
+    "IsonetPredict": "IsonetPredict",
 }
 
 assert set(JOB_DIRNAME) == _ALL_INTERNAL_NAMES, "JOB_DIRNAME must cover every job type"

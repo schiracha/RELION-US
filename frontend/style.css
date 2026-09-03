@@ -186,12 +186,33 @@ html, body {
 
 .category-block { border-top: 1px solid var(--border); }
 .category-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
   padding: 8px 12px;
+  font: inherit;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: .06em;
   color: var(--text-dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
 }
+.category-title:hover { color: var(--text); }
+.category-chevron {
+  display: inline-block;
+  font-size: 9px;
+  transition: transform .12s ease;
+}
+.category-block.collapsed .category-chevron { transform: rotate(-90deg); }
+.category-block.collapsed .category-jobs { display: none; }
+/* A search in progress always searches the full catalog (see
+   applyJobFilters in app.js) — this overrides the collapse above so a
+   matching job in a collapsed category is still visible while typing. */
+#jobCategories.searching .category-block.collapsed .category-jobs { display: block; }
 .job-item {
   padding: 8px 14px;
   cursor: pointer;
