@@ -476,6 +476,42 @@ function renderField(key, option, value) {
       wrap.appendChild(select);
       break;
     }
+    case "directory": {
+      // A folder-only field (e.g. IsoNet2's "full tomograms folder") --
+      // distinct from filename/inputnode below, which only ever pick a
+      // FILE. pickFileDialog's mode:"directory" lists subfolders only and
+      // adds a "Select This Folder" action instead of picking on click.
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = value || "";
+      input.placeholder = "/path/to/folder";
+      const row = document.createElement("span");
+      row.className = "field-browse-row";
+      input.classList.add("field-browse-input");
+      row.appendChild(input);
+      const browseBtn = document.createElement("button");
+      browseBtn.type = "button";
+      browseBtn.className = "btn btn-icon";
+      browseBtn.title = "Browse for a folder on the machine running the backend";
+      browseBtn.textContent = "…";
+      browseBtn.addEventListener("click", async () => {
+        // The field's own value, if any, IS a folder path already -- open
+        // browsing there directly, not its parent (currentDirOf, used by
+        // the file case below, is for a FILE path's containing folder).
+        const picked = await pickFileDialog({
+          title: option.label || "Select a folder",
+          mode: "directory",
+          startPath: input.value.trim() || null,
+        });
+        if (picked) {
+          input.value = picked;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      row.appendChild(browseBtn);
+      wrap.appendChild(row);
+      break;
+    }
     case "filename":
     case "inputnode": {
       const input = document.createElement("input");
@@ -4895,7 +4931,8 @@ function currentDirOf(value) {
   return cachedProjectPath ? `${cachedProjectPath.replace(/\/+$/, "")}/${dir}` : dir;
 }
 
-function pickFileDialog({ title = "Select a file", extensions = [], startPath = null } = {}) {
+function pickFileDialog({ title = "Select a file", extensions = [], startPath = null, mode = "file" } = {}) {
+  const isDirMode = mode === "directory";
   const exts = extensions.map((e) => e.toLowerCase());
   const matches = (name) => !exts.length || exts.some((e) => name.toLowerCase().endsWith(e));
 
@@ -4908,9 +4945,12 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
       <div class="modal">
         <h3>${escapeHtml(title)}</h3>
         <p class="modal-hint">
-          Listing files on the machine running the backend${
-            exts.length ? ` — showing ${exts.map(escapeHtml).join(", ")}` : ""
-          }. Click a folder to open it, or a file to choose it.
+          ${isDirMode
+            ? "Listing folders on the machine running the backend. Click a folder to open it, then "
+              + "“Select This Folder” below."
+            : "Listing files on the machine running the backend"
+              + (exts.length ? ` — showing ${exts.map(escapeHtml).join(", ")}` : "")
+              + ". Click a folder to open it, or a file to choose it."}
         </p>
         <div class="modal-row">
           <input type="text" data-role="pick-path" placeholder="/path/to/folder" />
@@ -4919,6 +4959,7 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
         <div class="picker-current" data-role="pick-current"></div>
         <div class="project-browser" data-role="pick-list"></div>
         <div class="modal-actions">
+          ${isDirMode ? '<button class="btn primary" data-role="pick-select-folder">Select This Folder</button>' : ""}
           <button class="btn" data-role="pick-cancel">Cancel</button>
         </div>
       </div>`;
@@ -4927,6 +4968,7 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
     const listEl = overlay.querySelector('[data-role="pick-list"]');
     const currentEl = overlay.querySelector('[data-role="pick-current"]');
     const pathInput = overlay.querySelector('[data-role="pick-path"]');
+    let currentListedPath = null; // the folder currently shown, for "Select This Folder"
 
     function finish(value) {
       overlay.remove();
@@ -4976,6 +5018,7 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
       listEl.removeAttribute("aria-busy");
       currentEl.textContent = listing.path;
       pathInput.value = listing.path;
+      currentListedPath = listing.path;
       listEl.innerHTML = "";
 
       if (listing.parent) {
@@ -4987,7 +5030,10 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
       }
       const base = listing.path.replace(/\/+$/, "");
       const dirs = listing.entries.filter((e) => e.is_dir);
-      const files = listing.entries.filter((e) => !e.is_dir && matches(e.name));
+      // Directory mode never lists files -- there's nothing to click one
+      // for (the folder itself is the pick, via "Select This Folder"
+      // below), and showing them unclickable just reads as broken.
+      const files = isDirMode ? [] : listing.entries.filter((e) => !e.is_dir && matches(e.name));
 
       dirs.forEach((entry) => {
         const row = document.createElement("div");
@@ -5006,13 +5052,20 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
       if (!dirs.length && !files.length) {
         const none = document.createElement("div");
         none.className = "browser-entry picker-note";
-        none.textContent = exts.length
-          ? `(no subfolders, and no ${exts.join(" / ")} files here)`
-          : "(empty)";
+        none.textContent = isDirMode
+          ? "(no subfolders here)"
+          : exts.length
+            ? `(no subfolders, and no ${exts.join(" / ")} files here)`
+            : "(empty)";
         listEl.appendChild(none);
       }
     }
 
+    if (isDirMode) {
+      overlay.querySelector('[data-role="pick-select-folder"]').addEventListener("click", () => {
+        if (currentListedPath) finish(toProjectRelative(currentListedPath));
+      });
+    }
     overlay.querySelector('[data-role="pick-cancel"]').addEventListener("click", () => finish(null));
     overlay.querySelector('[data-role="pick-go"]').addEventListener("click", () => show(pathInput.value.trim()));
     pathInput.addEventListener("keydown", (e) => {

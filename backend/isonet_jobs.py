@@ -248,14 +248,11 @@ ISONET_JOB_DEFINITIONS = {
         "description": "Generate a tomograms.star file for IsoNet2 from folder(s) of reconstructed tomograms",
         "options": [
             _CONDA_ENV_OPTION,
-            # Plain "text", not "filename" -- these are FOLDER paths, and this
-            # app's Browse widget (pickFileDialog, frontend/app.js) is a
-            # file-only picker (it navigates into folders but only ever
-            # selects a file that matches a pattern); there's no folder-only
-            # field_type anywhere else in this codebase to reuse, and adding
-            # one is out of scope here (see this plan's "no frontend changes"
-            # design decision). Typed by hand instead, same as isonet.py's
-            # own CLI would take them.
+            # field_type "directory" -- folder-only Browse button (frontend/
+            # app.js's pickFileDialog in mode:"directory": lists subfolders
+            # only, with a "Select This Folder" action instead of picking on
+            # click), distinct from "filename"/"inputnode" below, which only
+            # ever pick a single FILE.
             #
             # full vs. even+odd is a genuine EITHER/OR, not two independently
             # optional fields -- confirmed both in isonet.py's own source
@@ -266,24 +263,24 @@ ISONET_JOB_DEFINITIONS = {
             # "Even/Odd Input" toggle; FAQ: "Use even/odd... for
             # --method isonet2-n2n... Use full tomograms for... --method
             # isonet2 when movies/tilt-series are not available").
-            {"key": "full", "field_type": "text", "label": "Full tomograms folder:", "default": "None",
+            {"key": "full", "field_type": "directory", "label": "Full tomograms folder:", "default": "None",
              "help": "One of two ways to supply tomograms -- either this, OR even+odd below (not both; "
              "leaving all three at \"None\" fails). Directory containing full tomogram(s) (.mrc/.rec), "
              "for single-map training (--method isonet2 downstream). Use this when you don't have "
              "even/odd halves (e.g. no separate movies/tilt-series to split)."},
-            {"key": "even", "field_type": "text", "label": "Even half-tomograms folder:", "default": "None",
+            {"key": "even", "field_type": "directory", "label": "Even half-tomograms folder:", "default": "None",
              "help": "One of two ways to supply tomograms -- this + odd below, OR full above (not both). "
              "Directory containing even half-tomograms, for Noise2Noise training (--method isonet2-n2n "
              "downstream) -- generally recommended over full when you have paired halves, since it gives "
              "better denoising (per IsoNet2's own FAQ)."},
-            {"key": "odd", "field_type": "text", "label": "Odd half-tomograms folder:", "default": "None",
+            {"key": "odd", "field_type": "directory", "label": "Odd half-tomograms folder:", "default": "None",
              "help": "Must be set together with even above (both or neither). Directory containing odd "
              "half-tomograms."},
-            {"key": "mask_folder", "field_type": "text", "label": "Mask folder (optional):", "default": "None",
+            {"key": "mask_folder", "field_type": "directory", "label": "Mask folder (optional):", "default": "None",
              "help": "Optional. Directory containing pre-made mask files for the tomograms, if you already "
              "have them -- most users should skip this and use the separate IsoNet2 – Make Mask job instead, "
              "which generates masks automatically after this one."},
-            {"key": "coordinate_folder", "field_type": "text", "label": "Coordinate folder (optional):",
+            {"key": "coordinate_folder", "field_type": "directory", "label": "Coordinate folder (optional):",
              "default": "None",
              "help": "Optional. Directory containing subtomogram coordinate files, if you already have "
              "them. When set, the number of subtomograms is taken from these files INSTEAD of the "
