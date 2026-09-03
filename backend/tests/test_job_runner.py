@@ -420,6 +420,104 @@ def test_abort_unknown_run_id_returns_false(tmp_path):
     assert asyncio.run(fresh_manager.abort_run("nope")) is False
 
 
+def test_cancelling_the_tracking_task_while_process_still_running_does_not_mis_finalize(tmp_path):
+    """issue #57: `run.task` getting cancelled (e.g. a real app shutdown)
+    while the real child process is still genuinely alive must NOT
+    finalize the run to a terminal status -- that would incorrectly report
+    a live job as completed/failed. Confirmed for real before this fix:
+    the exact scenario below left the run at STATUS_COMPLETED (or FAILED,
+    depending on timing) within milliseconds of cancelling, despite the
+    real `sleep` process still running (start_new_session=True means it
+    outlives the cancelled task)."""
+    import subprocess
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    marker = "relion_us_cancel_while_running_test"
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", f"sleep 5 # {marker}", subdir="Import/job001"
+        )
+        for _ in range(150):
+            if run.proc is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert run.proc is not None, "process never spawned"
+        assert run.proc.returncode is None, (
+            "process finished before we could cancel it -- test needs a longer sleep"
+        )
+        run.task.cancel()
+        # Give the cancellation a real chance to be delivered and handled.
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+        return run
+
+    run = asyncio.run(go())
+    try:
+        assert run.status == STATUS_RUNNING
+        assert run.exit_code is None
+    finally:
+        # The real process is a deliberately-orphaned survivor of this
+        # test (that's the whole point being tested) -- clean it up so it
+        # doesn't linger past the test run.
+        subprocess.run(["pkill", "-f", marker])
+
+
+def test_cancelling_the_tracking_task_soon_after_a_fast_job_still_finalizes_correctly(tmp_path):
+    """issue #57 regression guard: a previously-discarded fix attempt left
+    run.status at RUNNING on ANY cancellation, unconditionally -- which
+    broke ordinary fast jobs whose tracking task got cancelled by
+    something unrelated to the real process's own lifetime (e.g.
+    TestClient's own event-loop portal cancelling fire-and-forget tasks on
+    teardown) even though the job had, in fact, already finished.
+
+    The exact interleaving that trips this (cancellation landing between
+    the real process exiting and this task's own pump() coroutines
+    finishing the drain) is a genuine race at the OS/event-loop level --
+    not reliably pinned to one precise instant via wall-clock polling from
+    a test. Cancelling immediately after spawn and repeating several times
+    instead exercises whichever of that race's actual sub-windows real
+    scheduling happens to land in on any given attempt; the property that
+    actually matters holds regardless of which one: a fast job that
+    genuinely completes must ALWAYS end up correctly finalized, never
+    stuck at RUNNING."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+
+    async def one_attempt(i):
+        run = await manager.start_subprocess_job(
+            "Import", "Import", "echo hello", subdir=f"Import/job{i:03d}"
+        )
+        # Wait for the process to actually be spawned before cancelling --
+        # run.status flips to RUNNING at the very top of _run_subprocess,
+        # BEFORE the pipeline-lock work (asyncio.to_thread) and the actual
+        # subprocess spawn that follow it; cancelling that early lands
+        # outside this fix's try/except entirely (no process ever gets
+        # spawned, run.status is stuck at RUNNING forever with nothing to
+        # finalize) -- a real, but different and earlier, race than the
+        # one this test targets. run.proc is only set once the process
+        # genuinely exists.
+        for _ in range(200):
+            if run.proc is not None:
+                break
+            await asyncio.sleep(0.001)
+        run.task.cancel()
+        for _ in range(75):
+            await asyncio.sleep(0.02)
+            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return run
+
+    async def go():
+        return [await one_attempt(i) for i in range(10)]
+
+    runs = asyncio.run(go())
+    for run in runs:
+        assert run.status == STATUS_COMPLETED, f"{run.run_id}: status={run.status}"
+        assert run.exit_code == 0
+        assert run.stdout_lines == ["hello"]
+
+
 def test_subprocess_output_is_teed_to_run_out_and_run_err(tmp_path):
     """RELION's own GUI always tees a job's stdout/stderr into run.out/
     run.err inside the job directory (RelionJob::prepareFinalCommand,

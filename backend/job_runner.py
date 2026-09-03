@@ -1259,12 +1259,84 @@ class JobRunManager:
         # persisted -- otherwise an unexpected error here leaves the Command
         # Center showing a job that runs forever, with an unreaped child.
         exit_code = None
+        # Set only by the asyncio.CancelledError branch below, for the ONE
+        # sub-case where the real child process is genuinely still running
+        # -- see that branch's own comment. Every other path (including
+        # cancellation where the process had already finished) leaves this
+        # False and finalizes normally.
+        abandon_still_running = False
         try:
             await asyncio.gather(
                 pump(proc.stdout, run.stdout_lines, "stdout", stdout_log),
                 pump(proc.stderr, run.stderr_lines, "stderr", stderr_log),
             )
             exit_code = await proc.wait()
+        except asyncio.CancelledError:
+            # This TASK being cancelled is not the same thing as the real
+            # child process having died -- e.g. confirmed for real: a
+            # TestClient synchronous call's own event-loop portal can
+            # cancel this fire-and-forget task on teardown even though the
+            # real subprocess had already exited cleanly (its stdout/
+            # stderr fully captured). Distinguish via the process's own
+            # liveness rather than assuming cancellation always means
+            # "abandon in place" (issue #57 -- a previous fix attempt did
+            # exactly that unconditionally and broke 7 TestClient-based
+            # tests whose jobs had, in fact, already finished).
+            #
+            # A synchronous `proc.returncode is not None` check here is NOT
+            # enough on its own: asyncio only updates returncode via a
+            # child-watcher callback scheduled on the event loop, and this
+            # exact cancellation can fire before that loop gets a chance to
+            # run it even for a process (e.g. `echo hello`) that already
+            # exited microseconds ago. Just await proc.wait() again instead
+            # -- genuinely no different from what the uncancelled path
+            # above was already doing, so a job that's about to finish
+            # (however long that legitimately takes -- confirmed for real:
+            # a `conda run` job's own multi-second environment-resolution
+            # overhead) still gets a real chance to. Only a SECOND
+            # cancellation arriving while we wait here (rare, but
+            # TestClient's own teardown can be aggressive) means "abandon
+            # in place" -- see that branch below. An artificial short
+            # timeout was tried here first and rejected: it wrongly
+            # abandoned that exact conda job (which legitimately took
+            # longer than the bound to finish, not because it was stuck).
+            try:
+                exit_code = await proc.wait()
+            except asyncio.CancelledError:
+                # A second cancellation before the process could even be
+                # confirmed done. Finalizing now with no real exit code
+                # would incorrectly mark a live job as failed. Leave
+                # run.status/run.proc exactly as they are, close the log
+                # files (below, via finally -- it always runs, re-raise or
+                # not), and let this task end cancelled -- a later
+                # abort_run() (including its persisted-history restart-
+                # recovery path, keyed on run.pid) can still act on the
+                # real process correctly. Mirrors _run_slurm_job's own
+                # CancelledError handling exactly (bare `raise`, no
+                # finalize call).
+                abandon_still_running = True
+                raise
+            # Already exited -- but this task's own cancellation and the
+            # child's exit are separate events, so the asyncio.gather(pump,
+            # pump) above may have been interrupted before draining
+            # everything already sitting in its stdout/stderr pipes. Finish
+            # that drain (should return near-instantly: the process is
+            # already dead, so its pipes will EOF quickly) before
+            # finalizing below -- otherwise real output the job already
+            # produced is silently dropped (confirmed for real: this exact
+            # scenario, on an `echo hello` job under TestClient's own
+            # portal, left stdout_lines empty and the run stuck at
+            # STATUS_RUNNING even though the job had genuinely finished).
+            # Best-effort: a second cancellation here (rare, but
+            # TestClient's teardown can be aggressive) must not crash
+            # finalization either.
+            try:
+                await asyncio.gather(
+                    pump(proc.stdout, run.stdout_lines, "stdout", stdout_log),
+                    pump(proc.stderr, run.stderr_lines, "stderr", stderr_log),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as exc:  # noqa: BLE001
             msg = f"[RELION-US] error while streaming output: {type(exc).__name__}: {exc}"
             run.stderr_lines.append(msg)
@@ -1276,14 +1348,15 @@ class JobRunManager:
                         logfile.close()
                     except OSError:
                         pass
-            if exit_code is None:
-                # never got a clean wait() -- make sure the child is reaped
-                try:
-                    exit_code = await proc.wait()
-                except Exception:  # noqa: BLE001
-                    exit_code = proc.returncode
-            run.proc = None
-            await self._finalize_run(run, exit_code)
+            if not abandon_still_running:
+                if exit_code is None:
+                    # never got a clean wait() -- make sure the child is reaped
+                    try:
+                        exit_code = await proc.wait()
+                    except Exception:  # noqa: BLE001
+                        exit_code = proc.returncode
+                run.proc = None
+                await self._finalize_run(run, exit_code)
 
     async def _finalize_run(self, run: JobRun, exit_code: Optional[int]) -> None:
         """
