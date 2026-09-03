@@ -2257,6 +2257,151 @@ def test_select_filaments_branch_uses_single_dash_o():
     assert "--o" not in cmd
 
 
+def test_select_filaments_branch_full_flag_set():
+    """do_filaments' complete real command (getCommandsSelectJob ~2841-2846):
+    `-i <fn_model> -o <outputname> -t <dendrogram_threshold> -c
+    <dendrogram_minclass>` -- issue #55's 6th mode, previously missing -i/
+    -t/-c entirely (only -o was emitted)."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_model": "InitialModel/job008/run_optimiser.star", "do_filaments": True,
+            "dendrogram_threshold": 0.85, "dendrogram_minclass": 5.0,
+        },
+        "Select", "Select/job013/",
+    )
+    assert cmd == (
+        "`which relion_filament_selection` "
+        "-i InitialModel/job008/run_optimiser.star -o Select/job013/ -t 0.85 -c 5.0"
+    )
+    assert unmapped == []
+
+
+def test_select_values_branch_emits_select_minval_maxval_and_i():
+    """do_select_values' own --i was silently NEVER emitted before this fix
+    (issue #55): its option_flags entry only ever covers the SEPARATE
+    do_remove_duplicates branch, and select_label/select_minval/
+    select_maxval's own extracted conditions all contain a top-level "||"
+    the generic evaluator won't trust, so they fell through as unmapped."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_data": "particles.star", "do_select_values": True,
+            "select_label": "rlnClassNumber", "select_minval": 1.0, "select_maxval": 1.0,
+        },
+        "Select", "Select/job014/",
+    )
+    assert cmd == (
+        "`which relion_star_handler` --i particles.star --o Select/job014/particles.star "
+        "--select rlnClassNumber --minval 1.0 --maxval 1.0"
+    )
+    assert unmapped == []
+
+
+def test_select_values_branch_from_micrographs_uses_mic_input_and_output():
+    """fn_mic takes priority over fn_data (real `if (fn_mic != "") {...}
+    else if (fn_data != "") {...}`) and switches the output filename to
+    micrographs.star."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_mic": "micrographs.star", "do_select_values": True,
+            "select_label": "rlnCtfMaxResolution", "select_minval": 0.0, "select_maxval": 5.0,
+        },
+        "Select", "Select/job015/",
+    )
+    assert cmd == (
+        "`which relion_star_handler` --i micrographs.star --o Select/job015/micrographs.star "
+        "--select rlnCtfMaxResolution --minval 0.0 --maxval 5.0"
+    )
+    assert unmapped == []
+
+
+def test_select_discard_branch_emits_discard_flags():
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_data": "particles.star", "do_discard": True,
+            "discard_label": "rlnCtfFigureOfMerit", "discard_sigma": 4.0,
+        },
+        "Select", "Select/job016/",
+    )
+    assert cmd == (
+        "`which relion_star_handler` --i particles.star --o Select/job016/particles.star "
+        "--discard_on_stats --discard_label rlnCtfFigureOfMerit --discard_sigma 4.0"
+    )
+    assert unmapped == []
+
+
+def test_select_split_branch_emits_nr_split_and_size_split_independently():
+    """nr_split and split_size are each independently ">0"-gated (real
+    source: neither is mutually exclusive with the other) -- confirmed both
+    can appear together, and either alone."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {"fn_data": "particles.star", "do_split": True, "do_random": True, "nr_split": 2.0},
+        "Select", "Select/job017/",
+    )
+    assert cmd == (
+        "`which relion_star_handler` --random_order --i particles.star "
+        "--o Select/job017/particles.star --nr_split 2.0"
+    )
+    assert unmapped == []
+
+    cmd2, _ = job_registry._build_draft_command(
+        raw,
+        {"fn_data": "particles.star", "do_split": True, "split_size": 100.0},
+        "Select", "Select/job018/",
+    )
+    assert "--size_split 100.0" in cmd2
+    assert "--nr_split" not in cmd2
+
+
+def test_select_class_ranker_branch_full_flag_set():
+    """do_class_ranker's flags are a mix of pure literals no joboption var
+    ties to (--fn_sel_parts/--fn_sel_classavgs/--fn_root/
+    --do_granularity_features/--auto_select) and compound-condition fields
+    the generic loop can't reach (--opt/--select_min_nr_particles/
+    --min_score) -- all previously missing entirely."""
+    raw = job_registry.raw_job("Select")
+    cmd, unmapped = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_model": "Class2D/job005/run_it025_optimiser.star",
+            "do_class_ranker": True, "select_nr_parts": 100.0, "rank_threshold": 0.5,
+        },
+        "Select", "Select/job019/",
+    )
+    assert cmd == (
+        "`which relion_class_ranker` --opt Class2D/job005/run_it025_optimiser.star "
+        "--o Select/job019/ --fn_sel_parts particles.star --fn_sel_classavgs class_averages.star "
+        "--select_min_nr_particles 100.0 --fn_root rank --do_granularity_features --auto_select "
+        "--min_score 0.5"
+    )
+    assert unmapped == []
+
+
+def test_select_class_ranker_prefers_nr_parts_over_nr_classes_when_both_positive():
+    """`if (select_nr_parts>0) ... else if (select_nr_classes>0) ...` --
+    nr_parts wins when both are set, matching the real if/else-if."""
+    raw = job_registry.raw_job("Select")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {
+            "fn_model": "Class2D/job005/run_it025_optimiser.star",
+            "do_class_ranker": True, "select_nr_parts": 100.0, "select_nr_classes": 3.0,
+        },
+        "Select", "Select/job020/",
+    )
+    assert "--select_min_nr_particles 100.0" in cmd
+    assert "--select_min_nr_classes" not in cmd
+
+
 def test_tomopick_full_three_command_sequence():
     raw = job_registry.raw_job("TomoPickTomograms")
     cmd, _ = job_registry._build_draft_command(

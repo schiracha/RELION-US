@@ -1669,31 +1669,111 @@ def _select_is_interactive(field_values: dict) -> bool:
 
 
 def _select_extra_flags(field_values: dict, output_subdir: str) -> list:
-    """The real --o (or do_filaments' -o) target for each branch, plus the
-    do_class_ranker branch's other pure-literal flags (--fn_sel_parts/
-    --fn_sel_classavgs/--fn_root/--do_granularity_features/--auto_select --
-    none tied to a joboption var, so the extractor never saw them at all)."""
+    """The real --o (or do_filaments' -o) target for each branch, the
+    select_values/discard/split branch's own --i (see below -- its
+    option_flags entry only ever covers the SEPARATE do_remove_duplicates
+    branch, so this branch's --i was silently never emitted at all, issue
+    #55), its three mode-specific flag sets, and the do_class_ranker
+    branch's flags (partly pure literals no joboption var ties to --
+    --fn_sel_parts/--fn_sel_classavgs/--fn_root/--do_granularity_features/
+    --auto_select -- and partly compound-condition fields the generic
+    per-option loop can't reach either -- --opt/--select_min_nr_particles/
+    --select_min_nr_classes/--min_score)."""
     if not output_subdir or _select_is_interactive(field_values):
         return []
     subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
     if field_values.get("do_filaments"):
-        # `command += " -o " + outputname;` (~2843) -- single dash, unlike
-        # every other branch's "--o".
-        return ["-o", shlex.quote(subdir)]
+        # `command += " -i " + fn_model + " -o " + outputname + " -t " +
+        # dendrogram_threshold + " -c " + dendrogram_minclass;` (~2841-2846)
+        # -- single-dash flags throughout, unlike every other branch's
+        # double-dash ones.
+        return [
+            "-i", shlex.quote(str(field_values.get("fn_model", ""))),
+            "-o", shlex.quote(subdir),
+            "-t", str(field_values.get("dendrogram_threshold", "")),
+            "-c", str(field_values.get("dendrogram_minclass", "")),
+        ]
     if field_values.get("do_remove_duplicates"):
         return ["--o", shlex.quote(subdir + "particles.star")]
     if field_values.get("do_select_values") or field_values.get("do_discard") or field_values.get("do_split"):
-        fn_out = "micrographs.star" if field_values.get("fn_mic") else "particles.star"
-        return ["--o", shlex.quote(subdir + fn_out)]
+        # `if (fn_mic != "") { --i fn_mic; fn_out = micrographs.star; }
+        # else if (fn_data != "") { --i fn_data; fn_out = particles.star; }`
+        # (~3306-3319) -- fn_mic takes priority over fn_data when both are
+        # somehow set, matching the real if/else-if.
+        fn_mic = field_values.get("fn_mic")
+        fn_data = field_values.get("fn_data")
+        parts = []
+        if fn_mic:
+            parts += ["--i", shlex.quote(str(fn_mic))]
+            fn_out = "micrographs.star"
+        elif fn_data:
+            parts += ["--i", shlex.quote(str(fn_data))]
+            fn_out = "particles.star"
+        else:
+            fn_out = "particles.star"
+        parts += ["--o", shlex.quote(subdir + fn_out)]
+        if field_values.get("do_select_values"):
+            # `--select <label> --minval <v> --maxval <v>` (~3336-3339)
+            parts += [
+                "--select", str(field_values.get("select_label", "")),
+                "--minval", str(field_values.get("select_minval", "")),
+                "--maxval", str(field_values.get("select_maxval", "")),
+            ]
+        elif field_values.get("do_discard"):
+            # `--discard_on_stats --discard_label <label> --discard_sigma
+            # <v>` (~3343-3346)
+            parts += [
+                "--discard_on_stats",
+                "--discard_label", str(field_values.get("discard_label", "")),
+                "--discard_sigma", str(field_values.get("discard_sigma", "")),
+            ]
+        elif field_values.get("do_split"):
+            # `--random_order` itself is already correctly emitted by this
+            # job's own flags["do_random"] FlagOverride -- only nr_split/
+            # split_size (~3364-3376, each independently ">0" gated, NOT
+            # mutually exclusive with each other) are added here.
+            try:
+                nr_split = float(field_values.get("nr_split") or 0)
+            except (TypeError, ValueError):
+                nr_split = 0.0
+            try:
+                split_size = float(field_values.get("split_size") or 0)
+            except (TypeError, ValueError):
+                split_size = 0.0
+            if nr_split > 0:
+                parts += ["--nr_split", str(field_values.get("nr_split"))]
+            if split_size > 0:
+                parts += ["--size_split", str(field_values.get("split_size"))]
+        return parts
     if field_values.get("do_class_ranker"):
-        return [
+        parts = ["--opt", shlex.quote(str(field_values.get("fn_model", "")))]
+        parts += [
             "--o", shlex.quote(subdir),
             "--fn_sel_parts", "particles.star",
             "--fn_sel_classavgs", "class_averages.star",
+        ]
+        # `if (select_nr_parts>0) --select_min_nr_particles <v>; else if
+        # (select_nr_classes>0) --select_min_nr_classes <v>;` (~2917-2925)
+        try:
+            select_nr_parts = float(field_values.get("select_nr_parts") or 0)
+        except (TypeError, ValueError):
+            select_nr_parts = 0.0
+        if select_nr_parts > 0:
+            parts += ["--select_min_nr_particles", str(field_values.get("select_nr_parts"))]
+        else:
+            try:
+                select_nr_classes = float(field_values.get("select_nr_classes") or 0)
+            except (TypeError, ValueError):
+                select_nr_classes = 0.0
+            if select_nr_classes > 0:
+                parts += ["--select_min_nr_classes", str(field_values.get("select_nr_classes"))]
+        parts += [
             "--fn_root", "rank",
             "--do_granularity_features",
             "--auto_select",
+            "--min_score", str(field_values.get("rank_threshold", "")),
         ]
+        return parts
     return []
 
 
@@ -2750,6 +2830,35 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         program_override=_select_program_override,
         suppress_output_flag=_select_suppress_output_flag,
         extra_flags=_select_extra_flags,
+        # The 6 mode-select booleans have no flag of their own in real
+        # RELION (each only ever GATES other flags -- see _select_extra_
+        # flags/program_override) and every value field below is built
+        # entirely by _select_extra_flags (compound do_select_values-or-
+        # do_discard-or-do_split / do_class_ranker conditions the generic
+        # per-option loop can't reach -- see that function's own
+        # docstring). Nothing here has anything left to hand-edit, so all
+        # of it is suppressed rather than shown as still needing a fix,
+        # same reasoning as Extract's bg_diameter/do_rescale. fn_data is
+        # deliberately NOT included here -- it still has its own genuinely-
+        # working option_flags mapping (a simple, non-"||" condition) for
+        # the SEPARATE do_remove_duplicates branch, which already
+        # correctly reads False (silently omitted, not "unmapped") for
+        # every other branch on its own; suppressing it here would hide a
+        # real regression if that mapping ever broke. fn_mic IS included:
+        # its own extracted condition contains a top-level "||" the
+        # generic evaluator won't trust (see job_registry._build_draft_
+        # command's own comment on extracted OR-conditions), so it would
+        # always show as unmapped otherwise even though _select_extra_
+        # flags now handles it fully.
+        suppress=frozenset({
+            "do_filaments", "do_remove_duplicates", "do_select_values", "do_discard",
+            "do_split", "do_class_ranker",
+            "dendrogram_threshold", "dendrogram_minclass",
+            "select_label", "select_minval", "select_maxval",
+            "discard_label", "discard_sigma",
+            "nr_split", "split_size", "fn_mic",
+            "fn_model", "select_nr_parts", "select_nr_classes", "rank_threshold",
+        }),
     ),
     "Subtract": JobDraftOverride(
         flags={
