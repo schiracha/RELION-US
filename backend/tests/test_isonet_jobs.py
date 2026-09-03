@@ -63,21 +63,34 @@ def test_every_isonet_job_has_a_conda_env_option(internal_name):
 @pytest.mark.parametrize("internal_name", sorted(ISONET_JOB_DEFINITIONS))
 def test_default_field_values_produce_the_bare_command(internal_name):
     """With every field left at its own declared default, the draft should
-    be just the conda/isonet.py/subcommand prefix plus whatever this module
-    ALWAYS needs (output_dir, or star_name for prepare_star) -- no stray
-    flags for values that don't differ from doing nothing."""
+    be just the copy-star-file prefix (for every job except Prepare Star,
+    whose star_file default is a real, non-blank guess) plus the
+    conda/isonet.py/subcommand invocation and whatever this module ALWAYS
+    needs (output_dir, or star_name for prepare_star) -- no stray flags for
+    values that don't differ from doing nothing."""
     definition = ISONET_JOB_DEFINITIONS[internal_name]
     defaults = {opt["key"]: opt.get("default", "") for opt in definition["options"]}
     cmd = build_isonet_command(internal_name, defaults, f"{internal_name}/job001")
     tokens = cmd.split()
-    assert tokens[:6] == ["conda", "run", "--no-capture-output", "-n", "isonet2_environment", "isonet.py"]
-    assert tokens[6] == definition["subcommand"]
     if internal_name == "IsonetPrepareStar":
+        # No star_file input at all -- nothing to copy, so no "cp ... &&" prefix.
+        assert tokens[:6] == ["conda", "run", "--no-capture-output", "-n", "isonet2_environment", "isonet.py"]
+        assert tokens[6] == definition["subcommand"]
         assert "--output_dir" not in tokens
         assert "--star_name" in tokens
     else:
+        # Default star_file guess is a real path, so a copy runs first (see
+        # build_isonet_command's own docstring for why) -- "cp", src, dst, "&&".
+        assert tokens[0] == "cp"
+        assert tokens[3] == "&&"
+        conda_idx = tokens.index("conda")
+        assert tokens[conda_idx:conda_idx + 6] == [
+            "conda", "run", "--no-capture-output", "-n", "isonet2_environment", "isonet.py"]
+        assert tokens[conda_idx + 6] == definition["subcommand"]
         assert "--output_dir" in tokens
         assert tokens[tokens.index("--output_dir") + 1] == f"{internal_name}/job001/"
+        assert "--star_file" in tokens
+        assert tokens[tokens.index("--star_file") + 1] == f"{internal_name}/job001/tomograms.star"
 
 
 def test_build_isonet_command_uses_space_separated_flags_not_equals():
@@ -93,8 +106,46 @@ def test_build_isonet_command_uses_space_separated_flags_not_equals():
     tokens = cmd.split()
     assert "--ncpus" in tokens
     assert tokens[tokens.index("--ncpus") + 1] == "8"
+    # star_file is copied into this job's own directory first; isonet.py is
+    # pointed at that COPY, not the raw input -- see the docstring below.
     assert "--star_file" in tokens
-    assert tokens[tokens.index("--star_file") + 1] == "Import/job001/tomograms.star"
+    assert tokens[tokens.index("--star_file") + 1] == "IsonetDeconv/job002/tomograms.star"
+
+
+def test_star_file_is_copied_not_mutated_in_place():
+    """The whole point of copying first: deconv/make_mask/predict (and
+    denoise/refine's own "with preview" step) all rewrite whatever file
+    --star_file points at IN PLACE (confirmed reading IsoNet/utils/utils.py's
+    process_tomograms: `starfile.write(new_star, star_path)`, star_path
+    being the INPUT path). Pointing isonet.py at a copy inside this job's
+    own directory, instead of the user's original input, is what keeps an
+    earlier job's tracked output from being silently rewritten -- and keeps
+    this job's own result inside ITS OWN directory (Outputs tab / Clean /
+    Delete stay honest, matching every other job in this app)."""
+    cmd = build_isonet_command(
+        "IsonetMakeMask", {"star_file": "IsonetDeconv/job002/tomograms.star"},
+        "IsonetMakeMask/job003",
+    )
+    tokens = cmd.split()
+    assert tokens[:4] == [
+        "cp", "IsonetDeconv/job002/tomograms.star", "IsonetMakeMask/job003/tomograms.star", "&&",
+    ]
+    # isonet.py itself must never see the original path anywhere in its own
+    # argv -- only the copy.
+    isonet_argv = tokens[tokens.index("isonet.py"):]
+    assert "IsonetDeconv/job002/tomograms.star" not in isonet_argv
+    assert tokens[tokens.index("--star_file") + 1] == "IsonetMakeMask/job003/tomograms.star"
+
+
+def test_no_star_file_given_means_no_copy_and_no_flag():
+    """A draft opened before the user has picked an input star (or one left
+    blank) shouldn't try to `cp` an empty path -- confirmed this omits both
+    the copy step and the --star_file flag entirely, same as any other
+    blank field."""
+    cmd = build_isonet_command("IsonetDeconv", {}, "IsonetDeconv/job004")
+    tokens = cmd.split()
+    assert tokens[0] != "cp"
+    assert "--star_file" not in tokens
 
 
 def test_conda_env_field_changes_the_dash_n_token_not_a_flag():
@@ -161,7 +212,11 @@ def test_get_job_definition_routes_isonet_jobs_to_isonet_helper(internal_name):
     definition = main.get_job_definition(internal_name)
     assert definition["internal_name"] == internal_name
     assert "draft_command" in definition
-    assert definition["draft_command"].split()[6] == ISONET_JOB_DEFINITIONS[internal_name]["subcommand"]
+    # Not a fixed token index -- a leading "cp ... &&" (see
+    # build_isonet_command's docstring) shifts where the subcommand lands
+    # for every job except Prepare Star, whose default star_file guess is a
+    # real path.
+    assert ISONET_JOB_DEFINITIONS[internal_name]["subcommand"] in definition["draft_command"].split()
 
 
 @pytest.mark.parametrize("internal_name", sorted(ISONET_JOB_DEFINITIONS))

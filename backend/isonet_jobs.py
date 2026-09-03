@@ -111,13 +111,40 @@ def build_isonet_command(internal_name: str, field_values: dict, output_subdir: 
     folded into --star_name instead (unless the user already typed a
     path containing "/", in which case it's respected as given, matching
     how a RELION output-path field works when hand-edited).
+
+    Every OTHER stage's --star_file is first COPIED into this job's own
+    directory (as tomograms.star), and isonet.py is pointed at that copy,
+    not the user's original -- deconv/make_mask/predict all write their new
+    column (rlnDeconvTomoName/rlnMaskName/rlnCorrectedTomoName or
+    rlnDenoisedTomoName) back onto whatever file --star_file points at IN
+    PLACE (confirmed reading IsoNet/utils/utils.py's process_tomograms:
+    `starfile.write(new_star, star_path)`, where star_path IS the input
+    path -- it never writes into --output_dir), and denoise/refine's own
+    "with preview" step does the exact same thing internally via a call to
+    self.predict(). Without this copy, every one of these jobs would
+    silently rewrite whatever star file the user pointed it at -- possibly
+    a much earlier job's own tracked output, or even the SAME file two
+    sibling jobs both read from -- exactly the "successive runs silently
+    overwrite one shared file" problem custom_jobs.py's _resolve_out
+    already avoids for the import bridges (see its own docstring). The copy
+    keeps this job's result in ITS OWN directory (Outputs tab / Clean /
+    Delete stay honest, matching every other job in this app) and leaves
+    the input star -- and whatever job produced it -- untouched, so it can
+    be reused by a second, different run.
     """
     definition = ISONET_JOB_DEFINITIONS[internal_name]
     field_values = field_values or {}
     env = str(field_values.get("conda_env") or "isonet2_environment").strip() or "isonet2_environment"
 
     subdir_arg = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
-    parts = [
+    job_star = subdir_arg + _JOB_STAR_FILENAME
+    source_star = str(field_values.get("star_file") or "").strip() if internal_name != "IsonetPrepareStar" else ""
+
+    prefix: list[str] = []
+    if source_star:
+        prefix = ["cp", shlex.quote(source_star), shlex.quote(job_star), "&&"]
+
+    parts = prefix + [
         "conda", "run", "--no-capture-output", "-n", shlex.quote(env),
         "isonet.py", definition["subcommand"],
     ]
@@ -134,6 +161,11 @@ def build_isonet_command(internal_name: str, field_values: dict, output_subdir: 
             if "/" not in star_name:
                 star_name = subdir_arg + star_name
             parts.extend(_isonet_flag("star_name", star_name))
+            continue
+        if key == "star_file" and internal_name != "IsonetPrepareStar":
+            if source_star:
+                # Points at the COPY just made above, not the user's original.
+                parts.extend(_isonet_flag("star_file", job_star))
             continue
         if _is_default(option, value):
             continue
@@ -182,11 +214,27 @@ _SNRFALLOFF_DECONV_OPTIONS = [
 ]
 
 
+# The filename build_isonet_command copies every downstream stage's input
+# star into, inside that job's OWN output directory, before running
+# isonet.py against the copy -- see build_isonet_command's own docstring
+# for why (deconv/make_mask/predict/with_preview all mutate --star_file IN
+# PLACE; copying first keeps that mutation inside this job's own tracked
+# directory instead of silently rewriting an earlier job's output).
+_JOB_STAR_FILENAME = "tomograms.star"
+
+
 def _star_input_option(default_guess: str, help_extra: str = "") -> dict:
     return {
-        "key": "star_file", "field_type": "inputnode", "label": "Input tomograms STAR file:",
+        "key": "star_file", "field_type": "inputnode", "label": "Input tomograms STAR file (required):",
         "default": default_guess, "pattern": "*.star",
-        "help": f"STAR file listing tomograms and acquisition metadata. {help_extra}".strip(),
+        "help": (
+            f"Required -- IsoNet2 cannot run without it. {help_extra} "
+            "This job COPIES the star file you point it at into its own output directory (as "
+            "tomograms.star) and works on that copy -- your input file is never modified. That copy, "
+            "not your original input, is what a following stage should be pointed at to continue the "
+            "chain (this is why the default above points at a PRIOR job's own output, not the ultimate "
+            "Prepare Star source)."
+        ).strip(),
     }
 
 
@@ -208,46 +256,87 @@ ISONET_JOB_DEFINITIONS = {
             # one is out of scope here (see this plan's "no frontend changes"
             # design decision). Typed by hand instead, same as isonet.py's
             # own CLI would take them.
+            #
+            # full vs. even+odd is a genuine EITHER/OR, not two independently
+            # optional fields -- confirmed both in isonet.py's own source
+            # (`count_folder = full if full not in ["None", None] else even`;
+            # leaving all three at "None" crashes with a bare
+            # FileNotFoundError('None'), confirmed running this for real) and
+            # in the GUI/README (the GUI's Prepare tab has an explicit
+            # "Even/Odd Input" toggle; FAQ: "Use even/odd... for
+            # --method isonet2-n2n... Use full tomograms for... --method
+            # isonet2 when movies/tilt-series are not available").
             {"key": "full", "field_type": "text", "label": "Full tomograms folder:", "default": "None",
-             "help": "Directory containing full tomogram(s) (.mrc/.rec). Leave as \"None\" if "
-             "you're using even/odd halves instead."},
+             "help": "One of two ways to supply tomograms -- either this, OR even+odd below (not both; "
+             "leaving all three at \"None\" fails). Directory containing full tomogram(s) (.mrc/.rec), "
+             "for single-map training (--method isonet2 downstream). Use this when you don't have "
+             "even/odd halves (e.g. no separate movies/tilt-series to split)."},
             {"key": "even", "field_type": "text", "label": "Even half-tomograms folder:", "default": "None",
-             "help": "Directory containing even half-tomograms, for Noise2Noise training."},
+             "help": "One of two ways to supply tomograms -- this + odd below, OR full above (not both). "
+             "Directory containing even half-tomograms, for Noise2Noise training (--method isonet2-n2n "
+             "downstream) -- generally recommended over full when you have paired halves, since it gives "
+             "better denoising (per IsoNet2's own FAQ)."},
             {"key": "odd", "field_type": "text", "label": "Odd half-tomograms folder:", "default": "None",
-             "help": "Directory containing odd half-tomograms, for Noise2Noise training."},
+             "help": "Must be set together with even above (both or neither). Directory containing odd "
+             "half-tomograms."},
             {"key": "mask_folder", "field_type": "text", "label": "Mask folder (optional):", "default": "None",
-             "help": "Directory containing pre-made mask files for the tomograms, if you have them."},
+             "help": "Optional. Directory containing pre-made mask files for the tomograms, if you already "
+             "have them -- most users should skip this and use the separate IsoNet2 – Make Mask job instead, "
+             "which generates masks automatically after this one."},
             {"key": "coordinate_folder", "field_type": "text", "label": "Coordinate folder (optional):",
              "default": "None",
-             "help": "Directory containing coordinate files for subtomogram extraction, if you have them."},
+             "help": "Optional. Directory containing subtomogram coordinate files, if you already have "
+             "them. When set, the number of subtomograms is taken from these files INSTEAD of the "
+             "\"Subtomograms per tomogram\" field below, which is then ignored."},
             {"key": "star_name", "field_type": "text", "label": "Output STAR filename:", "default": "tomograms.star",
-             "help": "Name of the generated STAR file, written into this job's output directory."},
+             "help": "Name of the generated STAR file, written into this job's output directory. Every "
+             "downstream IsoNet2 stage should be pointed at this same file (see its own star-file field's "
+             "help for why)."},
             {"key": "pixel_size", "field_type": "text", "label": "Pixel size (Å, or \"auto\"):", "default": "auto",
-             "help": "Pixel size in Ångstroms. Leave as \"auto\" to read it from the tomogram headers. Aim for "
-             "~10Å/px binned; extreme deviations aren't recommended (target Z resolution is ~30Å)."},
+             "help": "Optional. Pixel size in Ångstroms. Leave as \"auto\" to read it from the tomogram "
+             "headers -- override only if there's no usable metadata or you need a different value. Aim "
+             "for ~10Å/px binned; extreme deviations aren't recommended (target Z resolution is ~30Å)."},
             {"key": "defocus", "field_type": "text", "label": "Defocus (Å, zero-tilt):", "default": "10000",
-             "help": "Defocus at zero tilt, in Ångstroms. A single value applies to every tomogram."},
+             "help": "Optional. Defocus at zero tilt, in Ångstroms -- a single value applies to every "
+             "tomogram, or give a comma-separated list (one value per tomogram). Only used for CTF "
+             "correction later, not for missing-wedge geometry. If you don't know it yet, leave the "
+             "default and edit the generated STAR's rlnDefocus column by hand afterward (the IsoNet2 GUI's "
+             "own tutorial does exactly this)."},
             {"key": "cs", "field_type": "slider", "label": "Spherical aberration Cs (mm):", "default": 2.7,
-             "min": 0.0, "max": 10.0, "step": 0.1, "help": "Spherical aberration, in mm."},
+             "min": 0.0, "max": 10.0, "step": 0.1,
+             "help": "Optional, only used for CTF correction later. Spherical aberration, in mm -- from "
+             "your microscope's specifications."},
             {"key": "voltage", "field_type": "text", "label": "Voltage (kV):", "default": "300",
-             "help": "Acceleration voltage, in kV."},
+             "help": "Optional, only used for CTF correction later. Acceleration voltage, in kV."},
             {"key": "ac", "field_type": "slider", "label": "Amplitude contrast:", "default": 0.1,
-             "min": 0.0, "max": 1.0, "step": 0.01, "help": "Amplitude contrast fraction."},
+             "min": 0.0, "max": 1.0, "step": 0.01,
+             "help": "Optional, only used for CTF correction later. Amplitude contrast fraction."},
             {"key": "tilt_min", "field_type": "text", "label": "Minimum tilt angle (°):", "default": "-60",
-             "help": "Minimum tilt angle in degrees."},
+             "help": "Optional. Defines the shape of the missing-wedge mask used during training -- "
+             "override if your acquisition's tilt range differs from ±60°."},
             {"key": "tilt_max", "field_type": "text", "label": "Maximum tilt angle (°):", "default": "60",
-             "help": "Maximum tilt angle in degrees."},
+             "help": "Optional, paired with the minimum above. Override if your tilt range differs."},
             {"key": "create_average", "field_type": "boolean", "label": "Create averaged full tomograms:",
-             "default": False, "help": "When even/odd folders are given, also average them into full tomograms."},
+             "default": False,
+             "help": "Optional, and only meaningful when even+odd are set (ignored for full). Sums the "
+             "even and odd folders into full tomograms alongside the halves -- useful so the Deconvolution "
+             "and Make Mask stages have a full tomogram to work from even though you're training "
+             "Noise2Noise on the halves (see the FAQ: 'When should I use CTF deconvolution?')."},
             {"key": "number_subtomos", "field_type": "text", "label": "Subtomograms per tomogram:", "default": "auto",
-             "help": "Number of subtomograms extracted during training. Leave as \"auto\", or edit per-tomogram "
-             "in the generated STAR file afterward."},
+             "help": "Optional; ignored if a coordinate folder is set above (see its own help). \"auto\" "
+             "divides 3000 total subtomograms per epoch across your tomograms. Increasing this is like "
+             "increasing training exposure (more runtime/memory); decreasing it is not recommended. Can "
+             "also be edited per-tomogram directly in the generated STAR file afterward."},
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "full", "even", "odd", "mask_folder", "coordinate_folder", "star_name",
-            "pixel_size", "defocus", "cs", "voltage", "ac", "tilt_min", "tilt_max",
-            "create_average", "number_subtomos",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "full", "even", "odd"]},
+            {"name": "Optional inputs", "fields": ["mask_folder", "coordinate_folder"]},
+            {"name": "Output", "fields": ["star_name"]},
+            {"name": "Acquisition metadata (for later CTF correction)",
+             "fields": ["pixel_size", "defocus", "cs", "voltage", "ac"]},
+            {"name": "Missing-wedge geometry", "fields": ["tilt_min", "tilt_max"]},
+            {"name": "Subtomogram sampling", "fields": ["create_average", "number_subtomos"]},
+        ],
     },
     "IsonetDeconv": {
         "internal_name": "IsonetDeconv",
@@ -263,25 +352,33 @@ ISONET_JOB_DEFINITIONS = {
                 "Typically the output of an IsoNet2 – Prepare Star job.",
             ),
             {"key": "input_column", "field_type": "text", "label": "Input STAR column:", "default": "rlnTomoName",
-             "help": "STAR column to read tomogram paths from."},
+             "help": "Optional. STAR column to read tomogram paths from -- rlnTomoName (full tomograms) is "
+             "the only column this module reads directly; there's no even/odd form of deconv."},
             *_SNRFALLOFF_DECONV_OPTIONS,
             {"key": "chunk_size", "field_type": "text", "label": "Chunk size (voxels, optional):", "default": "",
-             "help": "Process tomograms in cubic chunks of this size, to reduce memory usage on very large "
-             "tomograms or limited RAM/VRAM. May create edge artifacts if too small. Leave blank to disable."},
+             "help": "Optional. Process tomograms in cubic chunks of this size, to reduce memory usage on "
+             "very large tomograms or limited RAM/VRAM. May create edge artifacts if too small. Leave "
+             "blank to disable (the overlap fraction below is then unused)."},
             {"key": "overlap_rate", "field_type": "slider", "label": "Chunk overlap fraction:", "default": 0.25,
              "min": 0.0, "max": 0.9, "step": 0.05,
-             "help": "Fractional overlap between adjacent chunks, if chunking is enabled. Larger overlaps reduce "
-             "edge artifacts at the cost of extra computation."},
+             "help": "Optional, and only meaningful when chunk size above is set (ignored otherwise). "
+             "Fractional overlap between adjacent chunks. Larger overlaps reduce edge artifacts at the "
+             "cost of extra computation."},
             {"key": "ncpus", "field_type": "text", "label": "CPU workers:", "default": "4",
-             "help": "Number of CPU workers for CPU-bound parts of deconvolution."},
+             "help": "Optional. Number of CPU workers for CPU-bound parts of deconvolution."},
             {"key": "phaseflipped", "field_type": "boolean", "label": "Input already phase-flipped:", "default": False,
-             "help": "If checked, input is assumed already phase-flipped."},
+             "help": "Optional. If checked, input is assumed already phase-flipped -- keep this consistent "
+             "with the \"input already phase-flipped\" fields on any downstream Denoise/Refine/Predict job "
+             "using the same tomograms."},
             _TOMO_IDX_OPTION,
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "star_file", "input_column", "snrfalloff", "deconvstrength", "highpassnyquist",
-            "chunk_size", "overlap_rate", "ncpus", "phaseflipped", "tomo_idx",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "star_file", "input_column"]},
+            {"name": "Deconvolution strength", "fields": ["snrfalloff", "deconvstrength", "highpassnyquist"]},
+            {"name": "Performance", "fields": ["chunk_size", "overlap_rate", "ncpus"]},
+            {"name": "CTF handling", "fields": ["phaseflipped"]},
+            {"name": "Subset", "fields": ["tomo_idx"]},
+        ],
     },
     "IsonetMakeMask": {
         "internal_name": "IsonetMakeMask",
@@ -289,37 +386,45 @@ ISONET_JOB_DEFINITIONS = {
         "label_new": "custom.isonet_make_mask",
         "display_name": "IsoNet2 – Make Mask",
         "category": "IsoNet (Beta)",
-        "description": "Generate sampling masks for tomograms, to prioritize regions of interest during training",
+        "description": "Generate sampling masks for tomograms, to prioritize regions of interest during "
+                       "training. Recommended before Refine; not necessary before Denoise (per IsoNet2's own FAQ).",
         "options": [
             _CONDA_ENV_OPTION,
             _star_input_option(
                 "IsonetDeconv/job001/tomograms.star",
-                "Typically the output of an IsoNet2 – CTF Deconvolution job.",
+                "Typically the output of an IsoNet2 – CTF Deconvolution or IsoNet2 – Denoise (Train) job.",
             ),
             {"key": "input_column", "field_type": "text", "label": "Input STAR column:", "default": "rlnDeconvTomoName",
-             "help": "STAR column to read tomograms from. Falls back to rlnTomoName, then "
-             "rlnTomoReconstructedTomogramHalf1, if absent."},
+             "help": "Optional -- has a built-in fallback chain, so leaving the default is usually fine: "
+             "tries rlnDeconvTomoName first, then rlnTomoName, then rlnTomoReconstructedTomogramHalf1. "
+             "IsoNet2's own GUI recommends pointing this at whichever processed column you have -- "
+             "rlnDenoisedTomoName after Denoise, rlnDeconvTomoName after Deconvolution, or "
+             "rlnCorrectedTomoName if re-masking an already-refined dataset -- and specifically warns "
+             "that the raw, unprocessed columns this fallback chain ends on (rlnTomoName / "
+             "rlnTomoReconstructedTomogramHalf1) \"will likely generate poor masks.\""},
             {"key": "patch_size", "field_type": "slider", "label": "Local patch size:", "default": 4,
              "min": 1, "max": 32, "step": 1,
-             "help": "Local patch size used for max/std local filters. Larger values smooth detection of "
-             "specimen regions."},
+             "help": "Optional. Local patch size used for max/std local filters. Larger values smooth "
+             "detection of specimen regions."},
             {"key": "density_percentage", "field_type": "slider", "label": "Density percentile kept:", "default": 50,
              "min": 0, "max": 100, "step": 1,
-             "help": "Percentage of voxels retained by local-density ranking. Lower values create stricter masks."},
+             "help": "Optional. Percentage of voxels retained by local-density ranking. Lower values "
+             "create stricter masks. Raise this (less strict) if a mask misses specimen regions."},
             {"key": "std_percentage", "field_type": "slider", "label": "Std-dev percentile kept:", "default": 50,
              "min": 0, "max": 100, "step": 1,
-             "help": "Percentage of voxels retained by local-standard-deviation ranking. Lower values emphasize "
-             "textured regions."},
+             "help": "Optional. Percentage of voxels retained by local-standard-deviation ranking. Lower "
+             "values emphasize textured regions. Raise this (less strict) if a mask misses specimen regions."},
             {"key": "z_crop", "field_type": "slider", "label": "Z crop fraction:", "default": 0.2,
              "min": 0.0, "max": 0.9, "step": 0.05,
-             "help": "Fraction of tomogram Z cropped from both ends (masks out the top and bottom, each "
-             "half this fraction) to avoid sampling low-quality reconstruction edges."},
+             "help": "Optional. Fraction of tomogram Z cropped from both ends (masks out the top and "
+             "bottom, each half this fraction) to avoid sampling low-quality reconstruction edges."},
             _TOMO_IDX_OPTION,
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "star_file", "input_column", "patch_size", "density_percentage",
-            "std_percentage", "z_crop", "tomo_idx",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "star_file", "input_column"]},
+            {"name": "Mask sensitivity", "fields": ["patch_size", "density_percentage", "std_percentage", "z_crop"]},
+            {"name": "Subset", "fields": ["tomo_idx"]},
+        ],
     },
     "IsonetDenoise": {
         "internal_name": "IsonetDenoise",
@@ -336,58 +441,80 @@ ISONET_JOB_DEFINITIONS = {
             ),
             _GPU_IDS_OPTION,
             {"key": "ncpus", "field_type": "text", "label": "CPU workers:", "default": "16",
-             "help": "Number of CPUs used for data processing."},
+             "help": "Optional. Number of CPUs used for data processing."},
             {"key": "arch", "field_type": "radio", "label": "Network architecture:", "default": "unet-medium",
              "options": _ARCH_CHOICES,
-             "help": "Determines model capacity and VRAM requirements."},
+             "help": "Optional. Determines model capacity and VRAM requirements -- pick a smaller "
+             "architecture (or reduce cube size / batch size below, or enable mixed precision) if you "
+             "run out of GPU memory."},
             {"key": "pretrained_model", "field_type": "filename", "label": "Pretrained model (optional):",
              "default": "", "pattern": "*.pt",
-             "help": "Path to a trained model checkpoint to continue training from."},
+             "help": "Optional, for continuing an earlier run only. Path to a trained model checkpoint to "
+             "continue training from -- its architecture/cube_size/CTF_mode are reloaded from the "
+             "checkpoint, overriding the fields on this page."},
             {"key": "cube_size", "field_type": "slider", "label": "Training cube size (voxels):", "default": 96,
              "min": 32, "max": 256, "step": 8,
-             "help": "Size of training subvolumes. Must be compatible with the network's downsampling factors."},
+             "help": "Optional. Size of training subvolumes -- any multiple of 16, 64 or larger. Larger "
+             "cubes use more GPU memory."},
             {"key": "epochs", "field_type": "slider", "label": "Epochs:", "default": 50,
-             "min": 1, "max": 500, "step": 1, "help": "Number of training epochs."},
+             "min": 1, "max": 500, "step": 1,
+             "help": "Optional. Number of training epochs -- IsoNet2's own FAQ recommends at least 50."},
             {"key": "batch_size", "field_type": "text", "label": "Batch size (or \"auto\"):", "default": "auto",
-             "help": "Subtomograms per optimization step. \"auto\" picks GPUs×2 (or 4 for a single GPU)."},
+             "help": "Optional. Subtomograms per optimization step. \"auto\" picks GPUs×2 (or 4 for a "
+             "single GPU) -- reduce this (minimum: your GPU count) if you run out of GPU memory."},
             {"key": "loss_func", "field_type": "radio", "label": "Loss function:", "default": "L2",
-             "options": ["L2", "Huber", "L1"], "help": "Training loss function."},
+             "options": ["L2", "Huber", "L1"], "help": "Optional. Training loss function."},
             {"key": "save_interval", "field_type": "slider", "label": "Checkpoint save interval (epochs):",
-             "default": 10, "min": 1, "max": 100, "step": 1, "help": "Interval, in epochs, between saved checkpoints."},
+             "default": 10, "min": 1, "max": 100, "step": 1,
+             "help": "Optional. Interval, in epochs, between saved checkpoints -- also how often the "
+             "preview below (if enabled) updates."},
             {"key": "learning_rate", "field_type": "text", "label": "Learning rate:", "default": "3e-4",
-             "help": "Initial learning rate."},
+             "help": "Optional. Initial learning rate."},
             {"key": "learning_rate_min", "field_type": "text", "label": "Minimum learning rate:", "default": "3e-4",
-             "help": "Minimum learning rate for the scheduler."},
+             "help": "Optional. Minimum learning rate for the scheduler."},
             {"key": "mixed_precision", "field_type": "boolean", "label": "Mixed precision (fp16):", "default": True,
-             "help": "Use float16/mixed precision to reduce VRAM and speed up training."},
+             "help": "Optional. Uses float16/mixed precision to reduce VRAM and speed up training, if your "
+             "GPU and drivers support it."},
             {"key": "CTF_mode", "field_type": "radio", "label": "CTF handling mode:", "default": "None",
              "options": ["None", "phase_only", "network", "wiener"],
-             "help": "None: no CTF correction. phase_only: phase-only correction. network: CTF-shaped filter on "
-             "network input. wiener: Wiener filter on network target."},
+             "help": "Optional. None: no CTF correction. phase_only: phase-only correction. network: "
+             "CTF-shaped filter on network input. wiener: Wiener filter on network target."},
             {"key": "isCTFflipped", "field_type": "boolean", "label": "Input already phase-flipped:", "default": False,
-             "help": "Whether input tomograms are already phase-flipped."},
+             "help": "Optional. Whether input tomograms are already phase-flipped -- keep this consistent "
+             "with any upstream Deconvolution job's own \"already phase-flipped\" field for the same data."},
             {"key": "do_phaseflip_input", "field_type": "boolean", "label": "Apply phase flip during training:",
-             "default": True, "help": "Whether to apply phase flip during training."},
+             "default": True, "help": "Optional. Whether to apply phase flip during training."},
             {"key": "bfactor", "field_type": "slider", "label": "B-factor:", "default": 0,
              "min": 0, "max": 500, "step": 10,
-             "help": "B-factor to boost high-frequency content. Recommend 0 for cellular tomograms; 200–300 "
-             "for isolated samples."},
+             "help": "Optional. B-factor to boost high-frequency content. Recommend 0 for cellular "
+             "tomograms; 200-300 for isolated samples."},
             {"key": "clip_first_peak_mode", "field_type": "radio", "label": "Clip first CTF peak mode:", "default": "1",
              "options": ["0", "1", "2", "3"],
-             "help": "Attenuates the overrepresented very-low-frequency CTF peak. 0: none, 1: constant clip, "
-             "2: negative sine, 3: cosine. 2/3 might increase low-resolution contrast."},
+             "help": "Optional. Attenuates the overrepresented very-low-frequency CTF peak. 0: none, "
+             "1: constant clip, 2: negative sine, 3: cosine. 2/3 might increase low-resolution contrast."},
             *_SNRFALLOFF_DECONV_OPTIONS,
             {"key": "with_preview", "field_type": "boolean", "label": "Predict a preview after training:",
-             "default": True, "help": "Run prediction with the final checkpoint(s) after training."},
+             "default": True, "help": "Optional. Runs a prediction with the latest checkpoint every save "
+             "interval (above), so you can watch results improve live -- the tomogram index below only "
+             "matters when this is on."},
             {"key": "prev_tomo_idx", "field_type": "text", "label": "Preview tomogram index:", "default": "1",
-             "help": "STAR row index (or range, e.g. \"1,2,4\") to auto-predict for the preview."},
+             "help": "Optional, and only used when \"predict a preview\" above is on. STAR row index (or "
+             "range, e.g. \"1,2,4\") to auto-predict for the preview."},
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "star_file", "gpuID", "ncpus", "arch", "pretrained_model", "cube_size", "epochs",
-            "batch_size", "loss_func", "save_interval", "learning_rate", "learning_rate_min", "mixed_precision",
-            "CTF_mode", "isCTFflipped", "do_phaseflip_input", "bfactor", "clip_first_peak_mode",
-            "snrfalloff", "deconvstrength", "highpassnyquist", "with_preview", "prev_tomo_idx",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "star_file", "gpuID", "ncpus"]},
+            {"name": "Network architecture", "fields": ["arch", "cube_size", "pretrained_model"]},
+            {"name": "Training", "fields": [
+                "epochs", "batch_size", "loss_func", "learning_rate", "learning_rate_min",
+                "save_interval", "mixed_precision",
+            ]},
+            {"name": "CTF handling", "fields": [
+                "CTF_mode", "isCTFflipped", "do_phaseflip_input", "bfactor", "clip_first_peak_mode",
+            ]},
+            {"name": "CTF deconvolution (used alongside CTF handling above)",
+             "fields": ["snrfalloff", "deconvstrength", "highpassnyquist"]},
+            {"name": "Live preview", "fields": ["with_preview", "prev_tomo_idx"]},
+        ],
     },
     "IsonetRefine": {
         "internal_name": "IsonetRefine",
@@ -399,84 +526,124 @@ ISONET_JOB_DEFINITIONS = {
         "options": [
             _CONDA_ENV_OPTION,
             _star_input_option(
-                "IsonetDeconv/job001/tomograms.star",
-                "Typically the output of an IsoNet2 – CTF Deconvolution job.",
+                "IsonetMakeMask/job001/tomograms.star",
+                "IsoNet2's own FAQ: masks are recommended for every refine run (though not strictly "
+                "required -- point this at an IsoNet2 – CTF Deconvolution job's output instead to skip "
+                "masking).",
             ),
             _GPU_IDS_OPTION,
             {"key": "ncpus", "field_type": "text", "label": "CPU workers:", "default": "16",
-             "help": "Number of CPUs used for data processing."},
+             "help": "Optional. Number of CPUs used for data processing."},
             {"key": "method", "field_type": "radio", "label": "Method:", "default": "auto",
              "options": ["auto", "isonet2", "isonet2-n2n"],
-             "help": "\"auto\" detects from the STAR file (full tomograms -> isonet2; even/odd halves -> "
-             "isonet2-n2n). Set explicitly if both are present."},
+             "help": "Optional, but NOT purely cosmetic: \"auto\" detects from the STAR file's own columns "
+             "(rlnTomoName present -> isonet2; rlnTomoReconstructedTomogramHalf1/2 present -> "
+             "isonet2-n2n) -- but if a star file somehow has BOTH sets of columns, auto-detection is "
+             "ambiguous and isonet.py raises an error demanding you set this explicitly instead. Leaving "
+             "it on \"auto\" is fine for a normal single-purpose star file."},
             {"key": "arch", "field_type": "radio", "label": "Network architecture:", "default": "unet-medium",
              "options": _ARCH_CHOICES,
-             "help": "Determines model capacity and VRAM requirements."},
+             "help": "Optional. Determines model capacity and VRAM requirements -- pick a smaller "
+             "architecture (or reduce cube size / batch size below, or enable mixed precision) if you "
+             "run out of GPU memory."},
             {"key": "pretrained_model", "field_type": "filename", "label": "Pretrained model (optional):",
              "default": "", "pattern": "*.pt",
-             "help": "Path to a trained model checkpoint to continue training from."},
+             "help": "Optional, for continuing an earlier run only. Path to a trained model checkpoint to "
+             "continue training from -- its architecture/cube_size/CTF_mode are reloaded from the "
+             "checkpoint, overriding the fields on this page."},
             {"key": "cube_size", "field_type": "slider", "label": "Training cube size (voxels):", "default": 96,
              "min": 32, "max": 256, "step": 8,
-             "help": "Size of training subvolumes. Must be compatible with the network's downsampling factors."},
+             "help": "Optional. Size of training subvolumes -- any multiple of 16, 64 or larger. Larger "
+             "cubes use more GPU memory; if you run low on disk space, this is the field to reduce first "
+             "(back to the default 96, per IsoNet2's own tutorial)."},
             {"key": "epochs", "field_type": "slider", "label": "Epochs:", "default": 50,
-             "min": 1, "max": 500, "step": 1, "help": "Number of training epochs."},
+             "min": 1, "max": 500, "step": 1,
+             "help": "Optional. Number of training epochs -- IsoNet2's own FAQ recommends at least 50."},
             {"key": "input_column", "field_type": "text", "label": "Input STAR column:", "default": "rlnDeconvTomoName",
-             "help": "STAR column to use as input tomograms."},
+             "help": "Optional. STAR column to use as input tomograms -- the default assumes a "
+             "Deconvolution pass already ran. If you skipped deconv, change this to rlnTomoName (full "
+             "tomograms) instead; for isonet2-n2n, the even/odd half columns are used automatically and "
+             "this field is not read."},
             {"key": "batch_size", "field_type": "text", "label": "Batch size (or \"auto\"):", "default": "auto",
-             "help": "Subtomograms per optimization step. \"auto\" picks GPUs×2 (or 4 for a single GPU)."},
+             "help": "Optional. Subtomograms per optimization step. \"auto\" picks GPUs×2 (or 4 for a "
+             "single GPU) -- reduce this (minimum: your GPU count) if you run out of GPU memory."},
             {"key": "loss_func", "field_type": "radio", "label": "Loss function:", "default": "L2",
-             "options": ["L2", "Huber", "L1"], "help": "Training loss function."},
+             "options": ["L2", "Huber", "L1"], "help": "Optional. Training loss function."},
             {"key": "learning_rate", "field_type": "text", "label": "Learning rate:", "default": "3e-4",
-             "help": "Initial learning rate."},
+             "help": "Optional. Initial learning rate."},
             {"key": "save_interval", "field_type": "slider", "label": "Checkpoint save interval (epochs):",
-             "default": 10, "min": 1, "max": 100, "step": 1, "help": "Interval, in epochs, between saved checkpoints."},
+             "default": 10, "min": 1, "max": 100, "step": 1,
+             "help": "Optional. Interval, in epochs, between saved checkpoints -- also how often the "
+             "preview below (if enabled) updates."},
             {"key": "learning_rate_min", "field_type": "text", "label": "Minimum learning rate:", "default": "3e-4",
-             "help": "Minimum learning rate for the scheduler."},
+             "help": "Optional. Minimum learning rate for the scheduler."},
             {"key": "mw_weight", "field_type": "text", "label": "Missing-wedge loss weight:", "default": "-1",
-             "help": "Weight for missing-wedge loss. Higher emphasizes missing-wedge regions more strongly. "
-             "-1 disables it (default)."},
+             "help": "Optional. Weight for missing-wedge loss; -1 (default) disables it, using a single "
+             "combined loss for both missing-wedge correction and denoising. IsoNet2's own FAQ recommends "
+             "20-200 to prioritize missing-wedge reconstruction over general denoising."},
             {"key": "apply_mw_x1", "field_type": "boolean", "label": "Apply missing wedge to subtomograms:",
-             "default": True, "help": "Whether to apply the missing wedge to subtomograms at the start."},
+             "default": True, "help": "Optional. Whether to apply the missing wedge to subtomograms at "
+             "the start."},
             {"key": "mixed_precision", "field_type": "boolean", "label": "Mixed precision (fp16):", "default": True,
-             "help": "Use float16/mixed precision to reduce VRAM and speed up training."},
+             "help": "Optional. Uses float16/mixed precision to reduce VRAM and speed up training, if your "
+             "GPU and drivers support it."},
             {"key": "CTF_mode", "field_type": "radio", "label": "CTF handling mode:", "default": "None",
              "options": ["None", "phase_only", "network", "wiener"],
-             "help": "None: no CTF correction. phase_only: phase-only correction. network: CTF-shaped filter on "
-             "network input. wiener: Wiener filter on network target."},
+             "help": "Optional. None: no CTF correction. phase_only: phase-only correction. network: "
+             "CTF-shaped filter on network input (per IsoNet2's own FAQ, generally gives the highest "
+             "resolution detail, paired with clip_first_peak_mode 1 below). wiener: Wiener filter on "
+             "network target (also works well, but needs more hyperparameter tuning -- FAQ recommends "
+             "snrfalloff 0-1 and deconvstrength 1-5 below in that case)."},
             {"key": "clip_first_peak_mode", "field_type": "radio", "label": "Clip first CTF peak mode:", "default": "1",
              "options": ["0", "1", "2", "3"],
-             "help": "Attenuates the overrepresented very-low-frequency CTF peak. 0: none, 1: constant clip, "
-             "2: negative sine, 3: cosine. 2/3 might increase low-resolution contrast."},
+             "help": "Optional. Attenuates the overrepresented very-low-frequency CTF peak. 0: none, "
+             "1: constant clip, 2: negative sine, 3: cosine. 2/3 might increase low-resolution contrast "
+             "for specific datasets."},
             {"key": "bfactor", "field_type": "slider", "label": "B-factor:", "default": 0,
              "min": 0, "max": 500, "step": 10,
-             "help": "B-factor to boost high-frequency content. Recommend 0 for cellular tomograms; 200–300 "
-             "for isolated samples."},
+             "help": "Optional. B-factor to boost high-frequency content. Recommend 0 for cellular "
+             "tomograms; 200-300 for isolated samples."},
             {"key": "isCTFflipped", "field_type": "boolean", "label": "Input already phase-flipped:", "default": False,
-             "help": "Whether input tomograms are already phase-flipped."},
+             "help": "Optional. Whether input tomograms are already phase-flipped -- keep this consistent "
+             "with any upstream Deconvolution job's own \"already phase-flipped\" field for the same data."},
             {"key": "do_phaseflip_input", "field_type": "boolean", "label": "Apply phase flip during training:",
-             "default": True, "help": "Whether to apply phase flip during training."},
+             "default": True, "help": "Optional. Whether to apply phase flip during training."},
             {"key": "noise_level", "field_type": "slider", "label": "Synthetic noise level:", "default": 0.0,
-             "min": 0.0, "max": 5.0, "step": 0.1, "help": "Adds artificial noise during training."},
+             "min": 0.0, "max": 5.0, "step": 0.1,
+             "help": "Optional. Adds artificial noise during training -- the filter below only matters "
+             "once this is above 0."},
             {"key": "noise_mode", "field_type": "radio", "label": "Synthetic noise filter:", "default": "nofilter",
              "options": ["nofilter", "ramp", "hamming"],
-             "help": "Filter applied when generating synthetic noise."},
+             "help": "Optional, and only meaningful when the noise level above is greater than 0. Filter "
+             "applied when generating synthetic noise."},
             {"key": "random_rot_weight", "field_type": "slider", "label": "Random rotation augmentation:",
              "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
-             "help": "Fraction of training samples that get a random-rotation augmentation."},
+             "help": "Optional. Fraction of training samples that get a random-rotation augmentation."},
             {"key": "with_preview", "field_type": "boolean", "label": "Predict a preview after training:",
-             "default": True, "help": "Run prediction with the final checkpoint(s) after training."},
+             "default": True, "help": "Optional. Runs a prediction with the latest checkpoint every save "
+             "interval (above), so you can watch results improve live -- the tomogram index below only "
+             "matters when this is on."},
             {"key": "prev_tomo_idx", "field_type": "text", "label": "Preview tomogram index:", "default": "1",
-             "help": "STAR row index (or range, e.g. \"1,2,4\") to auto-predict for the preview."},
+             "help": "Optional, and only used when \"predict a preview\" above is on. STAR row index (or "
+             "range, e.g. \"1,2,4\") to auto-predict for the preview."},
             *_SNRFALLOFF_DECONV_OPTIONS,
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "star_file", "gpuID", "ncpus", "method", "arch", "pretrained_model", "cube_size",
-            "epochs", "input_column", "batch_size", "loss_func", "learning_rate", "save_interval",
-            "learning_rate_min", "mw_weight", "apply_mw_x1", "mixed_precision", "CTF_mode",
-            "clip_first_peak_mode", "bfactor", "isCTFflipped", "do_phaseflip_input", "noise_level",
-            "noise_mode", "random_rot_weight", "with_preview", "prev_tomo_idx",
-            "snrfalloff", "deconvstrength", "highpassnyquist",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "star_file", "method", "input_column", "gpuID", "ncpus"]},
+            {"name": "Network architecture", "fields": ["arch", "cube_size", "pretrained_model"]},
+            {"name": "Training", "fields": [
+                "epochs", "batch_size", "loss_func", "learning_rate", "learning_rate_min",
+                "save_interval", "mixed_precision",
+            ]},
+            {"name": "Missing-wedge weighting", "fields": ["apply_mw_x1", "mw_weight"]},
+            {"name": "CTF handling", "fields": [
+                "CTF_mode", "isCTFflipped", "do_phaseflip_input", "bfactor", "clip_first_peak_mode",
+            ]},
+            {"name": "CTF deconvolution (used alongside CTF handling above)",
+             "fields": ["snrfalloff", "deconvstrength", "highpassnyquist"]},
+            {"name": "Augmentation", "fields": ["noise_level", "noise_mode", "random_rot_weight"]},
+            {"name": "Live preview", "fields": ["with_preview", "prev_tomo_idx"]},
+        ],
     },
     "IsonetPredict": {
         "internal_name": "IsonetPredict",
@@ -488,33 +655,44 @@ ISONET_JOB_DEFINITIONS = {
         "options": [
             _CONDA_ENV_OPTION,
             _star_input_option(
-                "IsonetDeconv/job001/tomograms.star",
-                "The same (or equivalent) STAR file used for the Refine/Denoise training job.",
+                "IsonetRefine/job001/tomograms.star",
+                "Point this at the SAME star file (or that stage's own tomograms.star copy) used to "
+                "train the model below -- typically an IsoNet2 – Refine or IsoNet2 – Denoise job's own "
+                "output.",
             ),
-            {"key": "model", "field_type": "inputnode", "label": "Trained model checkpoint:", "default": "",
-             "pattern": "*.pt",
-             "help": "Path to a trained model (.pt), typically from an IsoNet2 – Refine (Train) or "
-             "IsoNet2 – Denoise (Train) job's output directory. Required."},
+            {"key": "model", "field_type": "inputnode", "label": "Trained model checkpoint (required):",
+             "default": "", "pattern": "*.pt",
+             "help": "Required -- IsoNet2 cannot predict without a trained model. Path to a checkpoint "
+             "(.pt) from an IsoNet2 – Refine (Train) or IsoNet2 – Denoise (Train) job's own output "
+             "directory, named network_<method>_<arch>_<cube_size>_full.pt -- that filename always "
+             "points at the newest checkpoint, so you can queue Predict against a still-running "
+             "training job and it will pick up the finished model automatically."},
             _GPU_IDS_OPTION,
             {"key": "input_column", "field_type": "text", "label": "Input STAR column:", "default": "rlnDeconvTomoName",
-             "help": "STAR column used for input tomogram paths (only relevant for an isonet2-method model)."},
+             "help": "Optional, and CONDITIONAL: only read at all if the loaded model's own method is "
+             "\"isonet2\" (single-map). For an isonet2-n2n or plain n2n/Denoise-trained model, the "
+             "even/odd half columns are used automatically instead and this field is ignored -- which "
+             "method a given .pt uses is saved inside the checkpoint itself, not chosen here."},
             {"key": "apply_mw_x1", "field_type": "boolean", "label": "Apply missing-wedge mask:", "default": True,
-             "help": "Build and apply the missing-wedge mask to cubic inputs before prediction."},
+             "help": "Optional. Builds and applies the missing-wedge mask to cubic inputs before prediction."},
             {"key": "isCTFflipped", "field_type": "boolean", "label": "Input already phase-flipped:", "default": False,
-             "help": "Declare if input tomograms are already phase-flipped."},
+             "help": "Optional. Declare if input tomograms are already phase-flipped -- keep this "
+             "consistent with the same field on the training (Refine/Denoise) job that produced the model."},
             {"key": "padding_factor", "field_type": "slider", "label": "Padding factor:", "default": 1.5,
              "min": 1.0, "max": 4.0, "step": 0.1,
-             "help": "Cubic padding factor used during tiling. Larger padding reduces seams but increases "
-             "computation."},
+             "help": "Optional. Cubic padding factor used during tiling. Larger padding reduces seams but "
+             "increases computation -- match this to the tiling the model was trained with for best results."},
             _TOMO_IDX_OPTION,
             {"key": "output_prefix", "field_type": "text", "label": "Output filename prefix:", "default": "",
-             "help": "Prefix added to predicted MRC filenames."},
+             "help": "Optional. Prefix added to predicted MRC filenames."},
             {"key": "save_slices", "field_type": "boolean", "label": "Save preview slices/spectrum:", "default": True,
-             "help": "Save orthoslice/spectrum preview images alongside each predicted tomogram."},
+             "help": "Optional. Saves orthoslice/spectrum preview images alongside each predicted tomogram."},
         ],
-        "standard_groups": [{"name": "", "fields": [
-            "conda_env", "star_file", "model", "gpuID", "input_column", "apply_mw_x1", "isCTFflipped",
-            "padding_factor", "tomo_idx", "output_prefix", "save_slices",
-        ]}],
+        "standard_groups": [
+            {"name": "", "fields": ["conda_env", "star_file", "model", "gpuID"]},
+            {"name": "CTF / missing-wedge handling", "fields": ["input_column", "apply_mw_x1", "isCTFflipped"]},
+            {"name": "Prediction tiling", "fields": ["padding_factor"]},
+            {"name": "Output", "fields": ["tomo_idx", "output_prefix", "save_slices"]},
+        ],
     },
 }
