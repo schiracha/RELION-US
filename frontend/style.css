@@ -619,6 +619,8 @@ html, body {
 .star-preview-header .btn { padding: 2px 8px; font-size: 11px; }
 .star-preview-panel.collapsed .star-preview-body { display: none; }
 .star-preview-body { max-height: 320px; overflow: auto; padding: 8px; }
+.output-preview-image-wrap { display: flex; justify-content: center; }
+.output-preview-image { max-width: 100%; height: auto; display: block; border-radius: 3px; }
 .star-block { margin-bottom: 14px; }
 .star-block:last-child { margin-bottom: 0; }
 .star-block-name {

@@ -1458,17 +1458,27 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // --- Outputs tab: file listing, download, Clean / Harsh Clean --------
   const outputsContent = body.querySelector('[data-tab-content="outputs"]');
 
+  // path -> "star" | "image" | null (not previewable). Keyed off extension
+  // only, same as the pre-existing .star check -- cheap and matches every
+  // file this app or IsoNet2 actually produces (loss curves, orthoslice/
+  // spectrum previews) without guessing at file content.
+  function previewKindFor(path) {
+    if (/\.star$/i.test(path)) return "star";
+    if (/\.(png|jpe?g|gif|webp)$/i.test(path)) return "image";
+    return null;
+  }
+
   function renderOutputsList(files) {
     if (!files.length) {
       return '<div class="outputs-empty">No output files yet.</div>';
     }
     return `<div class="outputs-list">${files.map((f) => {
-      const isStar = /\.star$/i.test(f.path);
+      const kind = previewKindFor(f.path);
       return `
-      <div class="outputs-row" data-path="${escapeHtml(f.path)}">
+      <div class="outputs-row" data-path="${escapeHtml(f.path)}" ${kind ? `data-preview-kind="${kind}"` : ""}>
         <input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />
-        <span class="out-path${isStar ? " out-path-previewable" : ""}"
-              ${isStar ? 'data-role="preview" title="Click to preview contents"' : ""}
+        <span class="out-path${kind ? " out-path-previewable" : ""}"
+              ${kind ? `data-role="preview" title="Click to preview ${kind === "image" ? "image" : "contents"}"` : ""}
         >${escapeHtml(f.path)}</span>
         <span class="out-size">${formatBytes(f.size)}</span>
         <span class="out-download" data-role="download" title="Download">⬇</span>
@@ -1486,16 +1496,19 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     });
   }
 
-  // Clicking a .star filename (not its checkbox, which is a separate
-  // element and is never touched by this) opens/updates a preview panel
-  // pinned to the bottom of the Outputs tab -- collapsible so the checkbox
-  // list can be seen in full again without losing the "currently
-  // previewing X" state.
+  // Clicking a previewable filename (.star, or an image like the loss
+  // curves / orthoslice-spectrum PNGs IsoNet2's training/predict jobs write
+  // -- not its checkbox, which is a separate element and is never touched
+  // by this) opens/updates a preview panel pinned to the bottom of the
+  // Outputs tab -- collapsible so the checkbox list can be seen in full
+  // again without losing the "currently previewing X" state.
   function wireStarPreviewClicks(container) {
     container.querySelectorAll('[data-role="preview"]').forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
-        openStarPreview(el.closest(".outputs-row").dataset.path);
+        const row = el.closest(".outputs-row");
+        if (row.dataset.previewKind === "image") openImagePreview(row.dataset.path);
+        else openStarPreview(row.dataset.path);
       });
     });
   }
@@ -1543,6 +1556,25 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     } catch (err) {
       bodyEl.innerHTML = `<div class="outputs-empty">Could not preview file: ${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  // Same panel as openStarPreview above, just an <img> instead of parsed
+  // STAR tables -- no separate preview endpoint needed, the existing
+  // download route already serves the right Content-Type for the browser
+  // to render inline (an <img> tag doesn't honor Content-Disposition the
+  // way a top-level navigation would, so "download" vs "inline" here is
+  // purely which element is pointed at the same URL).
+  function openImagePreview(path) {
+    const panel = outputsContent.querySelector('[data-role="star-preview-panel"]');
+    if (!panel) return;
+    const title = panel.querySelector('[data-role="star-preview-title"]');
+    const bodyEl = panel.querySelector('[data-role="star-preview-body"]');
+    panel.hidden = false;
+    panel.classList.remove("collapsed");
+    title.textContent = path;
+    const url = `/api/runs/${currentRun.run_id}/files/download?path=${encodeURIComponent(path)}`;
+    bodyEl.innerHTML =
+      `<div class="output-preview-image-wrap"><img class="output-preview-image" src="${escapeHtml(url)}" alt="${escapeHtml(path)}" /></div>`;
   }
 
   function wireStarPreviewPanel(container) {
