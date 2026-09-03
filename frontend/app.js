@@ -5040,22 +5040,24 @@ async function openExcludeTiltsEditor({ runId, sourcePath }) {
   });
 }
 
-// ---- Select: the in-browser class-average selector -----------------------
+// ---- Select: the in-browser class/micrograph/particle selector -----------
 // Opened from a Select job popup's "🎯 Select Classes" button, shown only
 // once the run's own command confirms the server routed it into the
 // interactive branch (see openJobPopup's selectPickerBtn wiring). Replaces
-// relion_display's own --gui desktop window for choosing which 2D/3D
-// classes to keep: a thumbnail grid, click-to-toggle selected (no
-// pre-selection, matching real RELION -- see select_interactive.py's
-// module docstring), Save writes particles.star (+ class_averages.star for
-// a Class2D source) fresh from the original _data.star/model.star every
-// time, so re-saving with a different pick never accumulates.
+// relion_display's own --gui desktop window for all three of its
+// interactive input variants (see select_interactive.py's module
+// docstring): a thumbnail grid, click-to-toggle selected (no pre-selection,
+// matching real RELION), Save writes fresh from the original input every
+// time, so re-saving with a different pick never accumulates. The
+// server's /classes response carries a "mode" ("classes" | "micrographs" |
+// "particles") this function renders differently but interacts with
+// identically (same toggle/select-all/save mechanics throughout).
 async function openSelectClassPicker({ runId }) {
   const body = document.createElement("div");
   body.className = "sel-popup";
   body.innerHTML = `
     <div class="sel-toolbar">
-      <span class="sel-status" data-role="sel-status">Loading classes…</span>
+      <span class="sel-status" data-role="sel-status">Loading…</span>
       <div class="sel-toolbar-actions">
         <button type="button" class="btn btn-sm" data-role="sel-select-all">Select all</button>
         <button type="button" class="btn btn-sm" data-role="sel-select-none">Select none</button>
@@ -5063,7 +5065,7 @@ async function openSelectClassPicker({ runId }) {
       </div>
     </div>
     <div class="sel-grid" data-role="sel-grid">
-      <div class="sel-hint">Loading classes…</div>
+      <div class="sel-hint">Loading…</div>
     </div>
   `;
 
@@ -5071,45 +5073,65 @@ async function openSelectClassPicker({ runId }) {
   const statusEl = q('[data-role="sel-status"]');
   const gridEl = q('[data-role="sel-grid"]');
 
-  let classes = [];              // [{class_number, reference, distribution, resolution_A, nr_particles, ...}]
-  const selected = new Set();    // class_number values currently toggled on
+  let mode = "classes";
+  // Normalized across all 3 modes: {key, reference, title, subtitle,
+  // nParticles} -- key is class_number for classes, row_index otherwise
+  // (both are already the exact ints the /save endpoint's "selected" list
+  // expects back).
+  let items = [];
+  const selected = new Set();
+  const noun = () => (mode === "classes" ? "classes" : mode === "particles" ? "particles" : "micrographs");
+
+  function normalizeItems(resp) {
+    mode = resp.mode || "classes";
+    if (mode === "classes") {
+      return (resp.classes || []).map((c) => ({
+        key: c.class_number, reference: c.reference,
+        title: `#${c.class_number}`,
+        subtitle: `${(c.distribution * 100).toFixed(1)}%${c.resolution_A ? ` · ${c.resolution_A.toFixed(1)} Å` : ""}`,
+        nParticles: c.nr_particles || 0,
+      }));
+    }
+    return (resp.items || []).map((it) => ({
+      key: it.row_index, reference: it.reference,
+      title: it.label || it.reference, subtitle: "", nParticles: 0,
+    }));
+  }
 
   function summaryText() {
-    const nParticles = classes
-      .filter((c) => selected.has(c.class_number))
-      .reduce((sum, c) => sum + (c.nr_particles || 0), 0);
-    return `${selected.size}/${classes.length} classes selected (${nParticles} particles)`;
+    const nParticles = items.filter((it) => selected.has(it.key)).reduce((sum, it) => sum + it.nParticles, 0);
+    const particleNote = mode === "classes" ? ` (${nParticles} particles)` : "";
+    return `${selected.size}/${items.length} ${noun()} selected${particleNote}`;
   }
 
   function renderGrid() {
-    if (!classes.length) {
-      gridEl.innerHTML = '<div class="sel-hint">No classes found.</div>';
+    if (!items.length) {
+      gridEl.innerHTML = `<div class="sel-hint">No ${noun()} found.</div>`;
       return;
     }
     // Reuses the Progress tab's own .thumb-grid/.thumb/figcaption shape
-    // (thumbGridHtml, above) so a class-average grid looks the same
-    // whether it's read-only (mid-run progress) or this selectable one --
+    // (thumbGridHtml, above) so this grid looks the same whether it's
+    // read-only (mid-run progress) or this selectable one --
     // sel-clickable/sel-selected are the only new modifiers.
     gridEl.className = "thumb-grid";
-    gridEl.innerHTML = classes.map((c) => `
-      <figure class="thumb sel-clickable ${selected.has(c.class_number) ? "sel-selected" : ""}" data-class="${c.class_number}">
-        <img loading="lazy" alt="Class ${c.class_number}" src="/api/select/${runId}/thumbnail?reference=${encodeURIComponent(c.reference)}" />
-        <figcaption>#${c.class_number} · ${(c.distribution * 100).toFixed(1)}%${
-          c.resolution_A ? ` · ${c.resolution_A.toFixed(1)} Å` : ""}<br>${c.nr_particles} particles</figcaption>
+    gridEl.innerHTML = items.map((it) => `
+      <figure class="thumb sel-clickable ${selected.has(it.key) ? "sel-selected" : ""}" data-key="${it.key}">
+        <img loading="lazy" alt="${escapeHtml(it.title)}" src="/api/select/${runId}/thumbnail?reference=${encodeURIComponent(it.reference)}" />
+        <figcaption>${escapeHtml(it.title)}${it.subtitle ? ` · ${it.subtitle}` : ""}${mode === "classes" ? `<br>${it.nParticles} particles` : ""}</figcaption>
       </figure>
     `).join("");
     gridEl.querySelectorAll(".sel-clickable").forEach((card) => {
       card.addEventListener("click", () => {
-        const num = Number(card.dataset.class);
-        if (selected.has(num)) selected.delete(num); else selected.add(num);
-        card.classList.toggle("sel-selected", selected.has(num));
+        const key = Number(card.dataset.key);
+        if (selected.has(key)) selected.delete(key); else selected.add(key);
+        card.classList.toggle("sel-selected", selected.has(key));
         statusEl.textContent = summaryText();
       });
     });
   }
 
   q('[data-role="sel-select-all"]').addEventListener("click", () => {
-    classes.forEach((c) => selected.add(c.class_number));
+    items.forEach((it) => selected.add(it.key));
     renderGrid();
     statusEl.textContent = summaryText();
   });
@@ -5124,10 +5146,15 @@ async function openSelectClassPicker({ runId }) {
     try {
       const result = await api(`/api/select/${runId}/save`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selected_class_numbers: Array.from(selected) }),
+        body: JSON.stringify({ selected: Array.from(selected) }),
       });
-      statusEl.textContent = `Saved: ${result.n_classes_selected} classes, ${result.n_particles} particles`
-        + (result.class_averages_written ? " (particles.star + class_averages.star written)." : " (particles.star written).");
+      if (mode === "classes") {
+        statusEl.textContent = `Saved: ${result.n_classes_selected} classes, ${result.n_particles} particles`
+          + (result.class_averages_written ? " (particles.star + class_averages.star written)." : " (particles.star written).");
+      } else {
+        const fname = mode === "particles" ? "particles.star" : "micrographs.star";
+        statusEl.textContent = `Saved: ${result.n_written} ${noun()} (${fname} written).`;
+      }
     } catch (err) {
       statusEl.textContent = "Error: " + err.message;
     }
@@ -5135,7 +5162,7 @@ async function openSelectClassPicker({ runId }) {
 
   try {
     const resp = await api(`/api/select/${runId}/classes`);
-    classes = resp.classes || [];
+    items = normalizeItems(resp);
     renderGrid();
     statusEl.textContent = summaryText();
   } catch (err) {

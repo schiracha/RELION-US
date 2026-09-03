@@ -24,16 +24,29 @@ import select_interactive
 
 mrcfile = pytest.importorskip("mrcfile")
 starfile = pytest.importorskip("starfile")
+pytest.importorskip("scipy")
 
 NC = 3
 
 
-def _write_class2d_source(project: Path, job_rel="Class2D/job010", it=25, nc=NC, n_particles=10):
+def _write_class2d_source(project: Path, job_rel="Class2D/job010", it=25, nc=NC, n_particles=10, n_groups=None, blob_offset=None):
+    """n_groups: when set, adds rlnGroupNumber/rlnOpticsGroup to the
+    particles table (round-robin over n_groups groups, all optics group 1)
+    and a model_groups block (varying rlnGroupScaleCorrection, so sorting
+    is actually exercised) -- for #67's do_regroup tests.
+    blob_offset: when set (dy, dx), class 1's average is drawn as a small
+    off-center bright blob instead of random noise, so #66's do_recenter
+    tests can check the recentered result lands back near the box center."""
     job = project / job_rel
     job.mkdir(parents=True, exist_ok=True)
     prefix = f"run_it{it:03d}"
 
-    stack = np.random.rand(nc, 16, 16).astype(np.float32)
+    box = 16
+    stack = np.random.rand(nc, box, box).astype(np.float32) * 0.01  # near-zero background
+    if blob_offset is not None:
+        dy, dx = blob_offset
+        cy, cx = box // 2 + dy, box // 2 + dx
+        stack[0, cy - 1:cy + 2, cx - 1:cx + 2] = 5.0
     with mrcfile.new(job / f"{prefix}_classes.mrcs", overwrite=True) as m:
         m.set_data(stack)
     refs = [f"{k + 1:06d}@{prefix}_classes.mrcs" for k in range(nc)]
@@ -53,6 +66,16 @@ def _write_class2d_source(project: Path, job_rel="Class2D/job010", it=25, nc=NC,
             "rlnAccuracyTranslationsAngst": [1.1] * nc,
         }),
     }
+    if n_groups is not None:
+        # More raw groups than n_groups, varying scale correction so the
+        # sort-then-bucket algorithm is exercised, not just a passthrough.
+        n_raw_groups = n_groups * 3
+        model_blocks["model_groups"] = pd.DataFrame({
+            "rlnGroupNumber": list(range(1, n_raw_groups + 1)),
+            "rlnGroupName": [f"group_{i}" for i in range(1, n_raw_groups + 1)],
+            "rlnGroupNrParticles": [0] * n_raw_groups,
+            "rlnGroupScaleCorrection": [float(n_raw_groups - i) for i in range(n_raw_groups)],
+        })
     model_path = job / f"{prefix}_model.star"
     starfile.write(model_blocks, model_path, overwrite=True)
 
@@ -67,11 +90,15 @@ def _write_class2d_source(project: Path, job_rel="Class2D/job010", it=25, nc=NC,
         "rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"],
         "rlnVoltage": [300.0], "rlnImagePixelSize": [1.4],
     })
-    particles_df = pd.DataFrame({
+    particles_data = {
         "rlnImageName": [f"{i + 1:06d}@Extract/job005/particles.mrcs" for i in range(n_particles)],
         "rlnClassNumber": class_numbers,
         "rlnOpticsGroup": [1] * n_particles,
-    })
+    }
+    if n_groups is not None:
+        n_raw_groups = n_groups * 3
+        particles_data["rlnGroupNumber"] = [(i % n_raw_groups) + 1 for i in range(n_particles)]
+    particles_df = pd.DataFrame(particles_data)
     data_path = job / f"{prefix}_data.star"
     starfile.write({"optics": optics_df, "particles": particles_df}, data_path, overwrite=True)
 
@@ -287,20 +314,11 @@ def test_clear_selection_on_a_fresh_directory_is_a_noop(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_run_select_interactive_requires_fn_model(tmp_path):
+def test_run_select_interactive_requires_one_of_the_three_inputs(tmp_path):
     project = _project(tmp_path)
     job_dir = project / "Select" / "job030"
-    with pytest.raises(ValueError, match="fn_model"):
+    with pytest.raises(ValueError, match="is required for interactive selection"):
         asyncio.run(select_interactive.run_select_interactive(project, {}, job_dir))
-
-
-def test_run_select_interactive_rejects_fn_mic_only(tmp_path):
-    project = _project(tmp_path)
-    job_dir = project / "Select" / "job031"
-    with pytest.raises(ValueError, match="isn't supported"):
-        asyncio.run(select_interactive.run_select_interactive(
-            project, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, job_dir,
-        ))
 
 
 def test_run_select_interactive_success_reports_class_count_and_clears_prior_selection(tmp_path):
@@ -316,3 +334,225 @@ def test_run_select_interactive_success_reports_class_count_and_clears_prior_sel
     assert "3" in msg  # 3 classes found
     assert "Cleared" in msg
     assert not (job_dir / "particles.star").exists()
+
+
+# --------------------------------------------------------------------------
+# #65 -- fn_mic / fn_data (plain micrographs/particles, no class concept)
+# --------------------------------------------------------------------------
+
+
+def _write_micrographs_star(project: Path, path_rel="CtfFind/job002/micrographs_ctf.star", n=4):
+    d = (project / path_rel).parent
+    d.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i in range(n):
+        rel = f"MotionCorr/job001/mic_{i:03d}.mrc"
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with mrcfile.new(p, overwrite=True) as m:
+            m.set_data(np.random.rand(8, 8).astype(np.float32))
+        names.append(rel)
+    optics_df = pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]})
+    mics_df = pd.DataFrame({"rlnMicrographName": names, "rlnCtfMaxResolution": [5.0 + i for i in range(n)]})
+    starfile.write({"optics": optics_df, "micrographs": mics_df}, project / path_rel, overwrite=True)
+    return names
+
+
+def _write_particles_plain_star(project: Path, path_rel="Extract/job005/particles_plain.star", n=5):
+    d = (project / path_rel).parent
+    d.mkdir(parents=True, exist_ok=True)
+    stack_rel = "Extract/job005/particles.mrcs"
+    with mrcfile.new(project / stack_rel, overwrite=True) as m:
+        m.set_data(np.random.rand(n, 8, 8).astype(np.float32))
+    refs = [f"{i + 1:06d}@{stack_rel}" for i in range(n)]
+    optics_df = pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]})
+    parts_df = pd.DataFrame({"rlnImageName": refs, "rlnClassNumber": [1] * n})
+    starfile.write({"optics": optics_df, "particles": parts_df}, project / path_rel, overwrite=True)
+    return refs
+
+
+def test_select_mode_precedence_matches_real_relion(tmp_path):
+    project = _project(tmp_path)
+    assert select_interactive._select_mode({"fn_model": "a", "fn_mic": "b", "fn_data": "c"}) == ("classes", "a")
+    assert select_interactive._select_mode({"fn_mic": "b", "fn_data": "c"}) == ("micrographs", "b")
+    assert select_interactive._select_mode({"fn_data": "c"}) == ("particles", "c")
+    with pytest.raises(select_interactive.SelectInteractiveError, match="is required"):
+        select_interactive._select_mode({})
+
+
+def test_list_items_micrographs_mode(tmp_path):
+    project = _project(tmp_path)
+    names = _write_micrographs_star(project)
+    result = select_interactive.list_items(project, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"})
+    assert result["mode"] == "micrographs"
+    assert [it["reference"] for it in result["items"]] == names
+    assert [it["row_index"] for it in result["items"]] == [0, 1, 2, 3]
+
+
+def test_list_items_particles_mode(tmp_path):
+    project = _project(tmp_path)
+    refs = _write_particles_plain_star(project)
+    result = select_interactive.list_items(project, {"fn_data": "Extract/job005/particles_plain.star"})
+    assert result["mode"] == "particles"
+    assert [it["reference"] for it in result["items"]] == refs
+
+
+def test_micrograph_thumbnail_renders_a_real_png(tmp_path):
+    project = _project(tmp_path)
+    names = _write_micrographs_star(project)
+    png = select_interactive.render_thumbnail(project, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, names[0])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_particle_thumbnail_renders_a_real_png(tmp_path):
+    project = _project(tmp_path)
+    refs = _write_particles_plain_star(project)
+    png = select_interactive.render_thumbnail(project, {"fn_data": "Extract/job005/particles_plain.star"}, refs[0])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_save_plain_selection_micrographs_preserves_optics_and_filters_rows(tmp_path):
+    project = _project(tmp_path)
+    _write_micrographs_star(project, n=4)
+    job_dir = project / "Select" / "job040"
+    result = select_interactive.save(project, job_dir, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, [0, 2])
+    assert result["n_items_selected"] == 2
+    assert result["n_written"] == 2
+    written = starfile.read(job_dir / "micrographs.star", always_dict=True)
+    assert "optics" in written
+    assert len(written["micrographs"]) == 2
+
+
+def test_save_plain_selection_does_not_accumulate_across_saves(tmp_path):
+    project = _project(tmp_path)
+    _write_micrographs_star(project, n=4)
+    job_dir = project / "Select" / "job041"
+    select_interactive.save(project, job_dir, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, [0, 1, 2, 3])
+    select_interactive.save(project, job_dir, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, [0])
+    written = starfile.read(job_dir / "micrographs.star", always_dict=True)
+    assert len(written["micrographs"]) == 1
+
+
+def test_save_plain_selection_particles_mode_writes_particles_star(tmp_path):
+    project = _project(tmp_path)
+    _write_particles_plain_star(project, n=5)
+    job_dir = project / "Select" / "job042"
+    result = select_interactive.save(project, job_dir, {"fn_data": "Extract/job005/particles_plain.star"}, [1, 3])
+    assert result["n_written"] == 2
+    assert (job_dir / "particles.star").is_file()
+
+
+def test_run_select_interactive_reports_micrograph_count(tmp_path):
+    project = _project(tmp_path)
+    _write_micrographs_star(project, n=4)
+    job_dir = project / "Select" / "job043"
+    msg = asyncio.run(select_interactive.run_select_interactive(
+        project, {"fn_mic": "CtfFind/job002/micrographs_ctf.star"}, job_dir,
+    ))
+    assert "4" in msg
+    assert "micrographs" in msg
+
+
+# --------------------------------------------------------------------------
+# #66 -- do_recenter (class averages only)
+# --------------------------------------------------------------------------
+
+
+def test_recenter_moves_an_off_center_blob_toward_the_box_center(tmp_path):
+    project = _project(tmp_path)
+    _write_class2d_source(project, nc=2, n_particles=6, blob_offset=(-5, 4))
+    job_dir = project / "Select" / "job050"
+    result = select_interactive.save_selection(
+        project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+        do_recenter=True,
+    )
+    assert result["class_averages_written"] is True
+    avgs = starfile.read(job_dir / "class_averages.star", always_dict=True)["model_classes"]
+    assert avgs.iloc[0]["rlnReferenceImage"] == "000001@class_averages.mrcs"
+
+    with mrcfile.open(job_dir / "class_averages.mrcs", permissive=True) as m:
+        recentered = np.array(m.data[0], dtype=np.float64)
+    from scipy import ndimage
+    com = ndimage.center_of_mass(np.where(recentered > 0, recentered, 0.0))
+    box_center = np.array(recentered.shape) / 2.0
+    # Not exact (order=1 interpolation + wrap), but should land much closer
+    # to center than the original 5px/4px offset.
+    assert np.linalg.norm(np.array(com) - box_center) < 1.5
+
+
+def test_recenter_not_applied_when_do_recenter_is_false(tmp_path):
+    project = _project(tmp_path)
+    _write_class2d_source(project, nc=2, n_particles=6, blob_offset=(-5, 4))
+    job_dir = project / "Select" / "job051"
+    select_interactive.save_selection(
+        project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+    )
+    assert not (job_dir / "class_averages.mrcs").exists()
+    avgs = starfile.read(job_dir / "class_averages.star", always_dict=True)["model_classes"]
+    assert avgs.iloc[0]["rlnReferenceImage"] == "000001@run_it025_classes.mrcs"
+
+
+# --------------------------------------------------------------------------
+# #67 -- do_regroup (fn_model source only)
+# --------------------------------------------------------------------------
+
+
+def test_regroup_assigns_group_names_and_drops_group_number(tmp_path):
+    project = _project(tmp_path)
+    # nc=1 so every one of the 30 particles is selected via class 1;
+    # n_groups=3 raw groups -> 9 raw model_groups rows.
+    _write_class2d_source(project, nc=1, n_particles=30, n_groups=3)
+    job_dir = project / "Select" / "job060"
+    result = select_interactive.save_selection(
+        project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+        do_regroup=True, nr_groups=3,
+    )
+    assert result["n_particles"] == 30
+    written = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    assert "rlnGroupNumber" not in written.columns
+    assert "rlnGroupName" in written.columns
+    assert written["rlnGroupName"].notna().all()
+    # Roughly 3 distinct new groups (average size 10, real RELION's own
+    # bucketing can produce a couple more/fewer at optics-group boundaries).
+    assert 1 <= written["rlnGroupName"].nunique() <= 4
+
+
+def test_regroup_raises_when_average_group_size_is_too_small(tmp_path):
+    project = _project(tmp_path)
+    _write_class2d_source(project, nc=1, n_particles=15, n_groups=2)
+    job_dir = project / "Select" / "job061"
+    with pytest.raises(select_interactive.SelectInteractiveError, match="at least 10 particles"):
+        select_interactive.save_selection(
+            project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+            do_regroup=True, nr_groups=2,
+        )
+
+
+def test_regroup_requires_model_groups_block(tmp_path):
+    project = _project(tmp_path)
+    fx = _write_class2d_source(project, nc=1, n_particles=30)  # no n_groups -> no model_groups block
+    # Give particles a rlnGroupNumber (so the FIRST guard passes) without a
+    # matching model_groups block in model.star, to isolate the SECOND
+    # guard (no model_groups block to regroup against) from the first.
+    blocks = starfile.read(fx["data_path"], always_dict=True)
+    blocks["particles"]["rlnGroupNumber"] = 1
+    starfile.write(blocks, fx["data_path"], overwrite=True)
+
+    job_dir = project / "Select" / "job062"
+    with pytest.raises(select_interactive.SelectInteractiveError, match="model_groups"):
+        select_interactive.save_selection(
+            project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+            do_regroup=True, nr_groups=3,
+        )
+
+
+def test_regroup_not_applied_when_do_regroup_is_false(tmp_path):
+    project = _project(tmp_path)
+    _write_class2d_source(project, nc=1, n_particles=30, n_groups=3)
+    job_dir = project / "Select" / "job063"
+    select_interactive.save_selection(
+        project, job_dir, "Class2D/job010/run_it025_optimiser.star", [1],
+    )
+    written = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    assert "rlnGroupNumber" in written.columns
+    assert "rlnGroupName" not in written.columns

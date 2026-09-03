@@ -1630,53 +1630,54 @@ def exclude_tilts_save(run_id: str, req: ExcludeTiltsSaveRequest):
 
 
 # --------------------------------------------------------------------------
-# Select (interactive class selection) -- the in-browser class-average
-# selector, replacing relion_display's own --gui desktop window for the
-# Select job's interactive branch (see job_catalog._select_program_override
-# and select_interactive.py's module docstring). Only the fn_model
-# (Class2D/Class3D class-average selection) variant is implemented -- see
-# select_interactive.run_select_interactive for the fn_mic/fn_data rejection
-# message.
+# Select (interactive selection) -- the in-browser replacement for
+# relion_display's own --gui desktop window on the Select job's interactive
+# branch (see job_catalog._select_program_override and
+# select_interactive.py's module docstring). Covers all three real
+# interactive input variants (fn_model class-average selection, fn_mic
+# micrographs, fn_data particles) via select_interactive._select_mode's
+# same fn_model-then-fn_mic-then-fn_data precedence as real RELION.
 # --------------------------------------------------------------------------
 
 
-def _select_job(run_id: str) -> tuple[Path, str]:
-    """This run's own output dir + its recorded `fn_model` input -- 404 if
-    the run doesn't exist, 400 if it has no fn_model recorded (shouldn't
-    happen in practice: the runner requires it -- see select_interactive.
-    run_select_interactive -- but a hand-crafted/imported run could lack
-    it)."""
+def _select_job(run_id: str) -> tuple[Path, dict]:
+    """This run's own output dir + its recorded field_values -- 404 if the
+    run doesn't exist, 400 if none of fn_model/fn_mic/fn_data are recorded
+    (shouldn't happen in practice: the runner requires one -- see
+    select_interactive.run_select_interactive -- but a hand-crafted/
+    imported run could lack it)."""
     run = run_manager.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    fn_model = (run.field_values or {}).get("fn_model", "")
-    if not fn_model:
-        raise HTTPException(status_code=400, detail="This job has no fn_model (source Class2D/Class3D job) recorded.")
-    return Path(run.cwd), fn_model
+    field_values = run.field_values or {}
+    if not (field_values.get("fn_model") or field_values.get("fn_mic") or field_values.get("fn_data")):
+        raise HTTPException(status_code=400, detail="This job has no fn_model/fn_mic/fn_data recorded.")
+    return Path(run.cwd), field_values
 
 
 @app.get("/api/select/{run_id}/classes")
 def select_classes(run_id: str):
-    job_dir, fn_model = _select_job(run_id)
+    """Route name kept from the classes-only first pass (avoids a
+    frontend/backend rename) -- the response's own "mode" field is what
+    now distinguishes classes from micrographs/particles; see
+    select_interactive.list_items."""
+    _job_dir, field_values = _select_job(run_id)
     try:
-        return {
-            "classes": select_interactive.list_classes(run_manager.project_dir, fn_model),
-            "class_averages_will_be_written": select_interactive.is_class2d_source(fn_model),
-        }
+        return select_interactive.list_items(run_manager.project_dir, field_values)
     except select_interactive.SelectInteractiveError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/select/{run_id}/thumbnail")
 def select_thumbnail(run_id: str, reference: str = Query(...)):
-    job_dir, fn_model = _select_job(run_id)
+    _job_dir, field_values = _select_job(run_id)
     try:
-        source_dir = select_interactive.thumbnail_source(run_manager.project_dir, fn_model)
-        png = progress.render_class_thumbnail(source_dir, reference)
-    except (select_interactive.SelectInteractiveError, progress.ProgressError) as exc:
+        png = select_interactive.render_thumbnail(run_manager.project_dir, field_values, reference)
+    except select_interactive.SelectInteractiveError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     # Immutable, same reasoning as /api/runs/{run_id}/progress/thumbnail:
-    # RELION never rewrites a completed iteration's class images.
+    # RELION never rewrites a completed iteration's class images, and this
+    # job never rewrites its own input STAR either.
     return Response(
         content=png,
         media_type="image/png",
@@ -1685,16 +1686,14 @@ def select_thumbnail(run_id: str, reference: str = Query(...)):
 
 
 class SelectSaveRequest(BaseModel):
-    selected_class_numbers: list[int]
+    selected: list[int]
 
 
 @app.post("/api/select/{run_id}/save")
 def select_save(run_id: str, req: SelectSaveRequest):
-    job_dir, fn_model = _select_job(run_id)
+    job_dir, field_values = _select_job(run_id)
     try:
-        return select_interactive.save_selection(
-            run_manager.project_dir, job_dir, fn_model, req.selected_class_numbers,
-        )
+        return select_interactive.save(run_manager.project_dir, job_dir, field_values, req.selected)
     except (select_interactive.SelectInteractiveError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

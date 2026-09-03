@@ -758,10 +758,10 @@ def _seed_class2d_project(project_dir, nc=3, n_particles=6):
     return "Class2D/job010/run_it025_optimiser.star"
 
 
-def _start_select_interactive_run(client, fn_model):
+def _start_select_run(client, field_values):
     resp = client.post("/api/runs", json={
         "internal_name": "Select",
-        "field_values": {"fn_model": fn_model},
+        "field_values": field_values,
     })
     assert resp.status_code == 200, resp.text
     run_id = resp.json()["run_id"]
@@ -774,6 +774,28 @@ def _start_select_interactive_run(client, fn_model):
         time.sleep(0.02)
     assert last["status"] == "running", last
     return run_id
+
+
+def _start_select_interactive_run(client, fn_model):
+    return _start_select_run(client, {"fn_model": fn_model})
+
+
+def _seed_micrographs_project(project_dir, n=4):
+    ctf_dir = project_dir / "CtfFind" / "job002"
+    ctf_dir.mkdir(parents=True)
+    names = []
+    for i in range(n):
+        rel = f"MotionCorr/job001/mic_{i:03d}.mrc"
+        p = project_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with mrcfile.new(p, overwrite=True) as m:
+            m.set_data(np.random.rand(8, 8).astype(np.float32))
+        names.append(rel)
+    starfile.write({
+        "optics": pd.DataFrame({"rlnOpticsGroup": [1], "rlnOpticsGroupName": ["opticsGroup1"], "rlnVoltage": [300.0]}),
+        "micrographs": pd.DataFrame({"rlnMicrographName": names}),
+    }, ctf_dir / "micrographs_ctf.star", overwrite=True)
+    return "CtfFind/job002/micrographs_ctf.star", names
 
 
 def test_select_run_with_no_mode_flags_routes_to_the_interactive_picker(picker_client):
@@ -795,6 +817,7 @@ def test_select_classes_lists_the_source_jobs_classes(picker_client):
     resp = picker_client.get(f"/api/select/{run_id}/classes")
     assert resp.status_code == 200
     body = resp.json()
+    assert body["mode"] == "classes"
     assert body["class_averages_will_be_written"] is True
     assert [c["class_number"] for c in body["classes"]] == [1, 2, 3]
     assert sum(c["nr_particles"] for c in body["classes"]) == 6
@@ -815,7 +838,7 @@ def test_select_save_writes_particles_and_class_averages(picker_client):
     fn_model = _seed_class2d_project(main.run_manager.project_dir, nc=3, n_particles=6)
     run_id = _start_select_interactive_run(picker_client, fn_model)
 
-    saved = picker_client.post(f"/api/select/{run_id}/save", json={"selected_class_numbers": [1, 2]})
+    saved = picker_client.post(f"/api/select/{run_id}/save", json={"selected": [1, 2]})
     assert saved.status_code == 200, saved.text
     body = saved.json()
     assert body["n_classes_selected"] == 2
@@ -842,3 +865,56 @@ def test_select_classes_missing_fn_model_is_400(picker_client):
     run_id = _start_exclude_tilts_run(picker_client)
     resp = picker_client.get(f"/api/select/{run_id}/classes")
     assert resp.status_code == 400
+
+
+def test_select_micrographs_mode_full_round_trip(picker_client):
+    """#65: fn_mic routes through the SAME endpoints as the classes case,
+    with mode="micrographs" and a flat "items" list instead of "classes"."""
+    fn_mic, names = _seed_micrographs_project(main.run_manager.project_dir, n=4)
+    run_id = _start_select_run(picker_client, {"fn_mic": fn_mic})
+
+    listed = picker_client.get(f"/api/select/{run_id}/classes")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["mode"] == "micrographs"
+    assert [it["reference"] for it in body["items"]] == names
+
+    thumb = picker_client.get(f"/api/select/{run_id}/thumbnail", params={"reference": names[0]})
+    assert thumb.status_code == 200
+    assert thumb.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    saved = picker_client.post(f"/api/select/{run_id}/save", json={"selected": [0, 2]})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["n_written"] == 2
+
+    run = picker_client.get(f"/api/runs/{run_id}").json()
+    assert (Path(run["cwd"]) / "micrographs.star").is_file()
+
+
+def test_select_save_with_do_regroup_writes_group_names(picker_client):
+    """#67: do_regroup/nr_groups are read from the run's own recorded
+    field_values, no new request-body field needed."""
+    fn_model = _seed_class2d_project(main.run_manager.project_dir, nc=1, n_particles=30)
+    project_dir = main.run_manager.project_dir
+    model_path = project_dir / "Class2D/job010/run_it025_model.star"
+    blocks = starfile.read(model_path, always_dict=True)
+    blocks["model_groups"] = pd.DataFrame({
+        "rlnGroupNumber": list(range(1, 10)),
+        "rlnGroupName": [f"group_{i}" for i in range(1, 10)],
+        "rlnGroupNrParticles": [0] * 9,
+        "rlnGroupScaleCorrection": [float(9 - i) for i in range(9)],
+    })
+    starfile.write(blocks, model_path, overwrite=True)
+    data_path = project_dir / "Class2D/job010/run_it025_data.star"
+    data_blocks = starfile.read(data_path, always_dict=True)
+    data_blocks["particles"]["rlnGroupNumber"] = [(i % 9) + 1 for i in range(30)]
+    starfile.write(data_blocks, data_path, overwrite=True)
+
+    run_id = _start_select_run(picker_client, {"fn_model": fn_model, "do_regroup": True, "nr_groups": 3})
+    saved = picker_client.post(f"/api/select/{run_id}/save", json={"selected": [1]})
+    assert saved.status_code == 200, saved.text
+
+    run = picker_client.get(f"/api/runs/{run_id}").json()
+    written = starfile.read(Path(run["cwd"]) / "particles.star", always_dict=True)["particles"]
+    assert "rlnGroupNumber" not in written.columns
+    assert written["rlnGroupName"].notna().all()
