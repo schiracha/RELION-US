@@ -1134,12 +1134,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     const slurmPartition = slurmRow.querySelector('[data-role="slurm-partition"]');
     const slurmTime = slurmRow.querySelector('[data-role="slurm-time"]');
     const slurmMem = slurmRow.querySelector('[data-role="slurm-mem"]');
-    const slurmDependsOn = slurmRow.querySelector('[data-role="slurm-depends-on"]');
     const slurmActiveJobsList = slurmRow.querySelector('[data-role="slurm-active-jobs-list"]');
     const slurmArrayToggle = slurmRow.querySelector('[data-role="slurm-array-toggle"]');
     const slurmArrayFields = slurmRow.querySelector('[data-role="slurm-array-fields"]');
-    const slurmArrayItems = slurmRow.querySelector('[data-role="slurm-array-items"]');
-    const slurmArrayThrottle = slurmRow.querySelector('[data-role="slurm-array-throttle"]');
     if (!isReopen || currentRun.slurm_job_id) {
       if (globalSettings["slurm.account"]) slurmAccount.value = globalSettings["slurm.account"];
       if (globalSettings["slurm.partition"]) slurmPartition.value = globalSettings["slurm.partition"];

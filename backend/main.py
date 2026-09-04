@@ -151,7 +151,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -199,12 +198,23 @@ def _initial_project_dir() -> Path:
 PROJECT_DIR = _initial_project_dir()
 
 app = FastAPI(title="RELION-US")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# NO CORS middleware, deliberately. The frontend this app serves is same-origin
+# (every fetch in frontend/app.js is a relative path; both websockets are built
+# from location.host), so it has never needed one -- and a permissive
+# `allow_origins=["*"]` here is actively dangerous in the configuration this app
+# ships in. Password protection is off by default (backend/auth.py), which means
+# POST /api/runs needs no credentials at all; a wildcard CORS policy makes the
+# browser's preflight for a JSON POST succeed from any origin, so merely
+# visiting an unrelated web page in the same browser was enough for that page to
+# run arbitrary shell commands on this machine -- exactly what /api/runs does,
+# by design, with whatever string it is handed. Verified for real against a
+# running backend: an `Origin: https://evil.example` preflight came back
+# `access-control-allow-origin: *`, and the POST that followed it executed.
+# Without the middleware the browser's same-origin policy blocks that preflight
+# and the request is never sent. If you ever serve the frontend from a different
+# origin (a separate dev server, a reverse proxy on another host), add
+# CORSMiddleware back with that ONE origin listed explicitly -- never "*".
 
 run_manager = JobRunManager(PROJECT_DIR)
 
@@ -629,12 +639,7 @@ async def resume_run(run_id: str):
     finished subprocess/compute job back to "running" has no real meaning --
     there is no process left to have stopped."""
     _reject_relion_run(run_id, "resumed")
-    run = run_manager.get(run_id)
-    internal_name = run.internal_name if run else None
-    if internal_name is None:
-        history = project_manager.load_history(run_manager.project_dir)
-        entry = next((h for h in history if h.get("run_id") == run_id), None)
-        internal_name = entry.get("internal_name") if entry else None
+    internal_name = run_manager.run_internal_name(run_id)
     if internal_name is None or not CUSTOM_JOB_DEFINITIONS.get(internal_name, {}).get("is_picker"):
         raise HTTPException(
             status_code=400,
@@ -873,9 +878,14 @@ def download_run_files_zip(run_id: str, path: list[str] = Query(...)):
     directory, which for cryo-EM/tomography outputs can be many GB): built
     to a temp file rather than in memory, and cleaned up after the response
     is sent via FastAPI's BackgroundTask."""
+    # resolve_output_files, not resolve_output_file per path: the latter
+    # re-reads the project's whole run_history.json for every entry in a
+    # selection that can easily be hundreds of files (see its docstring).
+    pairs = run_manager.resolve_output_files(run_id, path)
+    if pairs is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
     resolved_paths = []
-    for rel in path:
-        resolved = run_manager.resolve_output_file(run_id, rel)
+    for rel, resolved in pairs:
         if resolved is None:
             raise HTTPException(status_code=404, detail=f"File not found in this job's output directory: {rel}")
         resolved_paths.append((rel, resolved))
@@ -1232,13 +1242,7 @@ def run_progress(run_id: str):
     cwd = run_manager._resolve_run_cwd(run_id)
     if cwd is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    run = run_manager.get(run_id)
-    internal_name = run.internal_name if run is not None else None
-    if internal_name is None:
-        entry = next(
-            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
-        )
-        internal_name = (entry or {}).get("internal_name")
+    internal_name = run_manager.run_internal_name(run_id)
     if not internal_name or not progress.supports_progress(internal_name):
         return {"available": False, "supported": False, "iterations": [], "latest": None}
     try:
@@ -1274,13 +1278,7 @@ def run_orientation_distribution(run_id: str):
     cwd = run_manager._resolve_run_cwd(run_id)
     if cwd is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    run = run_manager.get(run_id)
-    internal_name = run.internal_name if run is not None else None
-    if internal_name is None:
-        entry = next(
-            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
-        )
-        internal_name = (entry or {}).get("internal_name")
+    internal_name = run_manager.run_internal_name(run_id)
     if not internal_name or not progress.supports_orientation_distribution(internal_name):
         return {"available": False, "supported": False}
     data = progress.read_orientation_distribution(Path(cwd))
@@ -1400,13 +1398,7 @@ def run_ctf_qc(run_id: str):
     cwd = run_manager._resolve_run_cwd(run_id)
     if cwd is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    run = run_manager.get(run_id)
-    internal_name = run.internal_name if run is not None else None
-    if internal_name is None:
-        entry = next(
-            (h for h in run_manager.list_runs() if h.get("run_id") == run_id), None
-        )
-        internal_name = (entry or {}).get("internal_name")
+    internal_name = run_manager.run_internal_name(run_id)
     if not internal_name or not ctf_qc.supports_ctf_qc(internal_name):
         return {"available": False, "supported": False, "count": 0, "micrographs": []}
     data = ctf_qc.read_ctf_qc(Path(cwd))

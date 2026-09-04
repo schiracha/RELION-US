@@ -216,6 +216,25 @@ def test_relion_jobs_appear_in_the_command_center(relion_project):
     assert [r["source"] for r in runs] == ["relion"] * 5
 
 
+def test_run_internal_name_resolves_an_imported_relion_job(relion_project):
+    """run_internal_name() is the cheap job-type lookup the Progress, CTF QC,
+    orientation-distribution and resume endpoints use instead of a full
+    list_runs() merge. A job RELION itself ran lives in NEITHER of the two
+    cheap sources that lookup normally reads (self.runs, run_history.json) --
+    only in default_pipeline.star -- so it needs the pipeline branch, and
+    without it an imported Class2D silently loses its Progress tab while every
+    other job keeps one. Asserted here as well as in
+    test_legacy_project.py's browser run because this is the cheap place to
+    catch it."""
+    mgr = job_runner.JobRunManager(relion_project)
+    assert mgr.run_internal_name("relion:job005") == "Class2D"
+    assert mgr.run_internal_name("relion:job001") == "Import"
+    # A run_id that exists nowhere is None, not an exception -- callers treat
+    # it as "no progress for this run", the same as an unsupported job type.
+    assert mgr.run_internal_name("relion:job999") is None
+    assert mgr.run_internal_name("no-such-run") is None
+
+
 def test_imported_jobs_are_sorted_by_job_number(relion_project):
     runs = job_runner.JobRunManager(relion_project).list_runs(relion_project)
     assert [r["job_number"] for r in runs] == [1, 2, 3, 5, 11]
