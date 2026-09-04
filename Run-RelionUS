@@ -31,20 +31,34 @@
 #   ln -s "$(pwd)/Run-RelionUS" ~/bin/Run-RelionUS
 #   sudo ln -s "$(pwd)/Run-RelionUS" /usr/local/bin/Run-RelionUS
 #
+# --- HTTPS ------------------------------------------------------------------
+# Off by default, and the single most important thing to turn on if this is
+# reachable from any machine but this one. Without it every byte -- the
+# password included -- crosses the network in plain text, and how well the
+# password is hashed on disk makes no difference, because an attacker on the
+# path reads the password itself rather than the hash.
+#   ./Run-RelionUS --make-cert           # generate a self-signed cert + key
+#   ./Run-RelionUS --tls                 # serve HTTPS with it
+#   ./Run-RelionUS --tls-cert C --tls-key K   # ...or your own certificate
+#   ./Run-RelionUS --hsts                # only with a real, CA-issued cert
+# A self-signed certificate encrypts exactly as well as a CA-issued one; what
+# it can't do is prove which server you reached, so the browser warns once.
+# --make-cert prints the certificate's SHA-256 fingerprint -- check it against
+# what the browser shows and that gap is closed too.
+#
 # --- Password protection ----------------------------------------------------
 # Off by default. Even with the localhost-only default bind, anyone else who
 # can already reach this machine's localhost (another user on a shared HPC
 # login node, for instance) can open jobs, run them, and delete run history
 # with no login at all -- and if you opt into --host 0.0.0.0, that's anyone
-# on your network. A password is a basic deterrent against that, not real
-# security: this app sets up no encryption, so the password (like everything
-# else it sends) crosses the network in plain text. See backend/auth.py's
-# module docstring for the full reasoning, including how to add real TLS if
-# you need it. Every time this script starts in an interactive terminal
-# without protection already turned on, it asks whether to set one up now;
-# skip or decline and it just asks again next time rather than staying quiet
-# forever, so use the flags below any time you'd rather set it up (or turn it
-# off) without being asked:
+# on your network. The password is stored as a salted scrypt hash and the
+# login endpoint locks out after repeated failures, so it stands up to
+# guessing -- but it protects nothing on the wire unless you also turn on
+# HTTPS above, or tunnel over SSH. Every time this script starts in an
+# interactive terminal without protection already turned on, it asks whether
+# to set one up now; skip or decline and it just asks again next time rather
+# than staying quiet forever, so use the flags below any time you'd rather
+# set it up (or turn it off) without being asked:
 #   ./Run-RelionUS --set-password        # set/change the password (prompts,
 #                                         #   hidden input, twice to confirm)
 #   ./Run-RelionUS --enable-auth         # require it from now on
@@ -63,10 +77,23 @@ run_auth_cli() { PYTHONPATH="$SCRIPT_DIR/backend" python3 "${AUTH_PY[@]}" "$@"; 
 
 HOST="127.0.0.1"
 PORT="8420"
+TLS_CERT=""
+TLS_KEY=""
+WANT_TLS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) [[ $# -ge 2 ]] || { echo "--host needs a value" >&2; exit 1; }; HOST="$2"; shift 2 ;;
     --port) [[ $# -ge 2 ]] || { echo "--port needs a value" >&2; exit 1; }; PORT="$2"; shift 2 ;;
+    --tls) WANT_TLS=1; shift ;;
+    --tls-cert) [[ $# -ge 2 ]] || { echo "--tls-cert needs a value" >&2; exit 1; }; TLS_CERT="$2"; WANT_TLS=1; shift 2 ;;
+    --tls-key) [[ $# -ge 2 ]] || { echo "--tls-key needs a value" >&2; exit 1; }; TLS_KEY="$2"; WANT_TLS=1; shift 2 ;;
+    --make-cert)
+      # Optional hostname argument, but only if the next word isn't another
+      # flag -- so `--make-cert` alone works and defaults to this host's FQDN.
+      if [[ $# -ge 2 && "$2" != -* ]]; then run_auth_cli make-cert "$2"; else run_auth_cli make-cert; fi
+      exit $?
+      ;;
+    --hsts) export RELION_US_HSTS=1; shift ;;
     --set-password) run_auth_cli set-password; exit $? ;;
     --enable-auth) run_auth_cli enable; exit $? ;;
     --disable-auth) run_auth_cli disable; exit $? ;;
@@ -74,8 +101,15 @@ while [[ $# -gt 0 ]]; do
     --auth) export RELION_US_FORCE_AUTH=1; shift ;;
     --no-auth) export RELION_US_FORCE_AUTH=0; shift ;;
     -h|--help)
-      echo "Usage: $0 [--host HOST] [--port PORT] [--auth|--no-auth]"
+      echo "Usage: $0 [--host HOST] [--port PORT] [--tls] [--auth|--no-auth]"
+      echo "       $0 --tls-cert FILE --tls-key FILE   # your own certificate"
+      echo "       $0 --make-cert [hostname]           # generate a self-signed one"
       echo "       $0 --set-password|--enable-auth|--disable-auth|--auth-status"
+      echo
+      echo "  --tls    serve HTTPS. Without it everything, the password"
+      echo "           included, crosses the network in plain text."
+      echo "  --hsts   send Strict-Transport-Security (only with a real,"
+      echo "           CA-issued certificate -- see README)."
       exit 0
       ;;
     *)
@@ -84,6 +118,40 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Resolve which certificate to serve with. An explicit --tls-cert/--tls-key
+# pair wins; a bare --tls falls back to whatever --make-cert last recorded.
+SSL_ARGS=()
+if [[ "$WANT_TLS" == "1" ]]; then
+  if [[ -n "$TLS_CERT" || -n "$TLS_KEY" ]]; then
+    if [[ -z "$TLS_CERT" || -z "$TLS_KEY" ]]; then
+      echo "--tls-cert and --tls-key must be given together." >&2
+      exit 1
+    fi
+  else
+    # `tls-paths` prints cert then key, and prints nothing if either the
+    # config has no paths or the files they name are gone. The element count
+    # is the real check, not mapfile's exit status: mapfile reports on its
+    # own read, not on the process substitution's exit code, so a failed
+    # tls-paths still leaves mapfile "successful" with zero lines read.
+    # _paths is pre-declared because `set -u` treats an array that was never
+    # assigned as an unbound variable.
+    _paths=()
+    mapfile -t _paths < <(run_auth_cli tls-paths) || true
+    if [[ ${#_paths[@]} -ne 2 ]]; then
+      echo "No TLS certificate is set up yet." >&2
+      echo "Run './Run-RelionUS --make-cert' to generate one, or pass" >&2
+      echo "--tls-cert/--tls-key to use a certificate you already have." >&2
+      exit 1
+    fi
+    TLS_CERT="${_paths[0]}"
+    TLS_KEY="${_paths[1]}"
+  fi
+  for f in "$TLS_CERT" "$TLS_KEY"; do
+    [[ -r "$f" ]] || { echo "Cannot read TLS file: $f" >&2; exit 1; }
+  done
+  SSL_ARGS=(--ssl-certfile "$TLS_CERT" --ssl-keyfile "$TLS_KEY")
+fi
 
 # Asked every time protection isn't currently in effect for this run --
 # unlike the old one-time-ever prompt, declining doesn't silently opt you
@@ -122,4 +190,18 @@ fi
 # while the working directory stays the one the user launched from. Everything
 # else in the backend resolves its own paths from __file__, so nothing else
 # depends on the working directory being backend/.
-exec uvicorn --app-dir "$SCRIPT_DIR/backend" main:app --host "$HOST" --port "$PORT"
+SCHEME="http"; [[ ${#SSL_ARGS[@]} -gt 0 ]] && SCHEME="https"
+echo "RELION-US on ${SCHEME}://${HOST}:${PORT}/"
+if [[ "$SCHEME" == "http" && "$HOST" != "127.0.0.1" && "$HOST" != "localhost" ]]; then
+  # Bound to something other than loopback with no TLS: every password and
+  # every byte of job data is readable by anything on the path. Worth saying
+  # out loud rather than only in the README.
+  echo "WARNING: serving plain HTTP on a non-loopback address. The password" >&2
+  echo "and all traffic cross the network unencrypted. Use --tls (see" >&2
+  echo "--make-cert), or an SSH tunnel with the default --host 127.0.0.1." >&2
+fi
+# ${SSL_ARGS[@]+"${SSL_ARGS[@]}"} rather than a bare "${SSL_ARGS[@]}": under
+# `set -u`, bash before 4.4 treats an empty array expansion as unbound and
+# aborts, which would break every plain-HTTP launch on an older distro.
+exec uvicorn --app-dir "$SCRIPT_DIR/backend" main:app \
+  --host "$HOST" --port "$PORT" ${SSL_ARGS[@]+"${SSL_ARGS[@]}"}

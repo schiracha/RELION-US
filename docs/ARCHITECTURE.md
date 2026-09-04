@@ -1231,22 +1231,109 @@ became variables (`--console-bg`, `--console-bg-deep`, `--console-text`) so they
 restyle too. Chart series colours are separate, mode-specific values validated
 against each surface rather than an automatic flip.
 
+## Transport security (TLS)
+
+Off by default, on with `Run-RelionUS --tls`, and the control that actually
+makes the rest of this section meaningful: without it the password, the
+session cookie, project paths, job commands and Terminal output all cross the
+network in cleartext, and the strength of the password hash is irrelevant
+because an attacker on the path reads the password rather than the hash.
+
+Served by uvicorn's own SSL support (`--ssl-certfile`/`--ssl-keyfile`), not by
+anything this app implements. `auth.generate_self_signed_cert()` shells out to
+`openssl req -x509` for a 4096-bit key and an 825-day certificate — 825 days
+being the CA/Browser Forum maximum for a publicly-trusted leaf, which Safari
+enforces on *all* certificates, self-signed included. The SAN covers the named
+host plus `localhost`/`127.0.0.1`/`::1`, because the usual way to reach this
+app is an SSH tunnel to localhost even when the certificate names the real
+host, and every current browser rejects a certificate whose SAN doesn't match
+(CN alone has not been accepted for years). The generated key is chmod'd
+`0600` — openssl writes it at the umask otherwise, which is usually
+world-readable.
+
+openssl rather than the `cryptography` package deliberately: openssl is
+already present anywhere RELION is (RELION links it), and the install story
+here is "no more dependencies than necessary".
+
+`auth.cert_fingerprint()` prints the SHA-256, which is what makes a
+self-signed certificate genuinely checkable — comparing it against what the
+browser shows rules out a man-in-the-middle, i.e. supplies by hand the one
+guarantee a CA would otherwise provide. Encryption itself is identical either
+way (TLS 1.3 / AES-256-GCM in testing); what a CA sells is *identity*.
+
+`main.py`'s `_is_secure_request()` reads `X-Forwarded-Proto` as well as the
+URL scheme, so a TLS-terminating reverse proxy — where the app itself only
+ever sees plain HTTP — still gets a `Secure` cookie. That header is
+client-settable and therefore only ever used to *add* protection, never to
+grant access: a forged one can make a plain-HTTP client's own cookie stricter
+than needed, which benefits no attacker.
+
+HSTS is opt-in (`--hsts` → `RELION_US_HSTS=1`) rather than automatic. It is
+right in front of a real certificate and a self-inflicted lockout in front of
+a self-signed one being evaluated, since it is a one-way door for that
+hostname.
+
 ## Password protection
 
-Off by default, and deliberately not real security — see `backend/auth.py`'s
-module docstring for the full threat-model reasoning (no TLS is set up
-here, so the password crosses the network in plain text like everything
-else this app sends; this is a deterrent against casual access on a shared
-lab/cluster network, not a hardened login).
+Off by default. Layered *under* TLS, not instead of it: encryption stops
+eavesdropping, the password stops the person at the next workstation.
 
 **Storage.** `project_manager.config_root() / "auth.json"` — per-*user*,
 alongside the recent-projects cache (`project_manager.recents_path()`; both
 now go through the shared `config_root()` helper), not per-project, since
-the whole point is protecting the app before it even shows a project. Only
-a salted PBKDF2-SHA256 hash is stored (stdlib `hashlib.pbkdf2_hmac`, no new
-dependency for bcrypt/argon2 — the iteration count is tuned for "a real cost
-per guess," not for defending a password worth targeting with a GPU), never
-the password itself, and the file is chmod'd `0600` best-effort on save.
+the whole point is protecting the app before it even shows a project. Only a
+salted hash is stored, never the password itself.
+
+**Hashing is scrypt** (stdlib `hashlib.scrypt`, RFC 7914) at n=2¹⁵, r=8, p=1 —
+the RFC's own interactive-login parameters, ~32 MB and ~0.12 s per guess.
+Memory-hardness is the point: it is what prices a GPU/ASIC farm out, where
+PBKDF2 is merely slow. OpenSSL refuses scrypt above a 32 MB default unless
+`maxmem` is raised explicitly, so `SCRYPT_MAXMEM` is passed on every call —
+without it `hashlib.scrypt` raises "memory limit exceeded" at exactly these
+parameters. Still no new dependency (no bcrypt, no argon2).
+
+**PBKDF2 hashes are migrated, not broken.** An install predating this has a
+PBKDF2-SHA256 hash and no `kdf` key at all; `load_config()` back-fills that to
+`pbkdf2_sha256`, `verify_password()` dispatches on it, and
+`upgrade_hash_if_needed()` re-hashes to scrypt on the next successful login —
+the one moment the plaintext exists to re-hash with. It deliberately does not
+rotate the session secret the way `set_password()` does: the password hasn't
+changed, so logging every device out would be a confusing side effect of an
+upgrade nobody asked for. An unknown `kdf` (a config written by a *newer*
+build) refuses the login rather than falling through to "no password set".
+
+**Online guessing is bounded separately** (`login_attempt_allowed` /
+`record_failed_login`). The KDF cost prices *offline* guessing against a
+stolen `auth.json`; 0.12 s per attempt is no obstacle at all to a script
+POSTing `/api/auth/login` in a loop, and the previous fixed `asyncio.sleep(0.5)`
+rate-limited one connection while fifty in parallel went unaffected. Five
+failures from one address within five minutes locks that address out for five
+minutes, with a 4× looser global bucket as a backstop so rotating source
+addresses can't walk around it (equal limits would let one clumsy user lock
+out the whole instance). Held in memory, not persisted: a restart clears it,
+but restarting the backend already requires a shell on that machine, at which
+point `auth.json` is readable directly. The check runs *before* the KDF, so
+the endpoint is neither a guessing oracle nor a cheap way to exhaust 32 MB of
+memory per request. Verification and re-hashing both run via
+`asyncio.to_thread` — scrypt holds the GIL for its whole run, and hashing
+inline would stall every other request and websocket for ~0.12 s per attempt.
+
+**Password rules are a floor, not a strength meter** (`_password_complaint`):
+8 characters minimum, a short list of the passwords a script tries first is
+refused, and fewer than 3 distinct characters is refused. No composition
+rules — length is what predicts guessing cost, while "must contain a symbol"
+mostly produces `Password1!`, which is in every wordlist. This follows NIST
+SP 800-63B (long minimum, screen against known-common values, no composition
+rules, no forced rotation).
+
+**`auth.json` is written 0600-from-creation and atomically.** The previous
+`write_text()` + `chmod()` created the file at the umask and tightened it a
+moment later — a real window on the shared login node this feature exists for,
+winnable with a loop. `os.open(..., 0o600)` passes the mode to the creating
+syscall instead. Writing to a temp file in the same directory and
+`os.replace()`-ing it is atomic on POSIX, so a crash mid-write can't leave a
+truncated `auth.json` that `load_config()` would read as "no password set" —
+silently turning protection off.
 
 **Sessions are stateless**, not a server-side table: the cookie is
 `{expiry}.{HMAC-SHA256(expiry, session_secret)}`, so validity is just
@@ -1273,7 +1360,17 @@ individually.
   than accepting then closing) is what makes Starlette reject the connection
   at the HTTP-upgrade handshake itself (a clean `403`, confirmed against a
   real client in testing) instead of completing the handshake and closing
-  a second later.
+  a second later. `/ws/terminal` carries the identical re-check, for the same
+  reason and with more at stake — it is a real interactive shell.
+
+**Response headers** (`security_headers` middleware, `main.py`) are set on
+every response regardless of whether auth is on: `X-Content-Type-Options:
+nosniff`, `X-Frame-Options: DENY` (framing this is the setup for clickjacking
+a Run button), and `Referrer-Policy: same-origin` (project paths shouldn't
+leak in a Referer). There is deliberately **no CORS middleware at all** — the
+frontend is same-origin, and a permissive policy here was previously enough
+to let any web page the user visited drive `/api/runs`, i.e. run arbitrary
+shell commands. See that middleware's own comment.
 
 **The CLI is the only way in or out of this.** There is deliberately no
 in-browser "change password" or "turn this on" control — anyone who can
