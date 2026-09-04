@@ -1091,6 +1091,7 @@ html, body {
   gap: 4px 16px;
 }
 .progress-chart-grid .progress-section { margin-bottom: 10px; }
+.isonet-loss-image { max-width: 100%; height: auto; display: block; border-radius: 3px; border: 1px solid var(--border); }
 .progress-empty { color: var(--text-dim); font-size: 12px; padding: 14px 2px; font-style: italic; }
 .progress-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .tip-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }

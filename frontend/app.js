@@ -1226,6 +1226,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     selectedIteration: "latest",   // "latest" (auto-follows new polls) or a specific number
     iterationCache: {},      // iteration number -> its full {iteration, resolution_A, classes}
     orientationData: null,   // cached response from the on-demand viewing-direction button
+    isonetLossFiles: [],     // IsonetDenoise/IsonetRefine only -- {path,size,mtime} for whichever
+                             // of loss_full.png/loss_top.png/loss_bottom.png exist right now
   };
 
 
@@ -1545,15 +1547,20 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // --- Outputs tab: file listing, download, Clean / Harsh Clean --------
   const outputsContent = body.querySelector('[data-tab-content="outputs"]');
 
-  // path -> "star" | "image" | null (not previewable). Keyed off extension
-  // only, same as the pre-existing .star check -- cheap and matches every
-  // file this app or IsoNet2 actually produces (loss curves, orthoslice/
-  // spectrum previews) without guessing at file content.
+  // path -> "star" | "image" | "volume" | null (not previewable). Keyed off
+  // extension only, same as the pre-existing .star check -- cheap and
+  // matches every file this app or IsoNet2 actually produces (loss curves,
+  // orthoslice/spectrum previews, predicted tomograms) without guessing at
+  // file content. The volume extension set mirrors backend/viz.py's own
+  // VOLUME_SUFFIXES exactly -- keep the two in sync if that set ever changes.
   function previewKindFor(path) {
     if (/\.star$/i.test(path)) return "star";
     if (/\.(png|jpe?g|gif|webp)$/i.test(path)) return "image";
+    if (/\.(mrc|mrcs|rec|st|ali)$/i.test(path)) return "volume";
     return null;
   }
+
+  const PREVIEW_TITLES = { star: "Click to preview contents", image: "Click to preview image", volume: "Click to open in the tomogram viewer" };
 
   function renderOutputsList(files) {
     if (!files.length) {
@@ -1565,7 +1572,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <div class="outputs-row" data-path="${escapeHtml(f.path)}" ${kind ? `data-preview-kind="${kind}"` : ""}>
         <input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />
         <span class="out-path${kind ? " out-path-previewable" : ""}"
-              ${kind ? `data-role="preview" title="Click to preview ${kind === "image" ? "image" : "contents"}"` : ""}
+              ${kind ? `data-role="preview" title="${PREVIEW_TITLES[kind]}"` : ""}
         >${escapeHtml(f.path)}</span>
         <span class="out-size">${formatBytes(f.size)}</span>
         <span class="out-download" data-role="download" title="Download">⬇</span>
@@ -1583,19 +1590,32 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     });
   }
 
-  // Clicking a previewable filename (.star, or an image like the loss
-  // curves / orthoslice-spectrum PNGs IsoNet2's training/predict jobs write
-  // -- not its checkbox, which is a separate element and is never touched
-  // by this) opens/updates a preview panel pinned to the bottom of the
-  // Outputs tab -- collapsible so the checkbox list can be seen in full
-  // again without losing the "currently previewing X" state.
+  // Clicking a previewable filename (.star; an image like the loss curves /
+  // orthoslice-spectrum PNGs IsoNet2's training/predict jobs write; or a
+  // volume like a predicted tomogram -- not its checkbox, which is a
+  // separate element and is never touched by this) opens/updates a preview
+  // panel pinned to the bottom of the Outputs tab (star/image), or opens
+  // the full tomogram viewer in its own window (volume -- an orthoslice
+  // panel doesn't fit the same small bottom strip the way a single image
+  // does, and the viewer already exists as its own popup).
   function wireStarPreviewClicks(container) {
     container.querySelectorAll('[data-role="preview"]').forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         const row = el.closest(".outputs-row");
-        if (row.dataset.previewKind === "image") openImagePreview(row.dataset.path);
-        else openStarPreview(row.dataset.path);
+        const kind = row.dataset.previewKind;
+        if (kind === "volume") {
+          // currentRun.cwd is this job's own absolute output directory;
+          // row.dataset.path is already relative to it (see
+          // list_output_files/renderOutputsList) -- join them so
+          // openVisualizer gets a path viz._safe can resolve regardless of
+          // which project directory is currently open.
+          openVisualizer(null, `${currentRun.cwd.replace(/\/+$/, "")}/${row.dataset.path}`);
+        } else if (kind === "image") {
+          openImagePreview(row.dataset.path);
+        } else {
+          openStarPreview(row.dataset.path);
+        }
       });
     });
   }
@@ -1693,7 +1713,25 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const PROGRESS_POLL_MS = (globalSettings["progress.refresh_interval_s"] || 4) * 1000;
 
   function progressSupported() {
-    return currentRun && PROGRESS_JOB_TYPES.has(internalName);
+    return currentRun && (PROGRESS_JOB_TYPES.has(internalName) || isonetLossSupported());
+  }
+
+  // IsoNet2's Denoise/Refine training jobs have no RELION iteration-STAR
+  // scheme for progress.py's own PROGRESS_JOBS/supports_progress() to read
+  // at all -- confirmed reading IsoNet2's own train.py: loss history lives
+  // only in memory and is rendered straight to a PNG (loss_full.png for
+  // Denoise's n2n, loss_top.png + loss_bottom.png for Refine's two-half
+  // DuoNet), overwritten in place every "Checkpoint save interval" epochs;
+  // no numeric log is ever written to disk for a real line chart. So this
+  // is deliberately NOT added to PROGRESS_JOB_TYPES / backend PROGRESS_JOBS
+  // (GET .../progress would just report supported:false forever for these,
+  // and refreshProgress's own supported===false branch below would hide
+  // the tab again the instant it tried) -- it's a wholly separate,
+  // additive path that re-fetches and re-displays whichever loss PNG(s)
+  // currently exist, using the Outputs tab's own file-listing/download
+  // endpoints (no backend changes needed).
+  function isonetLossSupported() {
+    return currentRun && ISONET_LOSS_JOB_TYPES.has(internalName);
   }
 
   // The Progress tab is a top/bottom split: charts/thumbnails above, the
@@ -1745,7 +1783,41 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     };
   }
 
+  // IsoNet2's Denoise/Refine loss-curve view: the same top/bottom split +
+  // live-output pane + drag handle as the RELION shell below (still useful
+  // here -- you generally want to watch training stdout alongside the
+  // curve), just without the RELION-specific "every N iterations"/
+  // iteration-picker controls, which have no meaning for a single
+  // continuously-overwritten PNG.
+  function renderIsonetLossShell() {
+    progressContent.innerHTML = `
+      <div class="progress-split-wrap" data-role="progress-split-wrap">
+        <div class="progress-split-top">
+          <div class="progress-controls">
+            <label class="progress-check" title="Turn off to stop polling this job entirely.">
+              <input type="checkbox" data-role="prog-enabled" ${progressState.enabled ? "checked" : ""} /> Live progress
+            </label>
+            <span class="progress-status" data-role="prog-status"></span>
+          </div>
+          <div data-role="prog-body"></div>
+        </div>
+        <div class="progress-split-handle" data-role="progress-split-handle" title="Drag to resize"></div>
+        <div class="progress-live-output" data-role="progress-live-output">
+          <div class="progress-live-output-header">Live output</div>
+          <div class="progress-live-output-body" data-role="progress-live-output-body"></div>
+        </div>
+      </div>
+    `;
+    progressContent.querySelector('[data-role="prog-enabled"]').addEventListener("change", (e) => {
+      progressState.enabled = e.target.checked;
+      if (progressState.enabled) refreshProgress();
+      else { stopProgressPolling(); renderProgressBody(); }
+    });
+    wireProgressSplitter();
+  }
+
   function renderProgressShell() {
+    if (isonetLossSupported()) { renderIsonetLossShell(); return; }
     progressContent.innerHTML = `
       <div class="progress-split-wrap" data-role="progress-split-wrap">
         <div class="progress-split-top">
@@ -1835,10 +1907,43 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     return data;
   }
 
+  // Cache-busting matters here specifically: the filename never changes
+  // between checkpoints (IsoNet2 overwrites loss_full.png/loss_top.png/
+  // loss_bottom.png in place every save interval), and the download
+  // endpoint sets no Cache-Control (main.py's download_run_file is a plain
+  // FileResponse) -- without ?t=mtime a poll that finds a newer file on
+  // disk would still show the browser's cached copy of the old one.
+  function renderIsonetLossBody(host, statusEl) {
+    if (!progressState.enabled) {
+      host.innerHTML = '<div class="progress-empty">Live progress is off for this job.</div>';
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    const files = progressState.isonetLossFiles || [];
+    if (!files.length) {
+      host.innerHTML = '<div class="progress-empty">Waiting for the first loss curve — written every '
+        + '"Checkpoint save interval" epochs, once training has completed at least one.</div>';
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    if (statusEl) {
+      const newest = files.reduce((a, b) => (b.mtime > a.mtime ? b : a));
+      statusEl.textContent = `updated ${new Date(newest.mtime * 1000).toLocaleTimeString()}`;
+    }
+    host.innerHTML = files.map((f) => `
+      <div class="progress-section">
+        <h4>${escapeHtml(f.path)}</h4>
+        <img class="isonet-loss-image"
+             src="/api/runs/${currentRun.run_id}/files/download?path=${encodeURIComponent(f.path)}&t=${f.mtime}"
+             alt="${escapeHtml(f.path)}" />
+      </div>`).join("");
+  }
+
   async function renderProgressBody() {
     const host = progressContent.querySelector('[data-role="prog-body"]');
     const statusEl = progressContent.querySelector('[data-role="prog-status"]');
     if (!host) return;
+    if (isonetLossSupported()) { renderIsonetLossBody(host, statusEl); return; }
     if (!progressState.enabled) {
       host.innerHTML = '<div class="progress-empty">Live progress is off for this job.</div>';
       if (statusEl) statusEl.textContent = "";
@@ -1949,6 +2054,26 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   async function refreshProgress() {
     stopProgressPolling();
     if (!progressSupported() || !progressState.enabled) { await renderProgressBody(); return; }
+    if (isonetLossSupported()) {
+      // No .../progress call here on purpose -- that endpoint's own
+      // supported===false branch below would hide this tab right back,
+      // since progress.py's PROGRESS_JOBS deliberately doesn't (and
+      // shouldn't) know about these job types. Reuses the plain file
+      // listing the Outputs tab already uses; no dedicated endpoint needed.
+      try {
+        const listing = await api(`/api/runs/${currentRun.run_id}/files`);
+        progressState.isonetLossFiles = (listing.files || []).filter((f) => ISONET_LOSS_FILES.has(f.path));
+        await renderProgressBody();
+      } catch (err) {
+        const host = progressContent.querySelector('[data-role="prog-body"]');
+        if (host) host.innerHTML = `<div class="progress-empty">Could not read progress: ${escapeHtml(err.message)}</div>`;
+      }
+      if (currentRun && !["completed", "failed", "aborted"].includes(currentRun.status)
+          && progressState.enabled) {
+        progressTimer = setTimeout(refreshProgress, PROGRESS_POLL_MS);
+      }
+      return;
+    }
     try {
       const d = await api(`/api/runs/${currentRun.run_id}/progress`);
       progressState.data = d;
@@ -4175,7 +4300,12 @@ async function openAnalyzePopup() {
 // / right-click-to-delete picking on the panels, and a Save button that
 // writes into that job's own directory via /api/manual-pick/{runId}/* --
 // see manual_pick.py for the STAR files that produces.
-async function openVisualizer(pickingContext = null) {
+//
+// initialPath (optional, ignored if pickingContext is set): an absolute or
+// project-relative path to load immediately, no picking UI -- used by the
+// Outputs tab (see wireVolumePreviewClicks) to jump straight to viewing one
+// specific output .mrc without the user re-typing/re-browsing for it.
+async function openVisualizer(pickingContext = null, initialPath = null) {
   const body = document.createElement("div");
   body.className = "viz-popup";
   // Layout: the orthogonal views take the whole left side; every control and
@@ -4598,7 +4728,9 @@ async function openVisualizer(pickingContext = null) {
   });
 
   // --- Load button: inspect -> populate tomograms -> load volume+picks ---
-  q('[data-role="viz-load"]').addEventListener("click", async () => {
+  // Named (not an inline arrow in the listener) so initialPath below can
+  // trigger the exact same load a manual click would, once, on open.
+  async function runVizLoad() {
     const path = q('[data-role="viz-path"]').value.trim();
     state.particles = q('[data-role="viz-particles"]').value.trim() || null;
     if (!path) { statusEl.textContent = "Enter a STAR or MRC path."; return; }
@@ -4637,7 +4769,8 @@ async function openVisualizer(pickingContext = null) {
     await loadVolume(t.mrc_path);
     await loadPicks(t.mrc_path);
     refreshAllPanels();
-  });
+  }
+  q('[data-role="viz-load"]').addEventListener("click", runVizLoad);
 
   // --- Controls ---
   ["x", "y", "z"].forEach((letter) => {
@@ -4885,6 +5018,16 @@ async function openVisualizer(pickingContext = null) {
   });
   // WinBox mounts asynchronously; the first layout needs the real box size.
   setTimeout(layoutStage, 0);
+
+  // A caller that already knows exactly which file to show (e.g. the
+  // Outputs tab, clicking a predicted .mrc row) skips the manual
+  // type-a-path-and-click-Load step and just runs it once automatically.
+  // Not offered together with pickingContext -- picking mode locks the path
+  // field to its own sourcePath already (see above) and has no Load button.
+  if (initialPath && !pickingContext) {
+    q('[data-role="viz-path"]').value = initialPath;
+    runVizLoad();
+  }
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", () => openVisualizer());
@@ -5371,6 +5514,20 @@ function pickFileDialog({ title = "Select a file", extensions = [], startPath = 
 const PROGRESS_JOB_TYPES = new Set([
   "Class2D", "Class3D", "Autorefine", "Inimodel", "MultiBody", "TomoReconPart",
 ]);
+
+// Job types with a live Progress tab showing IsoNet2's own loss-curve
+// PNGs (see isonetLossSupported's docstring) -- a separate set from
+// PROGRESS_JOB_TYPES above on purpose: these have no backend
+// progress.PROGRESS_JOBS counterpart at all, and never should (that
+// endpoint is RELION-iteration-STAR-specific).
+const ISONET_LOSS_JOB_TYPES = new Set(["IsonetDenoise", "IsonetRefine"]);
+
+// The exact filenames IsoNet2 itself writes (IsoNet/models/train.py's
+// plot_metrics() call: loss_{split}.png, split="full" for Denoise's n2n,
+// "top"/"bottom" for Refine's two-half DuoNet) -- confirmed against
+// IsoNet2's own source, not guessed. A job writes only the ones relevant
+// to its own method, so this is filtered against, not assumed complete.
+const ISONET_LOSS_FILES = new Set(["loss_full.png", "loss_top.png", "loss_bottom.png"]);
 
 // Job types with an end-of-job CTF QC tab. Must match backend
 // ctf_qc.supports_ctf_qc (the backend is authoritative — see PROGRESS_JOB_TYPES
