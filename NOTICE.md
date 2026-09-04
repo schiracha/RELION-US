@@ -125,7 +125,18 @@ external subprocesses that the user installs separately.
 Installed from PyPI at the user's own discretion via
 `backend/requirements.txt`; none is vendored into this repository. Their
 licenses are their own (`fastapi`, `uvicorn`, `pydantic`, `pandas`,
-`starfile`, `mrcfile`, `pillow`, `pytest`, `playwright`).
+`starfile`, `mrcfile`, `pillow`, `scipy`, `pytest`, `playwright`).
+
+## Colorblind-safe chart palette (Okabe & Ito, 2008)
+
+The multi-series charts (Progress tab, CTF QC tab, Analyze popup) use the
+qualitative color palette published by Masataka Okabe and Kei Ito,
+*"Color Universal Design (CUD) - How to make figures and presentations
+that are friendly to Colorblind people"* (2008),
+https://jfly.uni-koeln.de/color/ — a fixed list of 8 RGB values, not
+software; only the color values themselves are reused
+(`frontend/app.js`'s `COLORBLIND_SAFE_PALETTE`), no code or text from that
+publication.
 
 ## No affiliation
 

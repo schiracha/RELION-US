@@ -27,6 +27,16 @@ viewer plus a **dark/light theme** switch. Jobs run **from the project
 directory**, exactly like RELION, so project-root-relative paths behave the
 way RELION's own GUI expects.
 
+A handful of real RELION steps only ship as a desktop GUI with no headless
+mode at all — manual picking, tilt-image exclusion, interactive class
+selection — and RELION-US replaces just those with an in-browser
+equivalent while still registering the job under its real RELION type
+label; see "In-browser pickers" and "Interactive class/micrograph/particle
+selection" below. It also wires up [IsoNet2](https://github.com/IsoNet-cryoET/IsoNet2)
+as six more job types, and every job (real RELION or otherwise) can be
+**submitted to a SLURM cluster** straight from its popup, including job
+arrays and dependency chains.
+
 ## Why this exists
 
 RELION's own GUI is a compiled Qt5/C++ application that assembles each
@@ -459,6 +469,96 @@ built on a flipped or raw-`tilt` volume has depth in Y, not Z. Mirroring
 requires the tomogram dimension for that axis, and fails loudly if you
 don't supply it rather than silently producing wrong coordinates.
 
+## In-browser pickers (no desktop GUI needed)
+
+A few real RELION jobs unconditionally open a desktop window with no
+headless mode at all — `relion_manualpick` is a compiled FLTK canvas,
+`relion_tomo_exclude_tilt_images` unconditionally calls `napari.Viewer()`.
+Both are unusable from a remote/browser-driven backend, so RELION-US
+replaces the picking/reviewing itself with an in-browser equivalent, while
+still registering the job under its real RELION type label
+(`relion.manualpick` / `relion.picktomo` / `relion.excludetilts`) so it
+shows up correctly in RELION's own GUI and its output is a valid input to
+any real downstream RELION job.
+
+- **Manual Picking** (SPA) and **Manual Picking (Tomo)**: Run just
+  validates the input micrographs/tomograms; a **🔍 Open Picker** button
+  then opens the same orthogonal tomogram/particle-pick viewer described
+  above, with picking turned on — double-click to add a pick, right-click
+  to delete one. Picks save into the job's own directory as you go, so
+  Extract/TomoSubtomo can read them even before you close the picker.
+- **Exclude Tilt Images**: replaces napari's own tilt-image exclusion
+  widget with a plain per-tilt-series checklist (**🔍 Open Reviewer**) —
+  every image starts kept (a legitimate default on its own, matching
+  napari's own starting state), uncheck the bad ones. Save always
+  re-derives from the tilt series' original input, never from a previous
+  save, so re-checking a previously-excluded image genuinely re-includes
+  it and nothing accumulates across sessions.
+
+Both share the same **▶ Continue** / **⟳ Overwrite** / **✓ Done** lifecycle:
+the job stays "Running" while you pick/review (there's no single moment
+picking is "finished"), Continue resumes a session non-destructively,
+Overwrite clears everything already saved here and starts fresh in the
+same job slot, and Done marks it complete — including in RELION's own
+pipeline, if sync is on.
+
+## Interactive class/micrograph/particle selection (Select job)
+
+Real RELION's **Subset Selection** job is a six-way branch — five of them
+(select-on-value, discard-on-statistics, split, automated class-ranker
+selection, filament selection) build ordinary command-line calls RELION-US
+already drafts correctly. The sixth, and by far the most common in
+practice — interactively browsing 2D/3D class averages (or a plain list of
+micrographs/particles) and choosing which to keep — shells out to
+`relion_display --gui`, another desktop Qt window. RELION-US replaces just
+that branch: leave every mode checkbox unchecked, fill in one of the three
+inputs, and Run opens the same picker lifecycle as above instead of
+building a subprocess command.
+
+- **Select classes from job** (a `_optimiser.star`/`_model.star` from a
+  prior Class2D/Class3D run): a **🎯 Select Classes** button opens a
+  thumbnail grid — one card per class, with its share of particles,
+  resolution, and particle count — click to toggle selected. Saving writes
+  `particles.star` (every selected class's particles, cross-referenced
+  from the source job's own `_data.star`, optics block preserved
+  verbatim) and, for a Class2D source only, `class_averages.star` — a real
+  RELION quirk (Class3D has no separate class-averages output) reproduced
+  deliberately rather than "fixed."
+  - **Re-center images?** translates each selected class average to its
+    center of mass and writes a new `class_averages.mrcs` stack — the
+    center-of-mass computation matches RELION's own exactly; the sub-pixel
+    wrap-around shift itself uses `scipy.ndimage.shift` as a close
+    stand-in for RELION's B-spline interpolation, not a bit-identical
+    reproduction.
+  - **Re-group particles?** rebalances the selection into the requested
+    number of groups using the source model.star's own group table,
+    sorted by refined intensity-scale correction and bucketed by optics
+    group — including RELION's real "at least 10 particles per group"
+    minimum.
+- **Select from micrographs** / **Select from particles**: the same
+  picker, showing a flat list instead of classes — no class join, just
+  "keep the checked rows, preserve every other column and the optics
+  block," saved as `micrographs.star`/`particles.star`.
+
+As with the pickers above, nothing is written until you explicitly save a
+selection, and saving always re-derives from the original input, so
+re-saving with a different selection never accumulates.
+
+## IsoNet2
+
+Six more job types under an **IsoNet (Beta)** category —
+[IsoNet2](https://github.com/IsoNet-cryoET/IsoNet2)'s
+`prepare_star` → `deconv` → `make_mask` → `denoise`/`refine` → `predict`
+chain for missing-wedge correction and denoising of reconstructed
+tomograms. Unlike the import bridges above, these run `isonet.py` as a
+real subprocess in a conda environment (including SLURM submission, same
+as any RELION job), with folder **Browse** buttons for their
+directory-input fields and options cross-checked against IsoNet2's own
+GUI/tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss
+curve on their Progress tab (IsoNet2 writes it every few epochs, same
+polling approach as RELION's own iteration charts); **Predict**'s output
+MRCs link directly into the tomogram viewer.
+
 ## Opening a project built in RELION's GUI
 
 Point RELION-US at an existing project and it reads RELION's own
@@ -545,7 +645,9 @@ Clicking a job reopens its popup — nearly window-filling, rounded corners,
 and only one open at a time (opening a new one closes whichever was open,
 rather than stacking windows) — showing the options it ran with, its live or
 final status, an **Outputs** tab (browse/download individual files or a
-`.zip` of any selection), the **Errors** tab, and the **RELION Source** tab.
+`.zip` of any selection — click a `.star` or an image file to preview it
+inline instead of downloading it first), the **Errors** tab, and the
+**RELION Source** tab.
 
 The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
 close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
@@ -641,6 +743,15 @@ Under the hood nothing is cached to disk, thumbnails are 128 px greyscale
 rendered on demand, and polling only happens while the job is actually
 running.
 
+Charts sit in a compact, responsive grid — several side by side rather
+than one full-width chart per row — and use a fixed
+colorblind-safe palette ([Okabe & Ito, 2008](https://jfly.uni-koeln.de/color/))
+for anything with more than two series (e.g. per-class lines in the
+Analyze popup), rather than an arbitrary hue rotation that sweeps through
+the red/green region indistinguishable under the most common forms of
+color blindness. The same grid and palette are used by the CTF QC tab and
+the Analyze popup's own charts.
+
 ## Dark and light themes
 
 The top bar has a theme switch. **Dark is the default**; pick light and it's
@@ -652,19 +763,56 @@ The top bar itself is a fixed blue (`#134394`) in both themes rather than a
 theme-swapped color — everything on it (buttons, the project path label)
 still adjusts for legible contrast against that blue in either mode.
 
-## SLURM templates (any cluster)
+## SLURM cluster submission
 
-`slurm/template_relion_job.sbatch`, `slurm/template_python_job.sbatch`, and
-`slurm/submit.py` are a standalone command-line path for running a RELION
-job or a converter as a proper batch job — **not yet wired into the job
-popups themselves**; see `docs/ARCHITECTURE.md` for what adding a "Run on
-cluster" button would involve. These templates are
+Every non-custom job's popup has a **Submit to SLURM cluster** checkbox
+next to the command box. Check it and the same command that would
+otherwise run as a direct subprocess is instead wrapped into an sbatch
+script (`slurm/template_relion_job.sbatch` / `template_python_job.sbatch`,
+literal `ACCOUNT_NAME`/`PARTITION_NAME`/etc. placeholders filled in from
+the fields that appear once it's checked: **Account**, **Partition**,
+**Time limit**, **Memory**) and submitted with `sbatch --parsable`. The
+Command Center polls `squeue`, falling back to `sacct` once SLURM ages the
+job out of `squeue`, and rolls the real SLURM state into the same
+Running/Queued/Completed/Failed states a local job uses — **Abort** calls
+`scancel` on it.
+
+- **Job dependencies**: an optional **Depends on SLURM job ID** field adds
+  `--dependency=afterok:<id>` to the submission, so this job only starts
+  once another one succeeds — a `<datalist>` suggests this project's
+  currently queued/running SLURM job IDs so you don't have to copy-paste
+  one by hand. Chaining N jobs is just submitting each one with this set
+  to the previous job's ID.
+- **Job arrays**: check **Submit as SLURM array** and list one item per
+  line in the **Array items** box (plus an optional **Throttle** capping
+  how many run at once, SLURM's `--array=0-N%throttle`). Each array task
+  gets its own resolved item in a `$ARRAY_ITEM` shell variable your
+  command can reference — most directly useful for the **External Job**
+  type, whose command box is already fully free-text. This is a generic
+  "run the same command N times, once per input line" primitive, not
+  automatic splitting/merging of a real RELION job's own STAR file per
+  task. The Command Center shows a live **K/N tasks** readout alongside
+  the array's overall status.
+
+`slurm/submit.py` remains available as a standalone command-line path for
+submitting a job or converter as a batch job without going through the
+browser at all, using the same templates. These templates are
 intentionally generic, not written for any specific site: partition names,
 account/allocation syntax, and module names all vary between clusters, so
 `ACCOUNT_NAME`/`PARTITION_NAME` are placeholders you fill in for your own
 system — run `sinfo` for partition names and `module spider relion` /
 `module spider imod` (or check however your cluster exposes software) for
 the exact module strings on your install.
+
+**Not yet done, tracked as open issues:** auto-splitting/merging a real
+RELION job's own input STAR file per array task, job-type-specific rather
+than the generic primitive above; live per-task output streaming for array
+jobs (each task's own output file is reachable via the Outputs tab in the
+meantime); a dedicated multi-job dependency-chain-builder UI (the single
+**Depends on** field already covers the same capability with far less new
+surface). Verified only against stub `sbatch`/`squeue`/`sacct`/`scancel`
+scripts in this project's own test suite — real-cluster verification is
+still worth doing before trusting it for a large production run.
 
 ## Provenance and re-running the extraction
 
@@ -719,8 +867,9 @@ parsing gaps introduced by a new RELION release show up as failures.
   history after the backend has restarted shows its last known status but
   not its old live output. Runs from the current backend session stream
   normally either way.
-- No SLURM integration in the job popups yet (see "SLURM templates" above)
-  — jobs run as direct subprocesses.
+- SLURM submission (above) is verified against stub scheduler binaries in
+  this project's own tests, not a real cluster — the array/dependency
+  path in particular is worth a careful first run before relying on it.
 
 ## Testing
 
