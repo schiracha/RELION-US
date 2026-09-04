@@ -195,10 +195,46 @@ close that gap:
   ```
 
 With a real CA-issued certificate you can also add `--hsts`, which tells
-browsers to refuse plain HTTP to this host for a year. Deliberately off by
-default and **not** recommended with a self-signed certificate: it's a
-one-way door that will lock you out of `http://` on that hostname while
-you're still evaluating.
+browsers to refuse plain HTTP to this host for a year. It's off by default,
+and **refused outright with a self-signed certificate** — `--hsts-force`
+overrides that, but read the next section before you use it.
+
+### Recovering from HSTS
+
+Worth understanding before turning `--hsts` on, because this is the one
+setting here you cannot undo from the machine running the app.
+
+`Strict-Transport-Security: max-age=31536000` is cached **by the browser**,
+not held by the server. Dropping `--hsts`, restarting, even deleting the
+certificate changes nothing — the browser already has the policy and will
+honour it for a year.
+
+With a self-signed certificate it's worse than inconvenient. HSTS
+deliberately removes the click-through on certificate warnings ([RFC 6797
+§12.1](https://datatracker.ietf.org/doc/html/rfc6797#section-12.1) — "there
+is no such recourse"), so the browser refuses plain HTTP to that host *and*
+refuses to let you accept the untrusted certificate. Both doors, for a year,
+in every browser that saw the header. That's why `--make-cert` certificates
+are refused: `Run-RelionUS` checks whether the certificate is self-signed
+(issuer equals subject) and won't arm HSTS if it is.
+
+There's a server-side escape in principle — serve `max-age=0` over HTTPS and
+the browser drops the pin — but it needs a handshake the browser will
+complete, which under an active pin with an untrusted certificate it won't.
+So it works with a real certificate and is unavailable in exactly the
+self-signed case where you'd need it.
+
+If you've already locked yourself out, clear the HSTS entry per browser:
+
+| Browser | How |
+|---|---|
+| Chrome / Edge | Open `chrome://net-internals/#hsts`, put the hostname in **Delete domain security policies**, click Delete |
+| Firefox | History ▸ find the site ▸ **Forget About This Site**; or close Firefox and delete `SiteSecurityServiceState.txt` from the profile folder |
+| Safari | Quit Safari, delete `~/Library/Cookies/HSTS.plist`, reopen |
+
+A different hostname for the same machine (say the IP instead of the name)
+is unaffected, since HSTS is stored per host — a quick way back in while you
+sort the browser out.
 
 A TLS-terminating reverse proxy (nginx/Caddy) in front of the app also works
 and is a perfectly good choice if you already run one. The app reads
@@ -255,6 +291,15 @@ How the password is protected:
   cost only prices *offline* guessing against a stolen config file; 0.12 s per
   try is no obstacle to a script hammering the login endpoint, so that needs
   its own control.
+
+  **If you lock yourself out**, the correct password is refused too — that's
+  deliberate, or the lockout would be trivially bypassable. Two ways back:
+  wait 5 minutes, or **restart the backend** (Ctrl-C and relaunch), which
+  clears it instantly. The counters live in memory in the server process and
+  are never written to disk. There is deliberately no `--clear-lockout` flag:
+  a CLI invocation is a *separate* Python process with its own empty
+  counters, so it would report success and change nothing in the running
+  server. Restarting is the mechanism, not a workaround for a missing one.
 - **Minimum 8 characters**, and the handful of passwords every guessing script
   tries first are refused. No composition rules — length is what actually
   predicts guessing cost, and "must contain a symbol" mostly produces
