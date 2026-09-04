@@ -65,8 +65,8 @@ HOST="127.0.0.1"
 PORT="8420"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --host) HOST="$2"; shift 2 ;;
-    --port) PORT="$2"; shift 2 ;;
+    --host) [[ $# -ge 2 ]] || { echo "--host needs a value" >&2; exit 1; }; HOST="$2"; shift 2 ;;
+    --port) [[ $# -ge 2 ]] || { echo "--port needs a value" >&2; exit 1; }; PORT="$2"; shift 2 ;;
     --set-password) run_auth_cli set-password; exit $? ;;
     --enable-auth) run_auth_cli enable; exit $? ;;
     --disable-auth) run_auth_cli disable; exit $? ;;
@@ -113,5 +113,13 @@ if [[ -z "${RELION_US_FORCE_AUTH:-}" ]] && ! run_auth_cli is-enabled; then
   fi
 fi
 
-cd "$SCRIPT_DIR/backend"
-exec uvicorn main:app --host "$HOST" --port "$PORT"
+# NOT `cd "$SCRIPT_DIR/backend"` first: main.py's _initial_project_dir() reads
+# the process's working directory to decide whether it was launched from inside
+# an existing RELION project, so cd-ing away from wherever the user actually ran
+# this would make that check always fail and silently drop them into the default
+# project folder instead. --app-dir only puts backend/ on Python's import path
+# (uvicorn does sys.path.insert, never a chdir), so `main:app` still imports
+# while the working directory stays the one the user launched from. Everything
+# else in the backend resolves its own paths from __file__, so nothing else
+# depends on the working directory being backend/.
+exec uvicorn --app-dir "$SCRIPT_DIR/backend" main:app --host "$HOST" --port "$PORT"

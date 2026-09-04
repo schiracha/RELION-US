@@ -567,11 +567,18 @@ a continuation rather than a blank slate — see
   keys are the same option keys these forms use. Values are merged *over* the
   job type's defaults, so an option RELION's file doesn't mention still gets a
   sane value.
-- **Read-only.** Abort / overwrite / delete / status and alias edits are refused
-  on imported jobs, in the API (`_reject_relion_run`, 409) as well as the UI.
-  This app does not write RELION's pipeline state, so acting on a job RELION
-  owns would leave that file describing something untrue. Browsing outputs and
-  reading progress are fine — those only read the job's directory.
+- **Read-only.** Abort / resume / delete / status changes are refused on
+  imported jobs, in the API (`_reject_relion_run`, 409) as well as the UI:
+  this app has no `relion_pipeliner` verb that would let it keep RELION's own
+  record consistent afterwards, so acting on a job RELION owns would leave that
+  file describing something untrue. Two deliberate carve-outs: **alias and note
+  edits** are allowed, since both live in `.relion_us/` and never reach
+  RELION's pipeline at all; and **Overwrite** is allowed when pipeline sync is
+  on, because the overwrite branch reuses the same process row via
+  `set_process_status` (matched by directory, not by who registered it). It is
+  still refused with sync off, where there is no way to update RELION's record.
+  Browsing outputs and reading progress are always fine — those only read the
+  job's directory.
 - **Run ids carry the job number, not the directory.** `relion:job005`, not
   `relion:Class2D/job005`: an encoded `/` in a URL path segment is rejected
   before the route matches, and RELION's numbering is project-wide unique
@@ -594,15 +601,26 @@ project rather than a hand-made one:
 Adoption (above) is read-only: it lets RELION-US see a project RELION's GUI
 built, but a job run in RELION-US still didn't exist as far as
 `default_pipeline.star` was concerned. `pipeline_bridge.py` closes that loop,
-governed by a per-project, off-by-default setting
+governed by a per-project, **on-by-default** setting
 (`project_manager.pipeline_sync_setting()` / `set_pipeline_sync()`, stored in
-`.relion_us/settings.json`) so nothing changes for a project unless the user
-opts in via **⇄ RELION sync** in the top bar.
+`.relion_us/settings.json`), toggled via **⇄ RELION sync** in the top bar. Both
+GUIs staying interoperable out of the box is worth more than the narrow
+"opened a colleague's project, didn't mean to touch its pipeline" case an
+off-by-default would guard against — and that case is still one click away, per
+project. `relion_pipeliner` not being on `PATH` independently makes this a
+no-op regardless of the setting.
 
-The standing rule from adoption still holds: **this app never writes
-`default_pipeline.star` itself.** Sync doesn't relax that — it delegates the
-write to RELION's own `relion_pipeliner` binary instead, the same program
-RELION's own GUI shells out to internally:
+The standing rule from adoption still holds almost everywhere: **this app does
+not compute or rewrite `default_pipeline.star`'s contents.** It delegates to
+RELION's own `relion_pipeliner` binary, the same program RELION's own GUI
+shells out to internally. The two narrow exceptions — a fixed empty skeleton
+for a project that has no pipeline file yet (`_ensure_pipeline_bootstrapped`,
+because `relion_pipeliner` cannot create one without orphaning the lock), and a
+single status token to mark a process "Running" (`set_process_status`, because
+`--check_job_completion` only promotes processes already in that state) — are
+each documented in full in `pipeline_bridge.py`'s own module docstring. Neither
+touches the node, edge, or process tables that RELION's command-building logic
+is the authority for:
 
 - `write_job_star()` builds a `job.star` — `data_job` (`_rlnJobTypeLabel`,
   `_rlnJobIsContinue`, `_rlnJobIsTomo`) plus a `data_joboptions_values` loop —

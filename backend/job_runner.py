@@ -114,9 +114,11 @@ def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) 
 
     This is deliberately NOT the same thing as RELION's own real
     input/output pipeline graph (`pipeline_nodes`/`pipeline_input_edges` in
-    default_pipeline.star), which RELION-US doesn't build (see
-    project_manager.py's module docstring: this app never writes
-    default_pipeline.star itself). It's a display convenience for the
+    default_pipeline.star), which RELION-US never computes -- when pipeline
+    sync registers a job, relion_pipeliner builds those tables (see
+    pipeline_bridge.py's module docstring, including the two narrow direct
+    writes this app does make, neither of which touches them). It's a
+    display convenience for the
     Command Center timeline view, presented as "detected inputs," not as
     verified lineage -- a command that mentions a path substring which
     happens to match an existing file, without that file actually being
@@ -2613,6 +2615,42 @@ class JobRunManager:
     # happens" principle this app already applies to the command box,
     # applied to deletion instead of execution.
 
+    def run_internal_name(self, run_id: str) -> Optional[str]:
+        """This run's job type, whether it's live in memory (this session) or
+        only in persisted history (a previous session).
+
+        Deliberately NOT list_runs(): four endpoints needed exactly this one
+        string and each reached for list_runs() to get it, which merges the
+        persisted history with a full parse of RELION's own
+        default_pipeline.star and then resolves every job directory on disk to
+        attach input lineage -- all discarded here but the one field. The
+        Progress tab polls one of those endpoints every few seconds by default,
+        so a job reopened from an earlier session paid that whole merge on a
+        timer. Reading the history directly costs one JSON load and no pipeline
+        parse at all.
+
+        A job RELION itself ran exists in NEITHER of those two places -- it
+        only exists in default_pipeline.star -- so it still needs the pipeline
+        read, same as _resolve_run_cwd below. That branch is gated on the
+        run_id's own "relion:" prefix, so an ordinary run never pays for it:
+        the point of this method is that the common case is cheap, not that
+        the pipeline is never read. Getting this wrong is not subtle -- an
+        imported Class2D silently loses its Progress tab, which is exactly
+        what test_legacy_project.py asserts against.
+        """
+        run = self.get(run_id)
+        if run is not None:
+            return run.internal_name
+        if self.is_relion_run(run_id):
+            detail = self.relion_run_detail(run_id)
+            return detail.get("internal_name") if detail else None
+        entry = next(
+            (h for h in project_manager.load_history(self.project_dir)
+             if h.get("run_id") == run_id),
+            None,
+        )
+        return entry.get("internal_name") if entry else None
+
     def _resolve_run_cwd(self, run_id: str) -> Optional[Path]:
         """cwd for a run whether it's still live in self.runs (this
         session) or only survives in persisted history (a previous
@@ -2693,16 +2731,11 @@ class JobRunManager:
             f["suggested"] = suggested
         return files
 
-    def resolve_output_file(self, run_id: str, relative_path: str) -> Optional[Path]:
-        """Safety-checked join: resolves `relative_path` against the run's
-        cwd and refuses (returns None) if the result would land outside
-        that directory (e.g. a `../../` traversal attempt) or doesn't
-        exist as a file. Used by both the single-file download endpoint
-        and delete_output_files() below."""
-        run_cwd = self._resolve_run_cwd(run_id)
-        if run_cwd is None:
-            return None
-        cwd = run_cwd.resolve()
+    @staticmethod
+    def _resolve_under(cwd: Path, relative_path: str) -> Optional[Path]:
+        """The safety check itself, split out from resolve_output_file so a
+        caller holding many paths for ONE run can resolve that run's cwd once
+        instead of per path -- see resolve_output_files below."""
         candidate = (cwd / relative_path).resolve()
         if cwd != candidate and cwd not in candidate.parents:
             return None
@@ -2710,14 +2743,52 @@ class JobRunManager:
             return None
         return candidate
 
+    def resolve_output_file(self, run_id: str, relative_path: str) -> Optional[Path]:
+        """Safety-checked join: resolves `relative_path` against the run's
+        cwd and refuses (returns None) if the result would land outside
+        that directory (e.g. a `../../` traversal attempt) or doesn't
+        exist as a file. Used by the single-file download/preview endpoints;
+        anything resolving MORE than one path for the same run should use
+        resolve_output_files() instead."""
+        run_cwd = self._resolve_run_cwd(run_id)
+        if run_cwd is None:
+            return None
+        return self._resolve_under(run_cwd.resolve(), relative_path)
+
+    def resolve_output_files(
+        self, run_id: str, relative_paths: list[str]
+    ) -> Optional[list[tuple[str, Optional[Path]]]]:
+        """resolve_output_file for a whole batch, resolving the run's cwd ONCE.
+
+        Returns None if the run itself is unknown; otherwise one
+        (relative_path, resolved-or-None) pair per input, in order.
+
+        Worth having as its own method rather than looping over
+        resolve_output_file: _resolve_run_cwd() re-reads and re-parses the
+        project's entire run_history.json on every call for any run not still
+        live in memory (project_manager.load_history does no caching), so a
+        Harsh Clean or a "download selected as .zip" over a few hundred files
+        used to re-read that whole file a few hundred times for one request.
+        """
+        run_cwd = self._resolve_run_cwd(run_id)
+        if run_cwd is None:
+            return None
+        cwd = run_cwd.resolve()
+        return [(rel, self._resolve_under(cwd, rel)) for rel in relative_paths]
+
     def delete_output_files(self, run_id: str, relative_paths: list[str]) -> dict:
         """Deletes exactly the files the user checked and confirmed (the
         Clean / Harsh Clean review list) -- one at a time, so one bad path
         doesn't abort the rest. Every path is safety-checked the same way
         as resolve_output_file() before anything is removed."""
         deleted, errors = [], []
-        for rel in relative_paths:
-            resolved = self.resolve_output_file(run_id, rel)
+        resolved_pairs = self.resolve_output_files(run_id, relative_paths)
+        if resolved_pairs is None:
+            return {"deleted": [], "errors": [
+                {"path": rel, "error": "not found or outside the job's output directory"}
+                for rel in relative_paths
+            ]}
+        for rel, resolved in resolved_pairs:
             if resolved is None:
                 errors.append({"path": rel, "error": "not found or outside the job's output directory"})
                 continue

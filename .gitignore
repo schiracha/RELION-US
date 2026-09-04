@@ -1,3 +1,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# The fallback project folder main.py creates when it isn't launched from
+# inside a real RELION project (backend/main.py's DEFAULT_PROJECT_DIR). It's
+# a scratch project, not part of the app.
+relion_project/

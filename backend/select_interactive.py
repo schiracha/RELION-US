@@ -53,7 +53,6 @@ import asyncio
 import threading
 from math import floor, log10
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 

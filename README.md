@@ -1,74 +1,66 @@
 # RELION-US
 
-**RELION - User Supported Frontend** — a browser-based, portable job
-manager for RELION, built as a *companion* to RELION, not a modified
-RELION GUI. 
+**RELION — User Supported Frontend.** A browser-based job manager for
+RELION, built as a *companion* to RELION rather than a modified RELION GUI.
 
-**This app is still being built and I am not personally what I would call a
-programmer/coder. I know bash, some python, and some fortran (yikes!). So
-This app is being vibe coded. Therefore it gets built when I have time and
-tokens available. Please feel free to help, test, and apply fixes!**
+> This app is still being built, and I'm not what I'd call a
+> programmer — I know bash, some Python, and some Fortran (yikes!). So it's
+> being vibe coded, and it gets built when I have time and tokens available.
+> Please feel free to help, test, and send fixes. Pre-beta: use at your own
+> risk, and be vigilant about your own resources and what you're working on.
 
-It reads RELION's own source (`pipeline_jobs.cpp`/`.h`, `gui_jobwindow.cpp`)
-to build accurate forms for every RELION job type (32 of them, single-
-particle and tomography), folds in IMOD/Warp-M/DeepETPicker/AreTomo2 import
-bridges as four more entries in the same Jobs list, and runs everything
-through one consistent popup-window UI: an Inputs tab with every option
-RELION's own GUI shows, plus an Advanced section at the bottom for the
-command-line options it doesn't, an Errors tab, live streaming output at the
-bottom — and, critically, **an editable command box you approve before
-anything runs.**
+RELION-US reads RELION's own source (`pipeline_jobs.cpp`/`.h`,
+`gui_jobwindow.cpp`) to build accurate forms for all 32 RELION job types,
+single-particle and tomography, then runs them through one consistent popup
+UI with **an editable command box you approve before anything runs**. It also
+adds four import bridges (IMOD, Warp/M, DeepETPicker, AreTomo2), six IsoNet2
+job types, and in-browser replacements for the three RELION steps that only
+ship as a desktop GUI.
 
-The main panel is a **Command Center** showing every job you've run (a
-sortable table or a timeline that links each job to its inputs); iterative
-jobs get a **live Progress tab** with charts and class images; and the top
-bar has a **🔍 Visualize** button that opens a tomogram / particle-pick
-viewer plus a **dark/light theme** switch. Jobs run **from the project
-directory**, exactly like RELION, so project-root-relative paths behave the
-way RELION's own GUI expects.
+It's a normal web page, so it's portable: run the backend on your workstation
+or an HPC login node and open it from any browser on the network — no Qt, no
+X11 forwarding, no display server.
 
-A handful of real RELION steps only ship as a desktop GUI with no headless
-mode at all — manual picking, tilt-image exclusion, interactive class
-selection — and RELION-US replaces just those with an in-browser
-equivalent while still registering the job under its real RELION type
-label; see "In-browser pickers" and "Interactive class/micrograph/particle
-selection" below. It also wires up [IsoNet2](https://github.com/IsoNet-cryoET/IsoNet2)
-as six more job types, and every job (real RELION or otherwise) can be
-**submitted to a SLURM cluster** straight from its popup, including job
-arrays and dependency chains.
+**Contents:** [Why](#why-this-exists) · [Install](#installing-it) ·
+[Running it](#running-it) · [Password](#password-protection) ·
+[Using it](#using-it) · [Job types](#what-jobs-are-available) ·
+[The draft command](#how-the-draft-command-is-built) ·
+[Working alongside RELION](#working-alongside-relions-own-gui) ·
+[Command Center](#command-center-job-history) ·
+[Viewer](#tomogram--particle-pick-viewer) ·
+[Progress & Analyze](#live-progress-and-analysis) ·
+[SLURM](#slurm-cluster-submission) ·
+[Limitations](#known-limitations--what-to-double-check) ·
+[Testing](#testing) · [License](#license)
 
 ## Why this exists
 
-RELION's own GUI is a compiled Qt5/C++ application that assembles each
-job's command internally and hands it straight to the shell. RELION-US puts
-that command in front of you first and lets you edit it: whatever is in the
-command textbox when you click Run is executed exactly as written, via the
-shell, nothing added or removed. The draft command that pre-fills is based
-on the standard inputs suggested (see "How the draft command is built"
-below) — always check it, and the job's real RELION C++ source is one tab
-away for cross-referencing. It's also built to work between projects in
-separate project directories without closing down. You can change working
-directories on the fly and the application will reparse the environment.
-You need to be vigilant about your own resources and what you are working
-on. This is pre-beta software, so use at your own risk, float your own
-fixes, and let's build a user interface by users for users.
+RELION's own GUI is a compiled Qt5/C++ application that assembles each job's
+command internally and hands it straight to the shell. RELION-US puts that
+command in front of you first and lets you edit it: whatever is in the command
+box when you click **Run** is executed exactly as written, nothing added or
+removed. The draft that pre-fills it is built from the standard inputs (see
+[How the draft command is built](#how-the-draft-command-is-built)) — always
+check it, and the job's real RELION C++ source is one tab away for
+cross-referencing.
 
-It's also built to be portable and multi-machine-friendly: it's a normal
-web page. Run the backend on your workstation or a remote HPC cluster
-login node, and open the page from any browser on the network — no Qt, no
-X11 forwarding, no display server. See `docs/ARCHITECTURE.md` for the full
-design rationale, including why this is a separate layer rather than a
-modified RELION GUI, and confirmation that RELION-US never runs RELION's
-own compiled GUI binary at runtime (only RELION's command-line programs).
+Jobs run **from the project directory**, exactly like RELION, so
+project-root-relative paths behave the way RELION's own GUI expects. You can
+change project directories on the fly without restarting, and the app
+re-reads the new project's environment.
 
-## Installing and running it
+`docs/ARCHITECTURE.md` has the full design rationale, including why this is a
+separate layer rather than a modified RELION GUI, and confirmation that
+RELION-US never runs RELION's own compiled GUI binary (only its command-line
+programs).
 
-There's no install script — build the environment yourself with whatever
-Python tooling you already use, so this stays portable across Linux
-distributions rather than assuming one package manager or layout. Any
-approach that gets `backend/requirements.txt` installed into a Python 3.10+
-environment works; a plain venv is the least assumption-laden option and
-works the same way on every distro:
+## Installing it
+
+Python 3.10 or newer, and `backend/requirements.txt` installed into it.
+There's no install script — build the environment with whatever Python tooling
+you already use, so this stays portable across distributions rather than
+assuming one package manager. A plain venv is the least assumption-laden
+option:
 
 ```bash
 python3 -m venv relion-us
@@ -76,469 +68,460 @@ source relion-us/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-If your distro's `python3 -m venv` fails because the `venv` module isn't
-installed (common on minimal installs), install it from your distro's
-package manager first — e.g. `sudo apt install python3-venv` on Debian/
-Ubuntu, `sudo dnf install python3` on Fedora (venv is included), pacman's
-`python` package on Arch, or the equivalent for your system — then retry.
-`conda`/`mamba` environments work just as well if you prefer them:
-`conda create -n relion-us python=3.11 && conda activate relion-us && pip
-install -r backend/requirements.txt`.
-
-**Distro-specific notes:**
-- **Ubuntu 24.04**: no extra steps — it ships Python 3.12 by default, well
-  above the 3.10 floor.
-- **RHEL / CentOS Stream (CentOS Linux proper is EOL — treat it as RHEL)**:
-  check your default `python3` version first (`python3 --version`). RHEL 8
-  ships Python 3.6 and RHEL 9 ships Python 3.9 — both below 3.10 — so
-  `python3 -m venv` above will create an environment `pip install` then
-  fails against. Install a newer interpreter and use it explicitly instead:
-  `sudo dnf install python3.11` (RHEL 9: available directly via AppStream;
-  RHEL 8: needs EPEL or the Software Collections repo first), then
-  `python3.11 -m venv relion-us` in place of the `python3 -m venv` command
-  above. Everything else (requirements, launch command, behavior) is
-  identical once that's done — nothing else in this app is RHEL/CentOS-
-  specific.
-
-Once the environment is set up and active, launch it with:
+`conda`/`mamba` works just as well:
 
 ```bash
-./Run-RelionUS         # binds 127.0.0.1:8420 by default (localhost only)
+conda create -n relion-us python=3.11 && conda activate relion-us
+pip install -r backend/requirements.txt
 ```
 
-Then open `http://localhost:8420/` in a browser. On a remote server or HPC
-cluster login node, launch it there, then port-forward over SSH from your
-laptop — the default bind is already right for this:
+If `python3 -m venv` fails because the `venv` module isn't installed (common
+on minimal installs), install it from your distribution's package manager
+first — `sudo apt install python3-venv` on Debian/Ubuntu, pacman's `python`
+package on Arch, or the equivalent — then retry.
+
+**Distribution notes:**
+
+- **Ubuntu 24.04** — no extra steps; it ships Python 3.12.
+- **RHEL / CentOS Stream** (CentOS Linux proper is EOL — treat it as RHEL) —
+  check `python3 --version` first. RHEL 8 ships Python 3.6 and RHEL 9 ships
+  3.9, both below the 3.10 floor, so the venv above would be created against
+  an interpreter `pip install` then fails on. Install a newer one and use it
+  explicitly: `sudo dnf install python3.11` (RHEL 9: available directly via
+  AppStream; RHEL 8: needs EPEL or Software Collections first), then
+  `python3.11 -m venv relion-us`. Nothing else in the app is
+  RHEL/CentOS-specific.
+
+**Optional, feature by feature.** RELION's command-line programs need to be on
+`PATH` to actually run jobs; `relion_pipeliner` for
+[RELION sync](#-relion-sync); IMOD's `point2model`/`model2point` for the
+`.mod` half of the IMOD bridge; a conda environment with `isonet.py` for the
+IsoNet2 jobs; `sbatch`/`squeue`/`sacct`/`scancel` for
+[SLURM submission](#slurm-cluster-submission). Each is checked at the point of
+use and reported plainly if missing — nothing is required just to start the
+app.
+
+No CDN dependency: WinBox.js (the popup-window library) and xterm.js are
+vendored under `frontend/vendor/`, specifically because many HPC login nodes
+and workstations have no outbound internet access.
+
+## Running it
+
+With the environment active:
 
 ```bash
-# 1. On the remote machine (the HPC login node or server), in an SSH session:
+./Run-RelionUS         # binds 127.0.0.1:8420 (localhost only)
+```
+
+Then open `http://localhost:8420/`. `./Run-RelionUS --help` lists the
+`--host`/`--port` options.
+
+**On a remote server or HPC login node**, launch it there and port-forward
+over SSH — the default bind is already right for this:
+
+```bash
+# 1. On the remote machine (HPC login node or server), in an SSH session:
 ./Run-RelionUS
 
-# 2. On your laptop, in a SEPARATE terminal, leave this running -- <host> is
-#    whatever you'd normally type after `ssh` to reach that same machine,
-#    i.e. user@hostname or user@ip.address (e.g. jdoe@login1.cluster.edu),
-#    or just hostname/ip.address if your local SSH config already sets the
-#    username for that host:
+# 2. On your laptop, in a SEPARATE terminal, leave this running. <host> is
+#    whatever you'd normally type after `ssh` to reach that machine, i.e.
+#    user@hostname or user@ip.address (e.g. jdoe@login1.cluster.edu), or
+#    just hostname if your SSH config already sets the username:
 ssh -L 8420:localhost:8420 <host>
 
-# 3. Now on your laptop, open in a browser:
+# 3. On your laptop, open in a browser:
 http://localhost:8420/
 ```
 
-To reach it directly from another machine instead, without a tunnel, opt in
-explicitly with `--host 0.0.0.0` (see "Password protection" below first —
-this is the point at which it starts to matter).
-`./Run-RelionUS --help` shows the `--host`/`--port` options.
+To reach it directly from another machine without a tunnel, opt in explicitly
+with `--host 0.0.0.0` — read [Password protection](#password-protection)
+first, because that's the point at which it starts to matter.
 
-**You don't have to run it from inside a project directory.** If you `cd`
-into an existing RELION project before running `./Run-RelionUS`, it's picked
-up automatically; otherwise it starts in a default project folder and you
-switch to the real one from the **Change Project** button in the top bar
-at any time — see "Using it" below.
+**You don't have to run it from inside a project directory.** If you `cd` into
+an existing RELION project first, it's picked up automatically; otherwise it
+starts in a default project folder and you switch to the real one with
+**📁 Change Project** in the top bar at any time.
 
-**Running it as a plain command.** Typing the full path to `Run-RelionUS`
-every time gets old fast; put a symlink to it somewhere already on your
-`PATH` instead, and `Run-RelionUS` works from any directory after that. Two
-common places to put it, depending on who should be able to run it:
+**Running it as a plain command.** Typing the full path every time gets old;
+put a symlink somewhere already on your `PATH` and `Run-RelionUS` works from
+any directory:
 
 ```bash
-# Just for you (only if you already keep a personal bin/ directory on PATH):
+# Just for you (if you already keep a personal bin/ on PATH):
 ln -s "$(pwd)/Run-RelionUS" ~/bin/Run-RelionUS
 
 # For every user on this machine:
 sudo ln -s "$(pwd)/Run-RelionUS" /usr/local/bin/Run-RelionUS
 ```
 
-No CDN dependency: WinBox.js (the popup-window library) is vendored under
-`frontend/vendor/` (Apache-2.0, see `WINBOX_LICENSE.txt`), specifically
-because many HPC cluster login nodes and workstations have no outbound
-internet access.
-
 ## Password protection
 
 RELION-US binds `127.0.0.1` by default, so it isn't reachable from another
-machine unless you deliberately opt in with `--host 0.0.0.0` — but even at
-the default bind, anyone who can already reach this machine's localhost
-(another user on a shared HPC login node, for instance) can open jobs, run
-them, delete run history, and open a full interactive shell via the
-Terminal popup, with no login at all. A user interface
-password can be set at each startup as a basic deterrent against that —
-**not real security**. If you need actual confidentiality, put it behind a
-reverse proxy (nginx/Caddy) with TLS termination, or reach it over an SSH
-tunnel instead (`ssh -L 8420:localhost:8420 <host>`, the same approach
-suggested above for a remote/HPC-hosted instance).
+machine unless you opt in with `--host 0.0.0.0`. But even at the default bind,
+anyone who can already reach this machine's localhost — another user on a
+shared login node, say — can open jobs, run them, delete run history, and open
+a full interactive shell through the Terminal popup, with no login at all.
 
-**Setting it up:** every time `Run-RelionUS` starts at an interactive
-terminal without protection already turned on, it asks whether to set a
-password. Say no (or just press Enter) and it asks again next time, rather
-than staying quiet forever — from then on until you do set one up, everything
-is a terminal flag, on the machine running the backend, deliberately with no
-in-browser way to turn it on or change it (anyone who can already reach a
-shell on that machine can read/edit project files directly anyway, so gating
-password changes behind browser auth would add friction, not protection):
+A password is available as a basic deterrent against that. It is **not real
+security**: this app sets up no encryption, so the password crosses the
+network in plain text like everything else. If you need actual
+confidentiality, put it behind a reverse proxy (nginx/Caddy) with TLS
+termination, or reach it over the SSH tunnel above.
+
+Every time `Run-RelionUS` starts at an interactive terminal without protection
+already on, it offers to set one up. Decline and it asks again next time
+rather than staying quiet forever. Otherwise it's all terminal flags, on the
+machine running the backend — deliberately with no in-browser way to turn it
+on or change it, since anyone who can already reach a shell there can read and
+edit project files directly anyway:
 
 ```bash
-./Run-RelionUS --set-password        # set/change the password (hidden input, twice to confirm)
-./Run-RelionUS --enable-auth         # require it from now on, every run
-./Run-RelionUS --disable-auth        # stop requiring it (password is kept, not deleted)
-./Run-RelionUS --auth-status         # what's set, and whether it's currently on
-./Run-RelionUS --auth                # force it ON for just this one run
-./Run-RelionUS --no-auth             # force it OFF for just this one run
+./Run-RelionUS --set-password   # set/change it (hidden input, twice to confirm)
+./Run-RelionUS --enable-auth    # require it from now on, every run
+./Run-RelionUS --disable-auth   # stop requiring it (password kept, not deleted)
+./Run-RelionUS --auth-status    # what's set, and whether it's currently on
+./Run-RelionUS --auth           # force it ON for just this one run
+./Run-RelionUS --no-auth        # force it OFF for just this one run
 ```
 
 Changing the password logs out every existing session at once, on every
-device, immediately — there's no separate "log everyone out" step.
+device — there's no separate "log everyone out" step. Sessions otherwise last
+30 days.
 
-**What it looks like when it's on:** anyone opening the app lands on a
-login page first (`frontend/login.html`, a self-contained page with no
-dependency on anything else here, since it has to render even while
-everything else is gated); the password gates every page, every API call,
-and every websocket -- job output as well as the Terminal popup's shell --
-not just the initial page load. A **🔒 Log
-out** button appears in the top bar once you're logged in. Sessions last 30
-days.
+When it's on, anyone opening the app lands on a login page first, and the
+password gates every page, every API call, and both websockets (live job
+output and the Terminal shell), not just the initial page load. A **🔒 Log
+out** item appears under **☰ Menu**.
 
 ## Using it
 
-- **Change Project** (top bar): switch which RELION project directory the
-  app is pointed at, at any time, without restarting the backend. Every
-  project you open or create is remembered, so the dialog opens with a
-  **Recent projects** list — one click browses to a project, a double-click
-  switches straight to it, and the ✕ drops it from the list (the folder
-  itself is never touched). A project that has since been deleted stays
-  listed but struck through, rather than quietly disappearing. Otherwise:
-  type a path directly and hit Go/Enter, or click into subfolders in the
-  browser below it — that browser lists folders on the *machine running the
-  backend*, not your browser's machine, which matters when the backend is
-  on a remote host like an HPC cluster login node. If the folder you pick
-  doesn't look like a RELION project (no `default_pipeline.star` and not
-  previously opened here), you're prompted to either start a new project
-  there or pick a different folder — starting a new project never writes
-  RELION's own pipeline file for you, only a small marker + history log;
-  RELION's own tools still create `default_pipeline.star` correctly the
-  first time a real job runs.
-- **Command Center** (main panel): every run started in the *current*
-  project, reload-safe, as a sortable table or a linked timeline — see
-  "Command Center" below. Click a row or card to reopen that run's
-  options/status/outputs — for a run from the current backend session this
-  reconnects to the live stream; for one from a previous session (backend
-  since restarted) it shows the saved status and its output files, since the
-  live transcript itself isn't persisted, only the summary.
-- **Jobs list** (left sidebar, `☰ Jobs` toggles it): every RELION job type
-  grouped by category, plus a separate "(custom)" tag for the four import
-  bridges. Click one to open it in its own popup — nearly window-filling
-  with rounded corners, and only one open at a time (opening a different
-  job closes whichever popup was already open, rather than stacking
-  windows).
-- **Inputs tab**: the popup's first, default-open tab, holding **every
-  option RELION's own GUI shows for that job**, in RELION's own groups and
-  order (I/O, Reference, CTF, Optimisation, Sampling, Helix, Compute,
-  Running), as collapsible sections — extracted directly from
-  `gui_jobwindow.cpp` and `pipeline_jobs.cpp`, not guessed. The I/O section
-  starts open; the rest are one click away. Nothing RELION shows is hidden
-  behind a different tab. Any field that takes a single file — STAR files,
-  MRC maps, image stacks, FASTA sequences, executables, whatever RELION's own
-  form asks for — gets a **Browse** button (…) next to it, opening the same
-  server-side file picker the tomogram viewer uses and filtered to that
-  field's own extensions, so the button isn't limited to STAR files. The
-  backend often runs on a different machine than your browser, so it browses
-  that machine's filesystem, not yours.
-  - **Running section**: MPI procs, threads, and **Additional arguments** —
-    RELION's own Running tab. Setting MPI procs above 1 does exactly what
-    RELION does: prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and
-    switches to that job's `_mpi` binary, with both binary names read out of
-    the job's own C++ source rather than guessed by appending a suffix.
-    Additional arguments are appended verbatim at the end, as RELION appends
-    them.
-  - **Advanced section** (past Running, and Other if the job has one): the
-    opposite of the rest of the Inputs tab — command-line options the
-    program accepts that **RELION's GUI never exposes**, the ones you would
-    otherwise find by running the binary with `--help` or reading the
-    source. Collapsed by default and loaded the first time you open it (see
-    "The Advanced section" below), so it matches your build without costing
-    every popup a subprocess call.
-- **Progress tab** (iterative jobs only): live charts of resolution and class
-  distribution plus class images, with per-job controls for how often images
-  refresh and whether earlier iterations are kept — see "Live progress for
-  iterative jobs" below.
-- **Errors tab**: fills in live if the run writes to stderr; the tab badge
-  shows a running error count.
-- **RELION Source tab**: the *actual*, unmodified C++ `getCommands<Job>Job()`
-  function for this job type, so you can check the draft/edited command
-  against RELION's real logic by eye.
-- **Command box**: pre-filled with a draft command (see below), fully
-  editable. Click **Recompute draft** to regenerate it from the current
-  form values (e.g. after changing a field), or just hand-edit it directly.
-- **Run**: executes exactly the string in the command box (RELION jobs) or
-  calls the converter directly (custom import jobs), streams output live
-  via a websocket, and keeps the full transcript if you close and reopen.
-- **Theme switch** (top bar): dark (the default) or light; your choice is
-  remembered.
+### Top bar
 
-No in-app page-scale control — use your browser's own zoom (pinch,
-`Ctrl`/`Cmd` `+`/`-`, or its zoom control) instead.
+- **☰ Jobs** — show/hide the job list sidebar.
+- **📁 Change Project** — switch which RELION project directory the app points
+  at, without restarting. Every project you open or create is remembered, so
+  the dialog opens with a **Recent projects** list: one click browses to a
+  project, a double-click switches straight to it, and ✕ drops it from the
+  list (the folder itself is never touched). A project that has since been
+  deleted stays listed but struck through rather than quietly disappearing.
+  Otherwise type a path and hit Go, or click into subfolders in the browser
+  below. That browser lists folders on the *machine running the backend*, not
+  your browser's machine — which is the point when the backend is on a cluster
+  login node. If the folder doesn't look like a RELION project (no
+  `default_pipeline.star`, and not opened here before), you're asked whether to
+  start a new project there or pick a different folder.
+- **🔍 Visualize** — the [tomogram / particle-pick
+  viewer](#tomogram--particle-pick-viewer). Not a job; it writes nothing.
+- **🌙 Dark / ☀ Light** — theme switch. Dark is the default, and your choice is
+  remembered. Chart colours are mode-specific and validated against each
+  background rather than naively inverted, so they stay legible either way.
+- **⇄ RELION sync** — per-project two-way sync with RELION's own pipeline; see
+  [below](#-relion-sync). Hidden entirely if `relion_pipeliner` isn't on
+  `PATH`.
+- **☰ Menu** — **⚙ Settings**, **🗑 Trash**, **🖥 Terminal**, **🛠 Tools ▸ 📊
+  Analyze**, and **🔒 Log out** when password protection is on.
+
+### Jobs list (left sidebar)
+
+Every RELION job type grouped by RELION's own categories, with the import
+bridges tagged `(custom)` and IsoNet2 under its own **IsoNet (Beta)**
+category. An **All / SPA / Tomo** toggle filters the list; the app guesses
+which to preselect from the job types the project has actually run, but never
+gates what you can run.
+
+Click a job to open it in its own popup — nearly window-filling with rounded
+corners, and only one open at a time (opening a different job closes whichever
+was already open, rather than stacking windows).
+
+### Inside a job popup
+
+- **Inputs tab** (opens first) — **every option RELION's own GUI shows for
+  that job**, in RELION's own groups and order (I/O, Reference, CTF,
+  Optimisation, Sampling, Helix, Compute, Running), as collapsible sections
+  extracted from `gui_jobwindow.cpp` and `pipeline_jobs.cpp` rather than
+  guessed. I/O starts open; the rest are one click away. Nothing RELION shows
+  is hidden behind a different tab.
+
+  Any field taking a single file — STAR files, MRC maps, image stacks, FASTA
+  sequences, executables, whatever RELION's form asks for — gets a **…**
+  browse button opening the same server-side file picker the viewer uses,
+  filtered to that field's own extensions. It browses the backend's
+  filesystem, not your browser's.
+
+  - **Running section** — MPI procs, threads, and **Additional arguments**,
+    RELION's own Running tab. Setting MPI procs above 1 does what RELION does:
+    prefixes `$RELION_MPIRUN -n N` (default `mpirun`) and switches to that
+    job's `_mpi` binary, with both binary names read out of the job's own C++
+    source rather than guessed by appending a suffix. Additional arguments are
+    appended verbatim at the end, as RELION appends them.
+  - **Advanced section** (past Running) — command-line options the program
+    accepts that [RELION's GUI never exposes](#the-advanced-section).
+- **Progress tab** (iterative jobs only) — [live charts and class
+  images](#live-progress-and-analysis).
+- **CTF QC tab** (CTF Estimation only) — every micrograph's or tilt image's
+  CTF fit numbers, with thumbnails, once the job finishes.
+- **Outputs tab** — browse and download individual files, or a `.zip` of any
+  selection. Click a `.star` filename to preview its contents inline instead
+  of downloading it first.
+- **Errors tab** — fills in live if the run writes to stderr; the tab badge
+  shows a running error count.
+- **RELION Source tab** — the *actual*, unmodified C++ `getCommands<Job>Job()`
+  function for this job type, so you can check the draft or edited command
+  against RELION's real logic by eye.
+- **Command box** — pre-filled with the draft, fully editable. **Recompute
+  draft** regenerates it from the current form values; or just hand-edit it.
+- **Run** — executes exactly the string in the command box (RELION and IsoNet2
+  jobs) or calls the converter directly (import bridges), streams output live
+  over a websocket, and keeps the full transcript if you close and reopen.
+
+Every run leaves `run.out`/`run.err` in its job directory, matching RELION's
+own GUI convention, even though RELION-US streams output live rather than
+shell-redirecting it.
+
+There's no in-app page-scale control — use your browser's own zoom.
+
+### ⚙ Settings
+
+Per-user defaults, not per-project: default MPI procs / threads / GPU IDs /
+additional arguments prefilled into every job popup; default SLURM
+account, partition, time limit and memory; the Progress tab's refresh interval
+and default "images every N iterations"; and a default folder for the project
+browser to start in.
+
+### 🗑 Trash
+
+Deleting a job offers to move its output directory to `Trash/` rather than
+removing it, mirroring RELION's own Delete-moves-to-Trash model. **Menu ▸ 🗑
+Trash** lists everything there and restores a job back to its original
+`<JobType>/jobNNN` slot, history entry included. Emptying the trash is a
+separate, separately-confirmed action, and it's the only genuinely
+irreversible one.
+
+### 🖥 Terminal
+
+A real interactive shell in the current project directory, in a popup. Handy
+for `module load`, a quick `ls`, or anything the UI doesn't cover. Note that
+this is exactly why the password option exists — see
+[above](#password-protection).
+
+## What jobs are available
+
+**All 32 RELION job types**, single-particle and tomography, extracted from
+RELION's own source.
+
+**Four import bridges** (`backend/converters/`) — `Import from IMOD (.mod)`,
+`Import from Warp/M`, `Import from DeepETPicker`, and `Import from AreTomo2
+(.aln)`. They use the same popup layout, live output, and Errors tab as any
+RELION job; they just have no command box, since they call directly into
+Python rather than spawning a subprocess. What to double-check before trusting
+each one:
+
+- **IMOD** — fully implemented and tested. The `.mod` ↔ coordinate functions
+  need `point2model`/`model2point` on `PATH` (`module load imod` on a
+  cluster); the `.xf`/`.tlt` I/O is unit-tested directly and needs no IMOD
+  install.
+- **Warp/M** — the column-diffing and mapping machinery is implemented and
+  tested, but `DEFAULT_COLUMN_MAP` is intentionally empty. Warp 2.0's
+  `ts_export_particles` already writes a RELION-5 optimisation set with native
+  `rln*` columns, so that output needs no renaming at all; `.tomostar` and
+  older particle exports use Warp's `wrp*` columns and do need a mapping.
+  Rather than guess at names that have changed across Warp versions, run the
+  job once to see the column diff, then fill in `DEFAULT_COLUMN_MAP` for your
+  version.
+- **DeepETPicker** — verified against the DeepETPicker README and its own
+  `utils/coords_to_relion4.py` (`.coords` = `class_id x y z` in voxels; a bare
+  3-column `x y z` file is also accepted, matching what DeepETPicker itself
+  accepts). Fully implemented and tested. DeepETPicker ships that converter
+  too — prefer it for a one-off conversion; this module is for wiring
+  `.coords` → `particles.star` into the Jobs list and live-output flow.
+- **AreTomo2** — reads AreTomo2's `.aln` global alignment block (`SEC ROT GMAG
+  TX TY SMEAN SFIT SCALE BASE TILT`, verified against the AreTomo manual and
+  the teamtomo/alnfile parser) and writes IMOD-style `.xf` + `.tlt`, which
+  RELION-5's IMOD tilt-series import reads. It hands off through IMOD files
+  rather than writing RELION's tilt-series STAR directly because the `.xf`
+  mapping is independently corroborated by AreTomo's own `-OutImod` export.
+  Dark (excluded) frames are reported. `TX`/`TY` are in pixels of the aligned
+  stack and the `.aln` records no pixel size, so supply it downstream. If you
+  still have AreTomo's own `-OutImod` output, prefer it.
+
+**Coordinate flips.** The IMOD and DeepETPicker importers have `Swap Y and Z`
+and per-axis `Mirror` options (`backend/converters/coord_transform.py`). The
+Y/Z swap is the fix for IMOD's "flipped" (`trimvol -yz`) versus "rotated"
+(`trimvol -rx`) tomogram convention — a model built on a flipped or raw-`tilt`
+volume has depth in Y, not Z. Mirroring needs the tomogram dimension for that
+axis, and fails loudly if you don't supply it rather than silently producing
+wrong coordinates.
+
+**Six IsoNet2 job types** under **IsoNet (Beta)** —
+[IsoNet2](https://github.com/IsoNet-cryoET/IsoNet2)'s `prepare_star` →
+`deconv` → `make_mask` → `denoise`/`refine` → `predict` chain for
+missing-wedge correction and denoising of reconstructed tomograms. Unlike the
+import bridges, these run `isonet.py` as a real subprocess in a conda
+environment (SLURM submission included), with folder browse buttons for their
+directory inputs and options cross-checked against IsoNet2's own GUI and
+tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss curve on
+their Progress tab; **Predict**'s output MRCs link straight into the viewer.
+
+### In-browser replacements for RELION's desktop-only steps
+
+A few real RELION steps unconditionally open a desktop window with no headless
+mode at all — `relion_manualpick` is a compiled FLTK canvas,
+`relion_tomo_exclude_tilt_images` calls `napari.Viewer()`, and the Select
+job's interactive branch shells out to `relion_display --gui`. All are
+unusable from a browser-driven backend, so RELION-US replaces the interaction
+itself with an in-browser equivalent, while still registering the job under
+its real RELION type label (`relion.manualpick` / `relion.picktomo` /
+`relion.excludetilts` / `relion.select`) — so it shows up correctly in
+RELION's own GUI and its output is valid input to any real downstream RELION
+job.
+
+- **Manual Picking** (SPA) and **Manual Picking (Tomo)** — Run validates the
+  input micrographs/tomograms; a **🔍 Open Picker** button then opens the
+  viewer with picking on. Double-click to add a pick, right-click to delete
+  one. Picks save into the job's own directory as you go, so Extract or
+  TomoSubtomo can read them before you close the picker.
+- **Exclude Tilt Images** — a plain per-tilt-series checklist (**🔍 Open
+  Reviewer**) in place of napari's widget. Every image starts kept, matching
+  napari's own starting state; uncheck the bad ones. Save always re-derives
+  from the tilt series' original input, never from a previous save, so
+  re-checking a previously-excluded image genuinely re-includes it and nothing
+  accumulates across sessions.
+- **Subset Selection (Select)** — RELION's Select job is a six-way branch.
+  Five of them (select-on-value, discard-on-statistics, split, automated
+  class-ranker, filament selection) are ordinary command-line calls RELION-US
+  drafts normally. The sixth — interactively browsing class averages, or a
+  plain list of micrographs/particles, and choosing what to keep — is the
+  `relion_display --gui` one, and it's the one replaced here. Leave every mode
+  checkbox unchecked, fill in one of the three inputs, and Run opens the picker
+  lifecycle instead of building a subprocess command:
+  - **Select classes from job** (a `_optimiser.star`/`_model.star` from a
+    prior Class2D/Class3D run) — a **🎯 Select Classes** button opens a
+    thumbnail grid, one card per class with its share of particles,
+    resolution, and particle count; click to toggle. Saving writes
+    `particles.star` (every selected class's particles, cross-referenced from
+    the source job's own `_data.star`, optics block preserved verbatim) and,
+    for a Class2D source only, `class_averages.star` — a real RELION quirk
+    (Class3D has no separate class-averages output) reproduced rather than
+    "fixed".
+    - **Re-center images?** translates each selected class average to its
+      centre of mass and writes a new `class_averages.mrcs`. The centre-of-mass
+      computation matches RELION's exactly; the sub-pixel wrap-around shift
+      uses `scipy.ndimage.shift` as a close stand-in for RELION's B-spline
+      interpolation, not a bit-identical reproduction.
+    - **Re-group particles?** rebalances the selection into the requested
+      number of groups using the source `model.star`'s own group table, sorted
+      by refined intensity-scale correction and bucketed by optics group,
+      including RELION's real "at least 10 particles per group" minimum.
+  - **Select from micrographs** / **Select from particles** — the same picker
+    showing a flat list instead of classes: keep the checked rows, preserve
+    every other column and the optics block, saved as
+    `micrographs.star`/`particles.star`.
+
+All of these share a **▶ Continue** / **⟳ Overwrite** / **✓ Done** lifecycle.
+The job stays "Running" while you pick or review (there's no single moment
+picking is "finished"), Continue resumes non-destructively, Overwrite clears
+what's saved here and starts fresh in the same job slot, and Done marks it
+complete — including in RELION's own pipeline, if sync is on. Nothing is
+written until you explicitly save, and saving always re-derives from the
+original input, so re-saving a different selection never accumulates.
 
 ## How the draft command is built
 
 For each active field, if a `--<field_key>` flag literally appears in that
-job's real `getCommands<Job>Job()` source (extracted, not guessed), the
-draft emits `--<field_key> <value>` (a bare flag for booleans, only when
-true). This is correct for the large majority of RELION options, because
-RELION's own convention is overwhelmingly "the flag is named after the
-internal option key" — but it is **not** a full reimplementation of
-RELION's C++ logic, which has real per-job branching (e.g. MotionCorr picks
-between `relion_run_motioncorr` and the `_mpi` variant depending on
-`nr_mpi`; `--float16` doesn't literally match its `do_float16` field key).
-Fields that don't have a literal matching flag are left out of the draft
-and listed in "unmapped fields" (hover the Recompute button's tooltip)
-rather than guessed at — check the RELION Source tab for those, and add them
-to the command box by hand if needed.
+job's real `getCommands<Job>Job()` source (extracted, not guessed), the draft
+emits `--<field_key> <value>` — a bare flag for booleans, only when true. This
+is correct for the large majority of RELION options, because RELION's own
+convention is overwhelmingly "the flag is named after the internal option
+key". It is **not** a full reimplementation of RELION's C++ logic, which has
+real per-job branching.
 
 Where a flag isn't simply `--` + the option key, the pairing is read out of the
-job's own builder too (`command += " --i " + joboptions["input_star_mics"]...`),
+job's own builder too (`command += " --i " + joboptions["input_star_mics"]…`),
 so `--i`, `--Box`, `--j` and ~80 others are drafted correctly rather than
-reported as unmapped. Pairings that RELION only emits inside a branch depending
-on a *different* option — Autopick's `--particle_diameter` in Topaz mode versus
-`--LoG_diam_min` in LoG mode — are deliberately left out: emitting both would
-produce a command that contradicts itself.
+reported as unmapped. A curated, source-verified override list fills in the
+handful of cases those two rules can't reach — including the tomography jobs
+whose optimisation-set / reference-map / direct-entry inputs map to RELION's
+real `--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/`--t`/`--mot`
+flags. `docs/ARCHITECTURE.md`'s "Draft command heuristic" section has the full
+list.
 
-Three job types (DynaMight, ModelAngelo, External) don't hard-code a
-binary at all — RELION runs whatever executable path you set in a
-"Location of X executable" field. The draft command resolves that
-automatically from the field's current value.
+A field whose flag happens to match its key isn't emitted just because the
+name matches — the draft also checks the real, source-extracted condition
+gating it in RELION's own code, evaluating straightforward checkbox-gated
+conditions (`do_helix`, `do_apply_helical_symmetry`, and similar `&&`-chains)
+against the values you actually submitted.
 
-A curated, source-verified list of overrides fills in the handful of cases
-the two rules above can't reach on their own — see `docs/ARCHITECTURE.md`'s
-"Draft command heuristic" section for the full list, including the
-tomography jobs (Inimodel, Class3D, 3D auto-refine, Subtomogram averaging,
-CTF refinement (tomo), Frame alignment (tomo), Reconstruct particle) whose
-**Optimisation set STAR file** / **Reference map** / direct-entry
-(particles/tomograms/trajectories) inputs map to RELION's real
-`--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/`--t`/`--mot`
-flags.
+**Fields the draft can't place are left out and listed as "unmapped fields"**
+(hover the Recompute button's tooltip) rather than guessed at — check the
+RELION Source tab for those and add them by hand if needed. A condition too
+complex to evaluate safely (an `||`, a brace-less `else` branch, a numeric
+comparison) falls back to unmapped for the same reason. Pairings RELION only
+emits inside a branch depending on a *different* option — Autopick's
+`--particle_diameter` in Topaz mode versus `--LoG_diam_min` in LoG mode — are
+deliberately left out, since emitting both would produce a command that
+contradicts itself.
 
-A field whose CLI flag happens to be exactly `--` + its own key (the
-common case) isn't emitted just because the name matches — the draft also
-checks the real, source-extracted condition that gates it in RELION's own
-code, evaluating straightforward checkbox-gated conditions
-(`do_helix`, `do_apply_helical_symmetry`, and similar `&&`-chains) against
-the values you actually submitted. A condition too complex to evaluate
-safely (an `||`, RELION's brace-less `else` branch marker, a numeric
-comparison) falls back to "unmapped" rather than being guessed at.
+Other things the draft gets right:
 
-GPU acceleration (`--gpu`) is drafted correctly for every job that
-supports it (2D/3D classification, 3D initial model, 3D auto-refine,
-multi-body refinement, particle picking's Topaz mode) — including RELION's
-own "auto-allocate" convention of passing `--gpu ""` when the checkbox is
-on but "Which GPUs to use" is left blank. Particle picking's Topaz-mode GPU
-use and MotionCorr's are genuinely mode-branched in RELION's own source
-rather than simple checkbox gates, and are left as known gaps — add `--gpu`
-manually there if needed.
+- **GPU acceleration** (`--gpu`) for every job that supports it (2D/3D
+  classification, 3D initial model, 3D auto-refine, multi-body refinement,
+  Topaz picking), including RELION's own "auto-allocate" convention of passing
+  `--gpu ""` when the box is ticked but "Which GPUs to use" is blank. Topaz-mode
+  and MotionCorr GPU use are genuinely mode-branched in RELION's source rather
+  than simple checkbox gates, and are known gaps — add `--gpu` by hand there.
+- **Output rootname suffixes.** A few job types don't take a bare output
+  directory for `--o`; RELION appends a literal suffix to form a file prefix.
+  2D/3D classification, 3D initial model, 3D auto-refine and multi-body all use
+  `run` (so files are `run_it000_…`); Mask creation and Post-processing use
+  `mask.mrc` / `postprocess`.
+- **Configurable executables.** DynaMight, ModelAngelo and External don't
+  hard-code a binary — RELION runs whatever path you set in their "Location of
+  X executable" field, and the draft resolves it from that field's value.
 
-A few job types don't take a bare output directory for `--o` either — RELION
-appends a literal suffix to it to form a file rootname prefix. 2D/3D
-classification, 3D initial model, 3D auto-refine and multi-body refinement
-all use `run` (so output files are `run_it000_...`, not `_it000_...`);
-Mask creation and Post-processing use `mask.mrc` / `postprocess`. This is
-also a curated, source-verified table (`docs/ARCHITECTURE.md`'s "Output-value
-suffix" section).
-
-**Overwrite** applies `--pipeline_control` (when RELION sync is on) the
-same way a fresh run does, so an overwritten job's completion is picked up
-by RELION's own GUI — see `docs/ARCHITECTURE.md`'s "Two-way pipeline sync"
-section for why this intentionally does *not* re-register the job as a new
-pipeline entry. Every run — fresh or Overwrite — leaves `run.out`/`run.err`
-files in its job directory, matching RELION's own GUI convention, even
-though RELION-US streams output live rather than shell-redirecting it. A
-job this app has its own record for shows once in the Command Center, even
-with sync on and RELION's pipeline also tracking it; the read-only RELION
-placeholder row is reserved for a job genuinely run outside this app (a
-legacy project, or one launched from RELION's own GUI directly).
-
-## The Advanced section (options the GUI doesn't show)
+### The Advanced section
 
 RELION's GUI exposes a subset of what each program actually accepts. The rest —
 expert and developmental flags — are what its "Additional arguments" box exists
 for, and finding them normally means running the binary with no arguments and
 reading the usage dump.
 
-The Advanced section, at the bottom of the Inputs tab, does that for you. The
+The Advanced section at the bottom of the Inputs tab does that for you. The
 first time you open it, it runs the job's program with `--help`, parses
-RELION's own usage format, subtracts every flag the form above already
-covers, and lists what's left with its default, its section, and its help
-text. Filter the list, fill in a value, and **Add** appends it to the command
-box — where you can still edit or delete it, like everything else here.
+RELION's own usage format, subtracts every flag the form above already covers,
+and lists what's left with its default, section, and help text. Filter the
+list, fill in a value, and **Add** appends it to the command box, where you can
+still edit or delete it.
 
 Three things worth knowing:
 
 - It asks **your installed binary**, so the list reflects your RELION build,
-  including local patches — not whichever checkout the job definitions came
+  local patches included — not whichever checkout the job definitions came
   from. If MPI procs is above 1 it asks the `_mpi` binary, which can accept
   flags the serial one doesn't.
-- If the program isn't on the backend's PATH, the tab says so plainly instead
-  of showing an empty list. You can still type anything into the command box or
-  into Additional arguments.
+- If the program isn't on the backend's `PATH`, the tab says so plainly rather
+  than showing an empty list. You can still type anything into the command box
+  or Additional arguments.
 - RELION-5's Python tomo tools are Typer-based and don't print RELION's usage
-  format. Rather than guess at a format it doesn't understand, the tab shows
-  their raw `--help` output as-is.
+  format, so the tab shows their raw `--help` output as-is.
 
-Each program's help is read once per backend session and cached on the
+Each program's help is read once per backend session and cached against the
 binary's path, size and modification time, so rebuilding RELION or switching
-versions picks up the new options without a restart.
+versions picks up new options without a restart.
 
+## Working alongside RELION's own GUI
 
-## The four custom import jobs
-
-`Import from IMOD (.mod)`, `Import from Warp/M`, `Import from
-DeepETPicker`, and `Import from AreTomo2 (.aln)` live in
-`backend/converters/` and use the same popup layout,
-live output, and Errors tab as every RELION job — they just don't have a
-command box, since they call directly into Python rather than spawning a
-subprocess. Status of each, so you know what to double-check before
-trusting the output:
-
-- **IMOD bridge**: fully implemented and tested. The `.mod` <-> coordinate
-  functions need `point2model`/`model2point` on PATH (`module load imod`
-  on the cluster); everything else (`.xf`/`.tlt` I/O) is unit-tested
-  directly and doesn't need IMOD installed.
-- **Warp/M bridge**: the column-diffing and mapping machinery is
-  implemented and tested, but `DEFAULT_COLUMN_MAP` is intentionally empty.
-  Warp 2.0's `ts_export_particles` already writes a RELION-5 optimisation
-  set with native `rln*` columns, so that output needs no renaming at all;
-  `.tomostar` and older particle exports use Warp's `wrp*` columns and do
-  need a mapping. Rather than guess at column names that have changed
-  across Warp versions, run the job once to see the column diff, then fill
-  in `DEFAULT_COLUMN_MAP` for your version.
-- **DeepETPicker bridge**: verified against the DeepETPicker README *and*
-  its own `utils/coords_to_relion4.py` (`.coords` = `class_id x y z` in
-  voxels; a bare 3-column `x y z` file is also accepted, matching what
-  DeepETPicker itself accepts). Fully implemented/tested. DeepETPicker also
-  ships that converter — prefer it directly for a one-off conversion; this
-  module is for wiring `.coords` -> particles.star into RELION-US's Jobs
-  list/live-output flow.
-- **AreTomo2 bridge**: reads AreTomo2's `.aln` global alignment block
-  (`SEC ROT GMAG TX TY SMEAN SFIT SCALE BASE TILT`, verified against the
-  AreTomo manual and the teamtomo/alnfile parser) and writes IMOD-style
-  `.xf` + `.tlt`, which RELION-5's IMOD tilt-series import reads. It
-  deliberately hands off through IMOD files rather than writing RELION's
-  tilt-series STAR directly: the `.xf` mapping is independently corroborated
-  by AreTomo's own `-OutImod` export, which makes it the better-verified
-  route into RELION. Dark (excluded) frames are reported. `TX`/`TY` are
-  in pixels of the aligned stack — the `.aln` records no pixel size, so
-  supply it downstream. If you still have AreTomo's own `-OutImod` output,
-  prefer it; validate against a real `-OutImod` `.xf` if exactness matters.
-
-**Coordinate flips.** The IMOD and DeepETPicker importers have
-`Swap Y and Z` and per-axis `Mirror` options (`backend/converters/
-coord_transform.py`). The Y/Z swap is the fix for IMOD's "flipped"
-(`trimvol -yz`) vs "rotated" (`trimvol -rx`) tomogram convention — a model
-built on a flipped or raw-`tilt` volume has depth in Y, not Z. Mirroring
-requires the tomogram dimension for that axis, and fails loudly if you
-don't supply it rather than silently producing wrong coordinates.
-
-## In-browser pickers (no desktop GUI needed)
-
-A few real RELION jobs unconditionally open a desktop window with no
-headless mode at all — `relion_manualpick` is a compiled FLTK canvas,
-`relion_tomo_exclude_tilt_images` unconditionally calls `napari.Viewer()`.
-Both are unusable from a remote/browser-driven backend, so RELION-US
-replaces the picking/reviewing itself with an in-browser equivalent, while
-still registering the job under its real RELION type label
-(`relion.manualpick` / `relion.picktomo` / `relion.excludetilts`) so it
-shows up correctly in RELION's own GUI and its output is a valid input to
-any real downstream RELION job.
-
-- **Manual Picking** (SPA) and **Manual Picking (Tomo)**: Run just
-  validates the input micrographs/tomograms; a **🔍 Open Picker** button
-  then opens the same orthogonal tomogram/particle-pick viewer described
-  above, with picking turned on — double-click to add a pick, right-click
-  to delete one. Picks save into the job's own directory as you go, so
-  Extract/TomoSubtomo can read them even before you close the picker.
-- **Exclude Tilt Images**: replaces napari's own tilt-image exclusion
-  widget with a plain per-tilt-series checklist (**🔍 Open Reviewer**) —
-  every image starts kept (a legitimate default on its own, matching
-  napari's own starting state), uncheck the bad ones. Save always
-  re-derives from the tilt series' original input, never from a previous
-  save, so re-checking a previously-excluded image genuinely re-includes
-  it and nothing accumulates across sessions.
-
-Both share the same **▶ Continue** / **⟳ Overwrite** / **✓ Done** lifecycle:
-the job stays "Running" while you pick/review (there's no single moment
-picking is "finished"), Continue resumes a session non-destructively,
-Overwrite clears everything already saved here and starts fresh in the
-same job slot, and Done marks it complete — including in RELION's own
-pipeline, if sync is on.
-
-## Interactive class/micrograph/particle selection (Select job)
-
-Real RELION's **Subset Selection** job is a six-way branch — five of them
-(select-on-value, discard-on-statistics, split, automated class-ranker
-selection, filament selection) build ordinary command-line calls RELION-US
-already drafts correctly. The sixth, and by far the most common in
-practice — interactively browsing 2D/3D class averages (or a plain list of
-micrographs/particles) and choosing which to keep — shells out to
-`relion_display --gui`, another desktop Qt window. RELION-US replaces just
-that branch: leave every mode checkbox unchecked, fill in one of the three
-inputs, and Run opens the same picker lifecycle as above instead of
-building a subprocess command.
-
-- **Select classes from job** (a `_optimiser.star`/`_model.star` from a
-  prior Class2D/Class3D run): a **🎯 Select Classes** button opens a
-  thumbnail grid — one card per class, with its share of particles,
-  resolution, and particle count — click to toggle selected. Saving writes
-  `particles.star` (every selected class's particles, cross-referenced
-  from the source job's own `_data.star`, optics block preserved
-  verbatim) and, for a Class2D source only, `class_averages.star` — a real
-  RELION quirk (Class3D has no separate class-averages output) reproduced
-  deliberately rather than "fixed."
-  - **Re-center images?** translates each selected class average to its
-    center of mass and writes a new `class_averages.mrcs` stack — the
-    center-of-mass computation matches RELION's own exactly; the sub-pixel
-    wrap-around shift itself uses `scipy.ndimage.shift` as a close
-    stand-in for RELION's B-spline interpolation, not a bit-identical
-    reproduction.
-  - **Re-group particles?** rebalances the selection into the requested
-    number of groups using the source model.star's own group table,
-    sorted by refined intensity-scale correction and bucketed by optics
-    group — including RELION's real "at least 10 particles per group"
-    minimum.
-- **Select from micrographs** / **Select from particles**: the same
-  picker, showing a flat list instead of classes — no class join, just
-  "keep the checked rows, preserve every other column and the optics
-  block," saved as `micrographs.star`/`particles.star`.
-
-As with the pickers above, nothing is written until you explicitly save a
-selection, and saving always re-derives from the original input, so
-re-saving with a different selection never accumulates.
-
-## IsoNet2
-
-Six more job types under an **IsoNet (Beta)** category —
-[IsoNet2](https://github.com/IsoNet-cryoET/IsoNet2)'s
-`prepare_star` → `deconv` → `make_mask` → `denoise`/`refine` → `predict`
-chain for missing-wedge correction and denoising of reconstructed
-tomograms. Unlike the import bridges above, these run `isonet.py` as a
-real subprocess in a conda environment (including SLURM submission, same
-as any RELION job), with folder **Browse** buttons for their
-directory-input fields and options cross-checked against IsoNet2's own
-GUI/tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss
-curve on their Progress tab (IsoNet2 writes it every few epochs, same
-polling approach as RELION's own iteration charts); **Predict**'s output
-MRCs link directly into the tomogram viewer.
-
-## Opening a project built in RELION's GUI
+### Opening a project built in RELION's GUI
 
 Point RELION-US at an existing project and it reads RELION's own
-`default_pipeline.star` (never writes it):
+`default_pipeline.star`:
 
 - **Its jobs fill the Command Center**, tagged `RELION`, with RELION's own job
-  numbers, aliases, types and statuses (Succeeded/Failed/Running map onto the
-  same states this app uses). They carry no timestamps — RELION's pipeline file
-  records none, and a directory's mtime is not a start time.
+  numbers, aliases, types and statuses. They carry no timestamps — RELION's
+  pipeline file records none, and a directory's mtime is not a start time.
 - **Opening one shows the settings it actually ran with**, read from that job's
-  own `job.star` — the same file RELION's GUI reads to reopen a job. A job from
-  RELION 3.0 or earlier (which wrote `run.job` in a different format) opens with
-  the job type's defaults and says so.
+  own `job.star`, the same file RELION's GUI reads to reopen a job. A job from
+  RELION 3.0 or earlier (which wrote `run.job` in a different format) opens
+  with the job type's defaults and says so.
 - **Its Outputs and Progress tabs work.** An old classification's
   `run_it###_model.star` files are still there, so you get its resolution curve
   and class images without re-running anything.
@@ -547,97 +530,119 @@ Point RELION-US at an existing project and it reads RELION's own
   any number whose directory is already on disk. In a project sitting at job011
   your next job is job012 — not job001 on top of somebody's Import.
 
-By default it does **not** register its own runs back into
-`default_pipeline.star` — that file is RELION's own state, and writing it
-incorrectly would damage a project this app is only a companion to. The two
-tools then keep separate records: jobs you run here won't show in RELION's
-GUI, and RELION's counter won't know about them. Turn on **⇄ RELION sync**
-(below) if you want to switch between the two GUIs on the same project.
+Jobs RELION itself ran are **read-only** here: abort, resume and delete are
+refused on them, because there's no `relion_pipeliner` verb that would let this
+app keep RELION's own record consistent afterwards. Renaming and notes are the
+exception — both are stored in `.relion_us/`, never in RELION's pipeline, so
+they can't leave it describing something untrue. Overwrite is allowed when sync
+is on (see below).
 
-## ⇄ RELION sync (switching between the two GUIs)
+### ⇄ RELION sync
 
-Click **⇄ RELION sync** in the top bar to turn on two-way sync for the
-current project. It's off by default, and it's a per-project setting, not a
-global one — the button is hidden entirely if `relion_pipeliner` isn't on
-this app's `PATH`.
+**On by default**, per project — the button in the top bar toggles it, and it's
+hidden entirely if `relion_pipeliner` isn't on `PATH`. With it on, every job
+you run here is also registered in `default_pipeline.star`, so it shows up in
+RELION's own GUI too:
 
-With it on, every job you run here is also registered in
-`default_pipeline.star`, so it shows up in RELION's own GUI too:
+- Registration goes through **RELION's own `relion_pipeliner
+  --addJobFromStar`**, the same binary RELION's GUI would use in your place.
+  RELION-US writes the job's settings to a `job.star` and hands it over; that
+  binary decides the job number, creates the job directory, works out the
+  input/output node graph, and appends the process to the pipeline. RELION-US
+  only reads the result back. The node and edge tables are never computed here.
+- The run then executes in the directory RELION allocated — renumbering the
+  draft command's `--o` if RELION picked a different slot than the one this app
+  proposed, which can happen if RELION's own GUI created a job in between —
+  with `--pipeline_control <job_dir>/` appended so the running program reports
+  its own completion the way RELION expects.
+- On completion, RELION-US calls `relion_pipeliner --check_job_completion` so
+  the process's status (Succeeded/Failed/Aborted) updates immediately rather
+  than waiting for RELION's GUI to notice.
+- **Overwrite** applies `--pipeline_control` the same way a fresh run does, so
+  an overwritten job's completion is picked up by RELION's GUI. It reuses the
+  existing pipeline entry rather than registering a second one, matching what
+  RELION's own Overwrite does.
+- If `relion_pipeliner` is busy — RELION's GUI is mid-write and holding the
+  project's `.relion_lock` — registration waits (up to about two minutes) for
+  the lock rather than skipping it. If it still can't register or confirm
+  completion, the run itself is unaffected; a note in that job's output says so
+  and tells you to run `relion_pipeliner --check_job_completion` yourself, or
+  just open RELION's GUI, to catch the pipeline file up.
+- Jobs run here **before** you turned sync on are not added retrospectively.
+  Sync only covers what happens from that point on.
+- Turn it **off** for a project that genuinely shouldn't gain RELION-US rows in
+  its pipeline — a colleague's project you only meant to look at, say.
 
-- RELION-US still never writes `default_pipeline.star` itself. It writes the
-  job's settings to a `job.star` and hands that to RELION's own
-  `relion_pipeliner --addJobFromStar`, the same binary RELION's GUI would use
-  in your place. That binary decides the job number, creates the job
-  directory, works out the input/output node graph, and appends the process
-  to the pipeline — RELION-US only reads the result back.
-- The run then executes in the directory RELION allocated (renumbering the
-  draft command's `--o` if RELION picked a different slot than the one this
-  app proposed — this can happen if RELION's own GUI created a job in
-  between), with `--pipeline_control <job_dir>/` appended so the running
-  program reports its own completion the way RELION expects.
-- When the job finishes, RELION-US calls
-  `relion_pipeliner --check_job_completion` so the process's status in
-  `default_pipeline.star` (Succeeded/Failed/Aborted) is updated immediately,
-  instead of waiting for RELION's GUI to notice on its own.
-- If `relion_pipeliner` is busy — RELION's own GUI is mid-write and holding
-  the project's `.relion_lock` — registration waits (up to two minutes) for
-  the lock rather than skipping it. If it still can't register or can't
-  confirm completion, the run itself is unaffected; a note in that job's
-  output log says so and tells you to run
-  `relion_pipeliner --check_job_completion` yourself, or just open RELION's
-  GUI, to catch the pipeline file up.
-- Jobs already run here before you turned sync on are **not** added
-  retrospectively — sync only covers what happens from that point on.
-- Jobs RELION's own GUI already treats as read-only here (see above) are
-  unaffected either way; sync only changes what happens to jobs *you start in
-  RELION-US*.
+**What RELION-US writes to that file itself.** Almost everything above
+delegates to `relion_pipeliner`; the node and edge tables are never computed
+here. Two narrow exceptions, both deliberate and both explained in
+`backend/pipeline_bridge.py`:
+
+1. **An empty skeleton for a brand-new project**, written once and only if the
+   file doesn't exist. `relion_pipeliner` can't create it from nothing — it
+   reads the pipeline first, and reading a missing file exits *while still
+   holding the lock*, orphaning `.relion_lock`. RELION's own GUI writes the
+   same fixed skeleton on first launch instead of reading; so does this.
+2. **One status token, to mark a job "Running"**, under the same
+   `.relion_lock` mutex `relion_pipeliner` takes. `--check_job_completion` only
+   promotes processes already marked Running, and no CLI path reaches that
+   status short of re-running the job.
+
+Neither is a substitute for closing a native RELION GUI that already has the
+project open — a live GUI holds its own in-memory copy of the pipeline that no
+on-disk write can coordinate with.
+
+**Deleting** a synced job doesn't touch `default_pipeline.star` at all, since
+`relion_pipeliner` has no verb for removing one process. The entry stays in
+RELION's file; RELION-US keeps a local hide-list so it doesn't reappear as a
+ghost row in the Command Center.
 
 ## Command Center (job history)
 
-The main panel lists every job run in the current project, in three
-togglable views: a **table** (sortable by job name/number, type, status, or
-start time), a **timeline** (newest-first or oldest-first, with a card per
-job that links to the jobs its inputs came from), and a **network** view —
-a lineage graph, oldest jobs at the top, with every job that used another
-job's output drawn directly beneath it and connected by a branch line. A job
-whose output fed two later jobs (say job010 feeding both job011 and job012)
-shows job010 with two branches down to job011 and job012 side by side. For a
-project built in RELION's own GUI, this lineage isn't guessed from file
+The main panel lists every job run in the current project, in three togglable
+views:
+
+- **Table** — sortable by job name/number, type, status, or start time.
+- **Timeline** — newest-first or oldest-first, a card per job, linking each to
+  the jobs its inputs came from.
+- **Network** — a lineage graph, oldest jobs at top, with every job that used
+  another job's output drawn beneath it and connected by a branch line. A job
+  whose output fed two later jobs shows two branches side by side.
+
+For a project built in RELION's own GUI, that lineage isn't guessed from file
 paths — it's read straight from `default_pipeline.star`'s own
-`pipeline_input_edges`/`pipeline_output_edges` tables, the graph RELION
-itself computed when each job ran, so the network view (and the timeline's
-"Inputs from:" chips) work identically whether a job ran here or in RELION.
+`pipeline_input_edges`/`pipeline_output_edges` tables, the graph RELION itself
+computed when each job ran. For this app's own jobs it's best-effort, detected
+from paths in the command that exist on disk and live under an earlier job's
+directory; the timeline labels these "Inputs from:" either way.
 
-Clicking a job reopens its popup — nearly window-filling, rounded corners,
-and only one open at a time (opening a new one closes whichever was open,
-rather than stacking windows) — showing the options it ran with, its live or
-final status, an **Outputs** tab (browse/download individual files or a
-`.zip` of any selection — click a `.star` or an image file to preview it
-inline instead of downloading it first), the **Errors** tab, and the
-**RELION Source** tab.
+Clicking a job reopens its popup, showing the options it ran with, its live or
+final status, and its Outputs/Errors/RELION Source tabs. For a run from the
+current backend session this reconnects to the live stream; for one from a
+previous session it shows the saved status and its output files, since the live
+transcript itself isn't persisted — only the summary.
 
-The toolbar in each popup mirrors RELION's own "Job actions" menu: collapse,
-close, rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the
-same job directory and job number, so it stays one entry — matching how
-RELION reuses a pipeline job slot), **Abort** (kills the whole process
-group, not just the shell), Mark finished / Mark failed, **Delete**, and
-**Clean** / **Harsh Clean**. Clean is a *review* flow, not a silent sweep:
-it lists every file with its size, pre-checks a suggestion, and deletes only
-what you confirm. (RELION's own cleanup uses per-job-type glob patterns
-defined in its C++ source; this uses its own review-based suggestion instead
-of mirroring them.)
+Each popup's toolbar mirrors RELION's own "Job actions" menu: collapse, close,
+rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the same job
+directory and number, so it stays one entry — matching how RELION reuses a job
+slot), **Abort** (kills the whole process group, not just the shell), Mark
+finished / Mark failed, **Delete**, and **Clean** / **Harsh Clean**.
+
+Clean is a *review* flow, not a silent sweep: it lists every file with its
+size, pre-checks a suggestion, and deletes only what you confirm. RELION's own
+cleanup uses per-job-type glob patterns defined in its C++ source; this uses its
+own review-based suggestion rather than mirroring them.
 
 ## Tomogram / particle-pick viewer
 
-The **🔍 Visualize** button opens a viewer — it is *not* a job, so it never
-appears in the Command Center and writes nothing. Give it an optimiser
-STAR, a `tomograms.star`, or an MRC (with or without a particles/coords
-STAR) — type a path or hit the **…** browse button — and it loads one
-tomogram at a time.
+**🔍 Visualize** opens a viewer. It is *not* a job — it never appears in the
+Command Center and writes nothing. Give it an optimiser STAR, a
+`tomograms.star`, or an MRC (with or without a particles/coords STAR), by
+typing a path or hitting **…**, and it loads one tomogram at a time.
 
 **Three linked orthogonal views**, laid out the way DeepETPicker's picker is:
-**XY** is the large main view, **ZY** sits to its left, **XZ** below it. All
-three are cuts through one crosshair position, so:
+**XY** is the large main view, **ZY** to its left, **XZ** below it. All three
+are cuts through one crosshair position, so:
 
 - **click** (or click-drag) in any view to move the crosshair — the other two
   jump to that point;
@@ -645,51 +650,49 @@ three are cuts through one crosshair position, so:
   walk through Z); hold **Shift** for 10-slice steps;
 - or drive X/Y/Z directly with the sliders in the side panel.
 
-The three panels share one isotropic scale, so a voxel is the same size in
-each and the crosshair lines up across the panel borders — the side views are
-as tall/wide as the volume actually is, not stretched to fill a box.
+The three panels share one isotropic scale, so a voxel is the same size in each
+and the crosshair lines up across panel borders — the side views are as
+tall/wide as the volume actually is, not stretched to fill a box.
 
 Everything else lives in a narrow rail on the right so the images get the
 window: the two file inputs, black/white-point contrast sliders (default is a
-robust 0.5–99.5% percentile, since raw cryo-ET min/max is usually washed
-out), pick diameter and line width, and toggles for the pick overlay and the
-crosshair.
+robust 0.5–99.5% percentile, since raw cryo-ET min/max is usually washed out),
+pick diameter and line width, and toggles for the pick overlay and crosshair.
 
 Picks are overlaid using DeepETPicker's own model — a particle is drawn on
-every slice within ±(diameter/2) of its centre, with radius `sqrt(r² − Δ²)`
-so the marker grows toward the particle's centre slice — in all three views
-at once. If the tomogram's name doesn't match any `rlnTomoName` in the picks
-file, you get a warning with **Load anyway / Reload files / Cancel**.
+every slice within ±(diameter/2) of its centre, with radius `sqrt(r² − Δ²)` so
+the marker grows toward the particle's centre slice — in all three views at
+once. If the tomogram's name doesn't match any `rlnTomoName` in the picks file,
+you get a warning with **Load anyway / Reload files / Cancel**.
 
-Both inputs have a **…** browse button. It lists files on the *machine
-running the backend*, not your own — which is the point when the backend is
-on a cluster login node and a native file dialog would show you the wrong
-filesystem. It filters to the relevant extensions (STAR/MRC for the tomogram
-field, STAR only for the picks field), remembers the folder you were last
-in, and fills the field with a project-relative path.
+Both inputs have a **…** browse button listing files on the *machine running
+the backend*, filtered to the relevant extensions, remembering the folder you
+were last in, and filling the field with a project-relative path.
 
-The volume is never loaded whole: the backend memory-maps the MRC and
-returns one slice at a time as a PNG, and only the panels whose own slice
-index moved are refetched — clicking in XY changes the ZY and XZ cuts but not
-XY's own. This needs `mrcfile` and `pillow` (both in
-`backend/requirements.txt`).
+The volume is never loaded whole: the backend memory-maps the MRC and returns
+one slice at a time as a PNG, and only the panels whose slice index actually
+moved are refetched.
 
-## Live progress for iterative jobs
+## Live progress and analysis
+
+### Progress tab
 
 Classification and refinement runs take a long time and report every few
-iterations, so those jobs get a **Progress** tab next to Outputs/Errors that
-plots that report as it arrives. It covers **Class2D, Class3D,
-Refine3D, 3D initial model, MultiBody, and tomo Reconstruct Particle**;
-jobs with nothing to plot (Import, MaskCreate, the converters) simply don't
-show the tab.
+iterations, so those jobs get a **Progress** tab that plots the report as it
+arrives. It covers **Class2D, Class3D, 3D auto-refine, 3D initial model,
+multi-body, and tomo Reconstruct Particle**; jobs with nothing to plot simply
+don't show the tab.
 
-What you get, updated while the job runs:
+Updated while the job runs:
 
-- **Resolution by iteration** — a line for the current resolution and one for
-  the best class, both in Å on one axis, with the latest value labelled.
+- **Resolution by iteration** — current resolution and best class, both in Å on
+  one axis, latest value labelled.
 - **Particles per class** — a bar per class for the newest iteration.
 - **Class images** — 2D class averages, or the central slice of each 3D class
   volume, captioned with class number, share of particles, and resolution.
+- **Viewing-direction distribution** — an on-demand button (never auto-polled,
+  since it parses a per-particle file that can run to tens of millions of
+  rows) for the 3D job types.
 
 It reads the files RELION already writes each iteration
 (`run_it###_model.star`, `run_it###_classes.mrcs` / `run_it###_class###.mrc`),
@@ -697,97 +700,86 @@ so there's nothing to configure and nothing extra on disk.
 
 **Keeping it cheap.** Every control is per job, in the tab itself:
 
-- **Live progress** (on by default) — untick it and the job stops being polled
-  at all.
-- **Images every N iterations** — class images only refresh on multiples of N
+- **Live progress** (on by default) — untick and the job stops being polled at
+  all.
+- **Images every N iterations** — class images refresh only on multiples of N
   (1 = every iteration). The charts still update every iteration; they're
   nearly free.
-- **Keep all** (off by default) — on, earlier iterations' images are kept so
-  you can compare how classes evolved. Off, only the newest set is held, so
-  memory stays flat however long the run goes.
+- **Keep all** (off by default) — on, earlier iterations' images are kept so you
+  can compare how classes evolved. Off, only the newest set is held, so memory
+  stays flat however long the run goes.
 
-Under the hood nothing is cached to disk, thumbnails are 128 px greyscale
-rendered on demand, and polling only happens while the job is actually
-running.
+Nothing is cached to disk, thumbnails are 128 px greyscale rendered on demand,
+and polling only happens while the job is actually running. Defaults for the
+refresh interval and N come from **⚙ Settings**.
 
-Charts sit in a compact, responsive grid — several side by side rather
-than one full-width chart per row — and use a fixed
-colorblind-safe palette ([Okabe & Ito, 2008](https://jfly.uni-koeln.de/color/))
-for anything with more than two series (e.g. per-class lines in the
-Analyze popup), rather than an arbitrary hue rotation that sweeps through
-the red/green region indistinguishable under the most common forms of
-color blindness. The same grid and palette are used by the CTF QC tab and
-the Analyze popup's own charts.
+### 📊 Analyze (Menu ▸ Tools)
 
-## Dark and light themes
+Reads across a run's whole iteration history rather than just the latest, with
+tabs for **Pipeline**, **Micrographs**, **Particles**, **2D Classification**,
+**3D Classification** and **3D Refine** — convergence curves, per-class
+distribution over iterations, per-class FSC, and scatter plots of any two
+columns in a particles or micrographs STAR. The micrographs view left-joins the
+STAR you pick (typically CTFFind's `micrographs_ctf.star`) with each producing
+MotionCorr job's `corrected_micrographs.star`, so CTF-derived and
+motion-derived columns can be plotted against each other. You can export any
+selection (or its complement) as a new STAR file alongside the source.
 
-The top bar has a theme switch. **Dark is the default**; pick light and it's
-remembered. The charts use separate, mode-specific colours validated against
-each background rather than a naive inversion, so they stay legible either
-way.
+### Charts
 
-The top bar itself is a fixed blue (`#134394`) in both themes rather than a
-theme-swapped color — everything on it (buttons, the project path label)
-still adjusts for legible contrast against that blue in either mode.
+Charts sit in a compact responsive grid — several side by side rather than one
+full-width chart per row — and use a fixed colorblind-safe palette
+([Okabe & Ito, 2008](https://jfly.uni-koeln.de/color/)) for anything with more
+than two series, rather than an arbitrary hue rotation that sweeps through the
+red/green region indistinguishable under the most common forms of colour
+blindness. The same grid and palette are used by the Progress tab, the CTF QC
+tab, and Analyze.
 
 ## SLURM cluster submission
 
-Every non-custom job's popup has a **Submit to SLURM cluster** checkbox
-next to the command box. Check it and the same command that would
-otherwise run as a direct subprocess is instead wrapped into an sbatch
-script (`slurm/template_relion_job.sbatch` / `template_python_job.sbatch`,
-literal `ACCOUNT_NAME`/`PARTITION_NAME`/etc. placeholders filled in from
-the fields that appear once it's checked: **Account**, **Partition**,
-**Time limit**, **Memory**) and submitted with `sbatch --parsable`. The
-Command Center polls `squeue`, falling back to `sacct` once SLURM ages the
+Every RELION and IsoNet2 job popup has a **Submit to SLURM cluster** checkbox
+next to the command box. Check it and the same command that would otherwise run
+as a direct subprocess is wrapped into an sbatch script
+(`slurm/template_relion_job.sbatch` / `template_python_job.sbatch`, with
+literal `ACCOUNT_NAME`/`PARTITION_NAME`/etc. placeholders filled in from the
+**Account**, **Partition**, **Time limit** and **Memory** fields that appear)
+and submitted with `sbatch --parsable`.
+
+The Command Center polls `squeue`, falls back to `sacct` once SLURM ages the
 job out of `squeue`, and rolls the real SLURM state into the same
-Running/Queued/Completed/Failed states a local job uses — **Abort** calls
-`scancel` on it.
+Running/Queued/Completed/Failed states a local job uses. **Abort** calls
+`scancel`.
 
-- **Job dependencies**: an optional **Depends on SLURM job ID** field adds
-  `--dependency=afterok:<id>` to the submission, so this job only starts
-  once another one succeeds — a `<datalist>` suggests this project's
-  currently queued/running SLURM job IDs so you don't have to copy-paste
-  one by hand. Chaining N jobs is just submitting each one with this set
-  to the previous job's ID.
-- **Job arrays**: check **Submit as SLURM array** and list one item per
-  line in the **Array items** box (plus an optional **Throttle** capping
-  how many run at once, SLURM's `--array=0-N%throttle`). Each array task
-  gets its own resolved item in a `$ARRAY_ITEM` shell variable your
-  command can reference — most directly useful for the **External Job**
-  type, whose command box is already fully free-text. This is a generic
-  "run the same command N times, once per input line" primitive, not
-  automatic splitting/merging of a real RELION job's own STAR file per
-  task. The Command Center shows a live **K/N tasks** readout alongside
-  the array's overall status.
+- **Job dependencies** — an optional **Depends on SLURM job ID** field adds
+  `--dependency=afterok:<id>`, so this job only starts once another succeeds. A
+  `<datalist>` suggests this project's currently queued/running SLURM job IDs
+  so you don't have to copy-paste one. Chaining N jobs is just submitting each
+  with this set to the previous job's ID.
+- **Job arrays** — check **Submit as SLURM array** and list one item per line in
+  **Array items**, plus an optional **Throttle** capping how many run at once
+  (SLURM's `--array=0-N%throttle`). Each task gets its own item in an
+  `$ARRAY_ITEM` shell variable your command can reference — most directly
+  useful for the **External Job** type, whose command box is already free text.
+  This is a generic "run the same command once per input line" primitive, not
+  automatic splitting/merging of a real RELION job's own STAR file. The Command
+  Center shows a live **K/N tasks** readout alongside the array's status.
 
-`slurm/submit.py` remains available as a standalone command-line path for
-submitting a job or converter as a batch job without going through the
-browser at all, using the same templates. These templates are
-intentionally generic, not written for any specific site: partition names,
-account/allocation syntax, and module names all vary between clusters, so
-`ACCOUNT_NAME`/`PARTITION_NAME` are placeholders you fill in for your own
-system — run `sinfo` for partition names and `module spider relion` /
-`module spider imod` (or check however your cluster exposes software) for
-the exact module strings on your install.
+Defaults for account, partition, time and memory come from **⚙ Settings**.
 
-**Not yet done, tracked as open issues:** auto-splitting/merging a real
-RELION job's own input STAR file per array task, job-type-specific rather
-than the generic primitive above; live per-task output streaming for array
-jobs (each task's own output file is reachable via the Outputs tab in the
-meantime); a dedicated multi-job dependency-chain-builder UI (the single
-**Depends on** field already covers the same capability with far less new
-surface). Verified only against stub `sbatch`/`squeue`/`sacct`/`scancel`
-scripts in this project's own test suite — real-cluster verification is
-still worth doing before trusting it for a large production run.
+`slurm/submit.py` is a standalone command-line path for submitting a job or
+converter as a batch job without the browser at all, using the same templates.
+Those templates are intentionally generic, not written for any specific site:
+partition names, account syntax and module names all vary between clusters, so
+`ACCOUNT_NAME`/`PARTITION_NAME` are placeholders you fill in — run `sinfo` for
+partition names and `module spider relion` / `module spider imod` for the exact
+module strings on your install.
 
-## Provenance and re-running the extraction
+## Regenerating the job definitions
 
-Every job's fields, defaults, help text, and real C++ command logic come
-from `data/extract_job_definitions.py`, which parses a real RELION
-checkout (`github.com/3dem/relion`, cloned 2026-08-14) rather than being
-hand-typed. To regenerate `data/job_definitions_raw.json` against a newer
-RELION version:
+Every job's fields, defaults, help text, and real C++ command logic come from
+`data/extract_job_definitions.py`, which parses a real RELION checkout
+(`github.com/3dem/relion`, cloned 2026-08-14) rather than being hand-typed. To
+regenerate `data/job_definitions_raw.json` against a newer RELION:
 
 ```bash
 git clone --depth 1 https://github.com/3dem/relion.git /tmp/relion_src
@@ -799,82 +791,88 @@ python3 data/extract_job_definitions.py \
 ```
 
 Then re-run the test suite (`cd backend && python3 -m pytest -v`). It runs
-against the *real* extracted data rather than synthetic fixtures, so
-parsing gaps introduced by a new RELION release show up as failures.
+against the *real* extracted data rather than synthetic fixtures, so parsing
+gaps introduced by a new RELION release show up as failures.
 
 ## Known limitations / what to double check
 
-- The draft-command heuristic (above) is best-effort, not a guaranteed
-  match for RELION's exact branching logic — always review before running,
+- The draft-command heuristic is best-effort, not a guaranteed match for
+  RELION's exact branching logic — always review the command before running,
   which is the whole point of the editable box.
 - `External`'s "Params" tab exposes RELION's generic
-  `param1_label`/`param1_value` ... `param10_label`/`param10_value` slots
-  verbatim, which is how RELION's own External job works — you name your
-  own flags there.
-- Warp/M column names in the custom import job are unverified against your
-  specific install (see "The four custom import jobs" above).
+  `param1_label`/`param1_value` … `param10_label`/`param10_value` slots
+  verbatim, which is how RELION's own External job works — you name your own
+  flags there.
+- Warp/M column names are unverified against your specific install (see
+  [the import bridges](#what-jobs-are-available)).
 - The job definitions come from one specific RELION checkout. Job internals
-  change across releases, so re-run the extractor (above) after a RELION
-  upgrade; the test suite flags most breakage immediately.
-- Jobs RELION itself ran are **read-only** here (see "Opening a project built
-  in RELION's GUI"): abort, overwrite, rename, note and delete are refused on
-  them, because RELION-US doesn't write `default_pipeline.star` and couldn't
-  keep RELION's record straight afterwards.
-- By default, RELION-US's own runs do **not** appear in RELION's pipeline
-  file, so RELION's GUI won't list them, and RELION's own counter won't know
-  about them — check the job number if you go back and forth between the two.
-  Turn on **⇄ RELION sync** (above) to register runs into
-  `default_pipeline.star` as they happen instead.
-- Sync depends on `relion_pipeliner` being on RELION-US's `PATH` and, per
-  registration, on the project's `.relion_lock` being free within about two
-  minutes — if RELION's own GUI is mid-operation on the same project, a
-  registration can wait that long before the run starts.
+  change across releases, so re-run the extractor after a RELION upgrade; the
+  test suite flags most breakage immediately.
+- Jobs RELION itself ran are read-only here — abort, resume and delete are
+  refused on them.
+- **RELION sync is on by default**, so a project you open here will start
+  gaining RELION-US rows in its `default_pipeline.star` as you run jobs. That's
+  usually what you want when you go back and forth between the two GUIs, but
+  turn it off for a project you only meant to look at. It's also worth not
+  running RELION's own GUI on the same project at the same time — a live GUI
+  holds its own in-memory copy of the pipeline.
+- Sync needs `relion_pipeliner` on `PATH` and, per registration, the project's
+  `.relion_lock` free within about two minutes — if RELION's GUI is mid-
+  operation on the same project, a registration can wait that long before the
+  run starts.
 - Job history persists run *summaries* (command, status, timestamps) per
-  project, not full stdout/stderr transcripts — reopening a job from
-  history after the backend has restarted shows its last known status but
-  not its old live output. Runs from the current backend session stream
-  normally either way.
-- SLURM submission (above) is verified against stub scheduler binaries in
-  this project's own tests, not a real cluster — the array/dependency
-  path in particular is worth a careful first run before relying on it.
+  project, not full stdout/stderr transcripts. Reopening a job from history
+  after the backend restarted shows its last known status, not its old live
+  output — though `run.out`/`run.err` are still in the job directory, and the
+  Outputs tab will show them. Runs from the current session stream normally.
+- SLURM submission is verified against stub scheduler binaries in this
+  project's own tests, not a real cluster — the array and dependency paths in
+  particular are worth a careful first run before relying on them. Still on the
+  list: auto-splitting and merging a real RELION job's own input STAR per array
+  task, live per-task output streaming for arrays (each task's output file is
+  reachable via the Outputs tab meanwhile), and a dedicated
+  dependency-chain-builder UI.
+- There is no CORS policy and no cross-origin access, on purpose: the frontend
+  is same-origin, and anything that could drive `/api/runs` from another origin
+  could run arbitrary shell commands here. If you ever serve the frontend
+  separately, add that one origin explicitly — never `*`.
 
 ## Testing
 
 ```bash
 ./run_tests.sh              # backend suite only — seconds, run it always
-./run_tests.sh viewer       # + tomogram viewer, recent-projects, Progress
-                             #   tab, theme, file-picker (one shared suite;
-                             #   "progress" is an alias for the same tier)
+./run_tests.sh viewer       # + tomogram viewer, recent projects, Progress
+                            #   tab, theme, file picker ("progress" is an
+                            #   alias for the same tier)
 ./run_tests.sh options      # + option placement, MPI/threads, Advanced section
 ./run_tests.sh jobs         # + job popups, Command Center, abort/overwrite
 ./run_tests.sh project      # + Change Project, recents, Create Folder
 ./run_tests.sh legacy       # + opening a project built in RELION's own GUI,
-                             #   and the network view's geometry on a wide,
-                             #   branching, long-job-name pipeline
+                            #   and the network view on a wide, branching,
+                            #   long-job-name pipeline
 ./run_tests.sh auth         # + password protection (login/logout, the gate
-                             #   on pages/API/websocket)
+                            #   on pages/API/websocket)
 ./run_tests.sh all          # everything — before you commit a milestone
 ```
 
-The browser suites are tiered because each one needs its own backend on its own
+The browser suites are tiered because each needs its own backend on its own
 throwaway project, and running all of them to check a change that touched one
-module costs minutes and tells you nothing. Pick the tier that covers what you
+module costs minutes and tells you nothing. Pick the tier covering what you
 changed; `run_tests.sh`'s header comment has the mapping. `all` is for a real
 checkpoint, or for a change to something shared like the popup scaffolding in
 `app.js`.
 
 The runner creates a fresh project directory and picks a free port per suite,
 waits for each backend to answer before starting, and tears everything down
-afterwards — including on Ctrl-C. It also redirects `XDG_CONFIG_HOME`, so a
-test run never touches your real recent-projects list. Nothing is left running
-and no project of yours is touched: a suite that asserts "no jobs yet" would
-fail against a project that has history, which is a false alarm rather than a
-bug.
+afterwards, including on Ctrl-C. It redirects `XDG_CONFIG_HOME`, so a test run
+never touches your real recent-projects list, and no project of yours is
+touched — a suite that asserts "no jobs yet" would fail against a project that
+has history, which is a false alarm rather than a bug.
 
 The backend suite runs against real extracted RELION data and real converter
 behaviour rather than synthetic fixtures, so a change in RELION's job
 definitions or a regression in a format bridge shows up as a failure. One test
-auto-skips unless IMOD's `point2model`/`model2point` are on PATH (the `.mod`
+auto-skips unless IMOD's `point2model`/`model2point` are on `PATH` (the `.mod`
 round-trip).
 
 To run one suite by hand, point it at any live instance — each takes a base URL
@@ -885,8 +883,8 @@ python3 test_jobs.py http://127.0.0.1:8420
 python3 test_viz_and_progress.py http://127.0.0.1:8420 /path/to/empty/project
 ```
 
-Set `RELION_US_CHROMIUM` if Playwright can't find a usable Chromium itself
-(a shared read-only install on a cluster, say); otherwise `playwright install
+Set `RELION_US_CHROMIUM` if Playwright can't find a usable Chromium itself (a
+shared read-only install on a cluster, say); otherwise `playwright install
 chromium` is all that's needed.
 
 ## License
@@ -895,24 +893,25 @@ RELION-US is released under the **GNU General Public License, version 2 or
 later** (`LICENSE`).
 
 That license follows the material this repository redistributes:
-`data/job_definitions_raw.json` embeds the verbatim `getCommands<Job>Job()`
-C++ source and the field defaults and help strings for all 32 job types,
-extracted from RELION (© MRC Laboratory of Molecular Biology, GPL-2.0-or-later)
-— the same data the RELION Source tab shows you. `frontend/vendor/` bundles
-WinBox.js under Apache-2.0. The Analyze popup (Menu ▸ Tools ▸ Analyze) ports
-the tab layout and technique — not source — of `relion_analyse.py` from
+`data/job_definitions_raw.json` embeds the verbatim `getCommands<Job>Job()` C++
+source and the field defaults and help strings for all 32 job types, extracted
+from RELION (© MRC Laboratory of Molecular Biology, GPL-2.0-or-later) — the
+same data the RELION Source tab shows you. `frontend/vendor/` bundles WinBox.js
+(Apache-2.0) and xterm.js (MIT).
+
+The Analyze popup ports the tab layout and technique — not source — of
+`relion_analyse.py` from
 [CNIO_Relion_Tools](https://github.com/cryoEM-CNIO/CNIO_Relion_Tools)
-(cryoEM-CNIO organization, GPL-3.0); every chart in it is this app's own
-hand-rolled SVG/canvas rendering, built on none of that project's Dash/
-Plotly/Cytoscape stack. The tomogram/particle-pick visualizer likewise ports
-the interaction model — tri-view slice layout, pick-overlay sizing rule,
-percentile contrast stretch — of
-[DeepETPicker](https://github.com/cbmi-group/DeepETPicker)'s own picker GUI
-(cbmi-group, GPL-3.0), reimplemented for the browser instead of its desktop
-Qt/pyqtgraph app; see "Tomogram / particle-pick visualizer" in
+(cryoEM-CNIO, GPL-3.0); every chart in it is this app's own hand-rolled
+SVG/canvas rendering, built on none of that project's Dash/Plotly/Cytoscape
+stack. The tomogram/particle-pick viewer likewise ports the interaction
+model — tri-view slice layout, pick-overlay sizing rule, percentile contrast
+stretch — of [DeepETPicker](https://github.com/cbmi-group/DeepETPicker)'s own
+picker GUI (cbmi-group, GPL-3.0), reimplemented for the browser instead of its
+desktop Qt/pyqtgraph app; see "Tomogram / particle-pick visualizer" in
 `docs/ARCHITECTURE.md` for the point-by-point correspondence.
 
 `NOTICE.md` has the full attribution, what was taken from where, and the
-third-party format/dependency situation. RELION-US is an independent project,
-not endorsed by or affiliated with the RELION authors or the developers of any
-other software named here.
+third-party format and dependency situation. RELION-US is an independent
+project, not endorsed by or affiliated with the RELION authors or the
+developers of any other software named here.

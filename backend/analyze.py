@@ -291,7 +291,6 @@ def export_star_subset(
     it's still inside the project" pattern for the output side at all --
     there's no path to resolve, just a filename component, which is a
     stronger guarantee than re-deriving the same check would be."""
-    import pandas as pd
     import starfile
 
     try:
