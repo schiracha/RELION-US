@@ -230,6 +230,78 @@ def test_failures_outside_the_window_do_not_count():
         auth.reset_login_throttle()
 
 
+# --- certificate trust / the --hsts gate -----------------------------------
+# HSTS is the one setting a user cannot undo from the machine they are on
+# (the max-age lives in the browser), and with a self-signed certificate it
+# also removes the click-through on the cert warning -- so the gate that
+# refuses that combination is worth pinning down.
+
+import shutil
+import subprocess
+
+_no_openssl = pytest.mark.skipif(
+    shutil.which("openssl") is None, reason="openssl not on PATH")
+
+
+@_no_openssl
+def test_generated_certificate_is_detected_as_self_signed(auth_home):
+    cert, _key, _fp = auth.generate_self_signed_cert("relion-test.local")
+    status, detail = auth.certificate_trust(cert)
+    assert status == auth.TRUST_SELF_SIGNED
+    assert "relion-test.local" in detail
+
+
+@_no_openssl
+def test_hsts_check_refuses_a_self_signed_certificate(auth_home, capsys):
+    cert, _key, _fp = auth.generate_self_signed_cert("relion-test.local")
+    # Exit 2 is the launcher's "refuse and do not start" signal; 1 is only a
+    # warning. The distinction is the whole point, so assert the exact code.
+    assert auth.cli_hsts_check(str(cert)) == 2
+    err = capsys.readouterr().err
+    assert "--hsts-force" in err
+
+
+@_no_openssl
+def test_hsts_force_proceeds_but_still_warns(auth_home, capsys):
+    cert, _key, _fp = auth.generate_self_signed_cert("relion-test.local")
+    assert auth.cli_hsts_check(str(cert), forced=True) == 0
+    err = capsys.readouterr().err
+    assert "--hsts-force" in err
+    # Must NOT claim to be refusing when it is about to go ahead.
+    assert "Refusing" not in err
+
+
+@_no_openssl
+def test_a_ca_issued_certificate_is_warned_about_not_refused(auth_home, tmp_path, capsys):
+    """A certificate from a private/institutional CA whose root isn't in this
+    machine's store is unverifiable HERE but is usually trusted by the browsers
+    that matter, so refusing it would be a false positive on a deliberate
+    setup. Only issuer==subject -- which is never ambiguous -- is refused."""
+    ca_key, ca_crt = tmp_path / "ca.key", tmp_path / "ca.pem"
+    leaf_key, leaf_csr, leaf = tmp_path / "l.key", tmp_path / "l.csr", tmp_path / "l.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(ca_key), "-out", str(ca_crt), "-days", "2",
+                    "-subj", "/CN=Test Root CA",
+                    "-addext", "basicConstraints=critical,CA:TRUE"],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "req", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(leaf_key), "-out", str(leaf_csr),
+                    "-subj", "/CN=leaf.example"], check=True, capture_output=True)
+    subprocess.run(["openssl", "x509", "-req", "-in", str(leaf_csr),
+                    "-CA", str(ca_crt), "-CAkey", str(ca_key), "-CAcreateserial",
+                    "-out", str(leaf), "-days", "2"], check=True, capture_output=True)
+
+    status, _detail = auth.certificate_trust(leaf)
+    assert status == auth.TRUST_UNVERIFIED
+    assert auth.cli_hsts_check(str(leaf)) == 1        # warn, not refuse
+    assert "Recovering from HSTS" in capsys.readouterr().err
+
+
+def test_certificate_trust_on_a_missing_file_is_unverified_not_a_crash(tmp_path):
+    status, _detail = auth.certificate_trust(tmp_path / "nope.pem")
+    assert status == auth.TRUST_UNVERIFIED
+
+
 # --- enable/disable -------------------------------------------------------
 
 def test_enabling_without_a_password_raises(auth_home):

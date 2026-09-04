@@ -80,6 +80,8 @@ PORT="8420"
 TLS_CERT=""
 TLS_KEY=""
 WANT_TLS=0
+WANT_HSTS=0
+HSTS_FORCE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) [[ $# -ge 2 ]] || { echo "--host needs a value" >&2; exit 1; }; HOST="$2"; shift 2 ;;
@@ -93,7 +95,8 @@ while [[ $# -gt 0 ]]; do
       if [[ $# -ge 2 && "$2" != -* ]]; then run_auth_cli make-cert "$2"; else run_auth_cli make-cert; fi
       exit $?
       ;;
-    --hsts) export RELION_US_HSTS=1; shift ;;
+    --hsts) WANT_HSTS=1; shift ;;
+    --hsts-force) WANT_HSTS=1; HSTS_FORCE=1; shift ;;
     --set-password) run_auth_cli set-password; exit $? ;;
     --enable-auth) run_auth_cli enable; exit $? ;;
     --disable-auth) run_auth_cli disable; exit $? ;;
@@ -108,8 +111,10 @@ while [[ $# -gt 0 ]]; do
       echo
       echo "  --tls    serve HTTPS. Without it everything, the password"
       echo "           included, crosses the network in plain text."
-      echo "  --hsts   send Strict-Transport-Security (only with a real,"
-      echo "           CA-issued certificate -- see README)."
+      echo "  --hsts   send Strict-Transport-Security. Refused with a"
+      echo "           self-signed certificate: it is cached by the browser"
+      echo "           for a year and cannot be undone from this machine."
+      echo "           --hsts-force overrides (read the README first)."
       exit 0
       ;;
     *)
@@ -151,6 +156,29 @@ if [[ "$WANT_TLS" == "1" ]]; then
     [[ -r "$f" ]] || { echo "Cannot read TLS file: $f" >&2; exit 1; }
   done
   SSL_ARGS=(--ssl-certfile "$TLS_CERT" --ssl-keyfile "$TLS_KEY")
+fi
+
+# --hsts is the one setting here a user cannot undo from this machine: the
+# max-age is cached by the BROWSER, so turning the flag off again does nothing.
+# With a self-signed certificate it also removes the click-through on the
+# certificate warning, costing both http:// and https:// on this hostname
+# until HSTS state is cleared in every browser by hand. So it is gated on what
+# the certificate actually is -- exit 2 from hsts-check means "self-signed,
+# refuse"; exit 1 means "couldn't verify, warn and continue".
+if [[ "$WANT_HSTS" == "1" ]]; then
+  if [[ "$WANT_TLS" != "1" ]]; then
+    echo "--hsts needs --tls: the header is only ever sent over HTTPS." >&2
+    exit 1
+  fi
+  if [[ "$HSTS_FORCE" == "1" ]]; then
+    run_auth_cli hsts-check "$TLS_CERT" force || true
+  else
+    run_auth_cli hsts-check "$TLS_CERT" && hsts_rc=0 || hsts_rc=$?
+    if [[ "${hsts_rc:-0}" == "2" ]]; then
+      exit 1                    # hsts-check already explained why, on stderr
+    fi
+  fi
+  export RELION_US_HSTS=1
 fi
 
 # Asked every time protection isn't currently in effect for this run --

@@ -496,6 +496,93 @@ def cert_fingerprint(cert_path: Path) -> str:
     return (proc.stdout or "").strip().split("=", 1)[-1].strip()
 
 
+# --- Is this certificate one HSTS is safe to send with? ---------------------
+#
+# HSTS is the one setting in this app that a user cannot undo from the machine
+# they are on. `Strict-Transport-Security: max-age=31536000` is cached BY THE
+# BROWSER for a year; turning the flag back off, restarting, even deleting the
+# certificate changes nothing, because the server was never holding the state.
+#
+# With a self-signed certificate that is not merely inconvenient, it is a
+# lockout with no way back: HSTS deliberately removes the click-through on
+# certificate warnings (RFC 6797 §12.1 -- "there is no such recourse"), so the
+# browser will refuse plain HTTP to that host AND refuse to let anyone accept
+# the untrusted certificate. Both doors, for a year, per browser.
+#
+# The server-side escape (serving `max-age=0` to clear the pin) needs a
+# handshake the browser will complete -- which under an active pin with an
+# untrusted certificate it won't. So the remedy exists exactly where it isn't
+# needed and is unavailable exactly where it is.
+#
+# Hence: classify the certificate before letting --hsts arm.
+
+TRUST_TRUSTED = "trusted"
+TRUST_SELF_SIGNED = "self_signed"
+TRUST_UNVERIFIED = "unverified"
+
+
+def certificate_trust(cert_path: Path) -> tuple[str, str]:
+    """Classify a certificate as (status, human-readable detail).
+
+    Three outcomes, deliberately not two:
+
+    * TRUST_SELF_SIGNED -- issuer equals subject. This is what --make-cert
+      produces, and the case that bricks a hostname under HSTS. Refused.
+    * TRUST_UNVERIFIED -- chains to something, but this machine's trust store
+      can't verify it (a private/institutional CA whose root isn't installed
+      here, or an expired certificate). Warned about, not refused: a private CA
+      IS usually installed in the browsers that matter even when it isn't in
+      this machine's OpenSSL store, so refusing outright would be a false
+      positive on a deliberate, well-understood setup.
+    * TRUST_TRUSTED -- verifies against the system store. HSTS is fine.
+
+    Biased toward the safe answer only where the answer is unambiguous
+    (issuer == subject is not a heuristic), because a false refusal costs one
+    override flag while a false pass costs a year of that hostname.
+    """
+    cert_path = Path(cert_path)
+    try:
+        meta = subprocess.run(
+            ["openssl", "x509", "-in", str(cert_path), "-noout", "-issuer", "-subject"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return TRUST_UNVERIFIED, f"could not read the certificate ({exc})"
+    if meta.returncode != 0:
+        return TRUST_UNVERIFIED, (meta.stderr or "could not read the certificate").strip()
+
+    fields = {}
+    for line in (meta.stdout or "").splitlines():
+        key, _, value = line.partition("=")
+        fields[key.strip()] = value.strip()
+    issuer, subject = fields.get("issuer"), fields.get("subject")
+    if issuer and subject and issuer == subject:
+        return TRUST_SELF_SIGNED, f"self-signed (issuer and subject are both {subject})"
+
+    # -untrusted <the file itself> so a fullchain.pem's own bundled
+    # intermediates are used; without it a perfectly good Let's Encrypt
+    # certificate fails to verify for lack of its intermediate.
+    try:
+        verify = subprocess.run(
+            ["openssl", "verify", "-untrusted", str(cert_path), str(cert_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return TRUST_UNVERIFIED, f"could not verify the certificate chain ({exc})"
+    if verify.returncode == 0:
+        return TRUST_TRUSTED, "verifies against this machine's trust store"
+    # openssl prints the useful reason ("error 20 at 0 depth lookup: unable to
+    # get local issuer certificate") ABOVE its final "error <path>: verification
+    # failed" line, so taking the last line yields only the path back. Prefer
+    # the depth line, which is the part that says what is actually wrong.
+    lines = [ln.strip() for ln in (verify.stderr or verify.stdout or "").splitlines() if ln.strip()]
+    reason = next((ln.split("depth lookup:", 1)[1].strip()
+                   for ln in lines if "depth lookup:" in ln), None)
+    if reason is None:
+        reason = next((ln for ln in lines if not ln.startswith("error ")), None)
+    return TRUST_UNVERIFIED, f"could not be verified here ({reason or 'chain incomplete'})"
+
+
 def enable() -> None:
     cfg = load_config()
     if not cfg.get("password_hash"):
@@ -664,6 +751,59 @@ def cli_make_cert(hostname: str | None = None) -> int:
     return 0
 
 
+def cli_hsts_check(cert: str, forced: bool = False) -> int:
+    """Gate for Run-RelionUS's --hsts. Exit codes, not text, are the contract:
+
+      0  safe -- certificate verifies against the system trust store
+      2  REFUSE -- self-signed; HSTS would brick this hostname per browser
+      1  warn only -- can't be verified here, but isn't self-signed
+
+    Only exit 2 stops the launcher (and only without --hsts-force), because
+    only issuer==subject is a certain answer -- see certificate_trust."""
+    status, detail = certificate_trust(Path(cert))
+    if status == TRUST_TRUSTED:
+        return 0
+    if status == TRUST_SELF_SIGNED and forced:
+        # --hsts-force was passed, so the launcher is going ahead regardless.
+        # Printing the full refusal here and then starting anyway would be
+        # a contradiction; say what is actually about to happen instead.
+        print(f"--hsts-force: sending HSTS with a {detail} certificate.",
+              file=sys.stderr)
+        print("Browsers will refuse plain HTTP to this host for a year, and "
+              "will no longer", file=sys.stderr)
+        print("offer to accept this certificate. Clearing that needs manual "
+              "steps in every", file=sys.stderr)
+        print('browser -- see "Recovering from HSTS" in the README.',
+              file=sys.stderr)
+        return 0
+    if status == TRUST_SELF_SIGNED:
+        print(f"Refusing --hsts: this certificate is {detail}.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("HSTS tells browsers to refuse plain HTTP to this host for a "
+              "year, and it is", file=sys.stderr)
+        print("cached by the BROWSER -- turning the flag off again, restarting, "
+              "or deleting the", file=sys.stderr)
+        print("certificate will not undo it. With a self-signed certificate it "
+              "also removes the", file=sys.stderr)
+        print("click-through on the certificate warning, so you would lose "
+              "both http:// and", file=sys.stderr)
+        print("https:// on this hostname until you clear HSTS state in every "
+              "browser by hand.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Use --hsts only with a CA-issued certificate (--tls-cert/"
+              "--tls-key). If you", file=sys.stderr)
+        print("genuinely mean it anyway, add --hsts-force -- and read "
+              '"Recovering from HSTS"', file=sys.stderr)
+        print("in the README first.", file=sys.stderr)
+        return 2
+    print(f"Warning: --hsts is on, but this certificate {detail}.", file=sys.stderr)
+    print("If browsers don't trust it either, HSTS will make this hostname "
+          "unreachable", file=sys.stderr)
+    print('until HSTS state is cleared by hand -- see "Recovering from HSTS" '
+          "in the README.", file=sys.stderr)
+    return 1
+
+
 def cli_tls_paths() -> int:
     """Silent except for the paths -- Run-RelionUS reads these to build its
     uvicorn command. Exit 1 (printing nothing) when TLS isn't configured, so
@@ -703,10 +843,15 @@ def main(argv: list[str]) -> int:
             print("Usage: make-cert [hostname]")
             return 2
         return cli_make_cert(argv[1] if len(argv) == 2 else None)
+    if argv and argv[0] == "hsts-check":
+        if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] != "force"):
+            print("Usage: hsts-check <certificate> [force]")
+            return 2
+        return cli_hsts_check(argv[1], forced=len(argv) == 3)
     if len(argv) != 1 or argv[0] not in commands:
         print(f"Usage: {Path(sys.argv[0]).name} "
               "{status|set-password|enable|disable|is-enabled|tls-paths|"
-              "make-cert [hostname]}")
+              "make-cert [hostname]|hsts-check <cert>}")
         return 2
     return commands[argv[0]]()
 
