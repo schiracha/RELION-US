@@ -313,48 +313,27 @@ the two rules above can't reach on their own — see `docs/ARCHITECTURE.md`'s
 tomography jobs (Inimodel, Class3D, 3D auto-refine, Subtomogram averaging,
 CTF refinement (tomo), Frame alignment (tomo), Reconstruct particle) whose
 **Optimisation set STAR file** / **Reference map** / direct-entry
-(particles/tomograms/trajectories) inputs are now correctly mapped to
-RELION's real `--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/
-`--t`/`--mot` flags — those used to show up as "unmapped" and get silently
-dropped from the draft no matter what you filled in.
+(particles/tomograms/trajectories) inputs map to RELION's real
+`--ios`/`--i`/`--ref`/`--tomograms`/`--trajectories`/`--p`/`--t`/`--mot`
+flags.
 
-**A field whose flag name equals `--<key>` used to skip its real condition
-entirely (fixed).** This was a bigger bug than it sounds: whenever a field's
-CLI flag happens to be exactly `--` + its own key (the common case), the
-draft used to treat it as always-safe-to-emit *without ever checking what
-actually guards it in RELION's source* — so a field genuinely gated behind a
-different checkbox got passed regardless of that checkbox's state. Confirmed
-concretely: 3D classification's/3D auto-refine's helical parameters
-(`--helical_nr_asu`, `--helical_twist_initial`, `--helical_rise_initial`)
-were being passed to `relion_refine` even with **Do helical
-reconstruction?** unchecked. An audit found **72 fields** across the job set
-with this same shape. Fixed by always checking the real, source-extracted
-condition first, and — since this app already has the exact field values the
-user submitted, the same ones RELION's own code would read — evaluating
-straightforward checkbox-gated conditions (`do_helix`, `do_apply_helical_symmetry`,
-and similar `&&`-chains of checkboxes) against them live, rather than either
-blindly emitting or blindly dropping. A condition too complex to evaluate
+A field whose CLI flag happens to be exactly `--` + its own key (the
+common case) isn't emitted just because the name matches — the draft also
+checks the real, source-extracted condition that gates it in RELION's own
+code, evaluating straightforward checkbox-gated conditions
+(`do_helix`, `do_apply_helical_symmetry`, and similar `&&`-chains) against
+the values you actually submitted. A condition too complex to evaluate
 safely (an `||`, RELION's brace-less `else` branch marker, a numeric
-comparison) still falls back to "unmapped," exactly as before — nothing new
-is guessed at.
+comparison) falls back to "unmapped" rather than being guessed at.
 
-**GPU acceleration wasn't being passed at all (fixed).** "Use GPU
-acceleration?" checked, MPI running fine, but no `--gpu` and no GPU IDs ever
-reached the command. Root cause: RELION wraps the GPU-IDs value in escaped
-quotes in its own source (`--gpu \"<ids>\"`), a shape the source extractor's
-flag-detection regex didn't recognize at all — so this app had *zero*
-information linking the "Which GPUs to use" field to the real `--gpu` flag
-on any of the 6 jobs that support it (2D/3D classification, 3D initial
-model, 3D auto-refine, multi-body refinement, and particle picking's Topaz
-mode). Fixed by extending the extractor's regex to recognize this pattern
-and re-running it against RELION's real source — now `--gpu` correctly
-appears exactly when "Use GPU acceleration?" is checked, together with
-whichever MPI/threads settings are also in effect. It's also correctly
-passed as `--gpu ""` (not omitted) when the checkbox is on but "Which GPUs
-to use" is left blank, matching RELION's own "auto-allocate" convention.
-Particle picking's Topaz-mode GPU use and MotionCorr's (both genuinely
-mode-branched in RELION's own source, not simple checkbox gates) are left
-as known gaps rather than guessed at — add `--gpu` manually there if needed.
+GPU acceleration (`--gpu`) is drafted correctly for every job that
+supports it (2D/3D classification, 3D initial model, 3D auto-refine,
+multi-body refinement, particle picking's Topaz mode) — including RELION's
+own "auto-allocate" convention of passing `--gpu ""` when the checkbox is
+on but "Which GPUs to use" is left blank. Particle picking's Topaz-mode GPU
+use and MotionCorr's are genuinely mode-branched in RELION's own source
+rather than simple checkbox gates, and are left as known gaps — add `--gpu`
+manually there if needed.
 
 A few job types don't take a bare output directory for `--o` either — RELION
 appends a literal suffix to it to form a file rootname prefix. 2D/3D
@@ -362,31 +341,19 @@ classification, 3D initial model, 3D auto-refine and multi-body refinement
 all use `run` (so output files are `run_it000_...`, not `_it000_...`);
 Mask creation and Post-processing use `mask.mrc` / `postprocess`. This is
 also a curated, source-verified table (`docs/ARCHITECTURE.md`'s "Output-value
-suffix" section) — before this fix, every job's `--o` was a bare directory,
-so those output files were missing their expected prefix entirely.
+suffix" section).
 
-**Overwrite** and RELION sync: overwriting a job now applies
-`--pipeline_control` (when sync is on) the same way a fresh run does, so an
-overwritten job's completion is picked up by RELION's own GUI instead of
-sitting stuck at "Running" — see `docs/ARCHITECTURE.md`'s "Two-way pipeline
-sync" section for why this intentionally does *not* re-register the job as a
-new pipeline entry. Every run — fresh or Overwrite — also now leaves
-`run.out`/`run.err` files in its job directory, matching RELION's own GUI
-convention, even though RELION-US streams output live rather than
-shell-redirecting it.
-
-**Command Center rows doubling up once sync is on:** fixed. A job started
-here and also registered with RELION's own pipeline used to show up as two
-separate rows — this app's own entry plus a blank read-only placeholder
-pulled straight from `default_pipeline.star` — since they carry different
-internal IDs and the merge never noticed they're the same job. This is what
-made clicking around the Command Center (Table/Timeline/Network — every job
-number, not just recent ones) feel like it opened the wrong job: with twice
-as many rows as jobs, a click that looked like it landed on one job's row
-could easily land on its duplicate neighbor instead. Now a job this app has
-its own record for only ever shows once; the read-only RELION placeholder is
-reserved for jobs genuinely run outside this app (a legacy project, or one
-launched from RELION's own GUI directly).
+**Overwrite** applies `--pipeline_control` (when RELION sync is on) the
+same way a fresh run does, so an overwritten job's completion is picked up
+by RELION's own GUI — see `docs/ARCHITECTURE.md`'s "Two-way pipeline sync"
+section for why this intentionally does *not* re-register the job as a new
+pipeline entry. Every run — fresh or Overwrite — leaves `run.out`/`run.err`
+files in its job directory, matching RELION's own GUI convention, even
+though RELION-US streams output live rather than shell-redirecting it. A
+job this app has its own record for shows once in the Command Center, even
+with sync on and RELION's pipeline also tracking it; the read-only RELION
+placeholder row is reserved for a job genuinely run outside this app (a
+legacy project, or one launched from RELION's own GUI directly).
 
 ## The Advanced section (options the GUI doesn't show)
 
