@@ -255,10 +255,13 @@ def test_stays_running_job_reaches_running_not_completed(synced_project):
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         return run
 
     run = asyncio.run(go())
@@ -290,10 +293,13 @@ def test_done_button_finishes_a_stays_running_job(synced_project):
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         assert run.status == "running"
         updated = await manager.set_status(run.run_id, "completed")
         return run, updated
@@ -324,10 +330,13 @@ def test_resume_run_returns_to_running_without_touching_picks(synced_project):
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         import manual_pick
         manual_pick.save_spa_picks(project, Path(run.cwd), "a.mrc", [{"x": 1.0, "y": 2.0}])
         await manager.set_status(run.run_id, "completed")
@@ -359,10 +368,13 @@ def test_resume_run_rejects_a_currently_running_job(synced_project):
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         assert run.status == "running"
         with pytest.raises(ValueError, match="resume"):
             await manager.resume_run(run.run_id)
@@ -386,10 +398,13 @@ def test_overwrite_clears_prior_picks_and_resumes_running(synced_project):
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         import manual_pick
         manual_pick.save_spa_picks(project, Path(run.cwd), "a.mrc", [{"x": 1.0, "y": 2.0}])
         await manager.set_status(run.run_id, "completed")
@@ -398,10 +413,13 @@ def test_overwrite_clears_prior_picks_and_resumes_running(synced_project):
             "Manualpick", "Manual Picking", factory, field_values=values,
             overwrite_run_id=run.run_id, stays_running=True,
         )
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if overwritten.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await overwritten.task
         return run, overwritten
 
     run, overwritten = asyncio.run(go())
@@ -474,10 +492,13 @@ def test_excludetiltimages_job_registers_in_relions_pipeline_and_stays_running(s
             return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
         run = await manager.start_custom_job(
             "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         return run
 
     run = asyncio.run(go())
@@ -507,10 +528,13 @@ def test_excludetiltimages_done_then_continue_preserves_saved_exclusions(synced_
             return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
         run = await manager.start_custom_job(
             "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         import exclude_tilts
         exclude_tilts.save_tilt_series_exclusions(project, Path(run.cwd), in_tiltseries, "TS_01", ["a.mrc"])
         await manager.set_status(run.run_id, "completed")
@@ -546,10 +570,13 @@ def test_excludetiltimages_overwrite_clears_prior_exclusions(synced_project):
             return await custom_jobs.run_exclude_tilt_images(project, values, job_dir)
         run = await manager.start_custom_job(
             "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         import exclude_tilts
         exclude_tilts.save_tilt_series_exclusions(project, Path(run.cwd), in_tiltseries, "TS_01", ["a.mrc"])
         await manager.set_status(run.run_id, "completed")
@@ -558,10 +585,13 @@ def test_excludetiltimages_overwrite_clears_prior_exclusions(synced_project):
             "TomoExcludeTiltImages", "Exclude Tilt Images", factory, field_values=values,
             overwrite_run_id=run.run_id, stays_running=True,
         )
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if overwritten.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await overwritten.task
         return run, overwritten
 
     run, overwritten = asyncio.run(go())
@@ -590,20 +620,26 @@ def test_overwrite_works_directly_on_a_still_running_picking_session(synced_proj
             return await custom_jobs.run_manual_pick(project, values, job_dir)
         run = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values, stays_running=True)
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if run.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await run.task
         assert run.status == "running"  # never touched Done/set_status
 
         overwritten = await manager.start_custom_job(
             "Manualpick", "Manual Picking", factory, field_values=values,
             overwrite_run_id=run.run_id, stays_running=True,
         )
-        for _ in range(200):
-            await asyncio.sleep(0.02)
-            if overwritten.status != "pending":
-                break
+        # Await the task rather than polling for a status change:
+        # _run_custom sets "running" as its FIRST action, so a poll on
+        # `status != "pending"` returns while the task is still in flight.
+        # asyncio.run() then cancels it during loop teardown and
+        # _run_custom's CancelledError handler rewrites the status to
+        # "aborted" -- which is what made these tests fail ~25% of runs.
+        await overwritten.task
         return run, overwritten
 
     run, overwritten = asyncio.run(go())

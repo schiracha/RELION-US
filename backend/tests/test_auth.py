@@ -88,6 +88,148 @@ def test_same_password_gets_a_different_hash_each_time(auth_home):
     assert hash1 != hash2
 
 
+def test_password_is_hashed_with_scrypt_not_the_legacy_pbkdf2(auth_home):
+    auth.set_password("correct horse battery staple")
+    assert auth.load_config()["kdf"] == auth.KDF_SCRYPT
+
+
+def test_short_and_common_passwords_are_refused(auth_home):
+    for bad in ("short", "password123", "aaaaaaaaaa"):
+        with pytest.raises(ValueError):
+            auth.set_password(bad)
+    # ...and nothing was stored by the refused attempts.
+    assert auth.load_config()["password_hash"] is None
+
+
+# --- PBKDF2 -> scrypt migration -------------------------------------------
+# An install predating scrypt has a PBKDF2 hash and no "kdf" key at all.
+# It has to keep working, and upgrade itself, without anyone resetting a
+# password -- otherwise raising the KDF silently locks existing users out.
+
+def _write_legacy_pbkdf2_config(password: str) -> dict:
+    import json
+    import secrets
+    salt = secrets.token_bytes(16)
+    legacy = {
+        "enabled": True,
+        "password_hash": auth._hash_password(password, salt, auth.KDF_PBKDF2),
+        "salt": salt.hex(),
+        "session_secret": secrets.token_hex(32),
+    }
+    auth.config_path().parent.mkdir(parents=True, exist_ok=True)
+    auth.config_path().write_text(json.dumps(legacy))
+    return legacy
+
+
+def test_legacy_pbkdf2_config_is_identified_as_such(auth_home):
+    _write_legacy_pbkdf2_config("legacy-password")
+    assert auth.load_config()["kdf"] == auth.KDF_PBKDF2
+    assert auth.needs_rehash() is True
+
+
+def test_legacy_pbkdf2_password_still_verifies(auth_home):
+    _write_legacy_pbkdf2_config("legacy-password")
+    assert auth.verify_password("legacy-password") is True
+    assert auth.verify_password("wrong-password") is False
+
+
+def test_successful_login_upgrades_a_legacy_hash_to_scrypt(auth_home):
+    legacy = _write_legacy_pbkdf2_config("legacy-password")
+    assert auth.upgrade_hash_if_needed("legacy-password") is True
+    after = auth.load_config()
+    assert after["kdf"] == auth.KDF_SCRYPT
+    assert after["password_hash"] != legacy["password_hash"]
+    assert auth.needs_rehash(after) is False
+    # The same password must still work afterwards -- an upgrade that
+    # invalidated the password would be worse than no upgrade.
+    assert auth.verify_password("legacy-password", after) is True
+
+
+def test_upgrade_keeps_the_session_secret_so_nobody_is_logged_out(auth_home):
+    legacy = _write_legacy_pbkdf2_config("legacy-password")
+    auth.upgrade_hash_if_needed("legacy-password")
+    assert auth.load_config()["session_secret"] == legacy["session_secret"]
+
+
+def test_upgrade_is_a_no_op_for_a_wrong_password_or_current_hash(auth_home):
+    _write_legacy_pbkdf2_config("legacy-password")
+    assert auth.upgrade_hash_if_needed("not-the-password") is False
+    assert auth.load_config()["kdf"] == auth.KDF_PBKDF2
+    auth.set_password("already-scrypt-password")
+    assert auth.upgrade_hash_if_needed("already-scrypt-password") is False
+
+
+def test_unknown_kdf_refuses_the_login_rather_than_falling_open(auth_home):
+    import json
+    auth.set_password("some-good-password")
+    cfg = auth.load_config()
+    cfg["kdf"] = "kdf-from-a-newer-version"
+    auth.config_path().write_text(json.dumps(cfg))
+    assert auth.verify_password("some-good-password") is False
+
+
+# --- login lockout ---------------------------------------------------------
+
+def test_lockout_opens_after_repeated_failures_and_blocks_further_attempts():
+    auth.reset_login_throttle()
+    try:
+        for _ in range(auth.LOGIN_MAX_FAILURES):
+            assert auth.login_attempt_allowed("10.0.0.1")[0] is True
+            auth.record_failed_login("10.0.0.1")
+        allowed, retry_after = auth.login_attempt_allowed("10.0.0.1")
+        assert allowed is False
+        assert 0 < retry_after <= auth.LOGIN_LOCKOUT_SECONDS + 1
+    finally:
+        auth.reset_login_throttle()
+
+
+def test_lockout_is_per_address_so_one_user_cannot_lock_out_another():
+    auth.reset_login_throttle()
+    try:
+        for _ in range(auth.LOGIN_MAX_FAILURES):
+            auth.record_failed_login("10.0.0.1")
+        assert auth.login_attempt_allowed("10.0.0.1")[0] is False
+        assert auth.login_attempt_allowed("10.0.0.2")[0] is True
+    finally:
+        auth.reset_login_throttle()
+
+
+def test_a_global_backstop_stops_address_rotation_from_bypassing_the_lockout():
+    auth.reset_login_throttle()
+    try:
+        # A fresh address every time never trips the per-address limit, so
+        # without the global bucket this loop would be an unlimited oracle.
+        for i in range(auth.LOGIN_MAX_FAILURES * 4):
+            auth.record_failed_login(f"10.0.1.{i}")
+        assert auth.login_attempt_allowed("10.0.99.99")[0] is False
+    finally:
+        auth.reset_login_throttle()
+
+
+def test_a_correct_password_clears_that_addresss_failures():
+    auth.reset_login_throttle()
+    try:
+        for _ in range(auth.LOGIN_MAX_FAILURES - 1):
+            auth.record_failed_login("10.0.0.1")
+        auth.clear_failed_logins("10.0.0.1")
+        for _ in range(auth.LOGIN_MAX_FAILURES - 1):
+            auth.record_failed_login("10.0.0.1")
+        assert auth.login_attempt_allowed("10.0.0.1")[0] is True
+    finally:
+        auth.reset_login_throttle()
+
+
+def test_failures_outside_the_window_do_not_count():
+    auth.reset_login_throttle()
+    try:
+        old = time.time() - auth.LOGIN_FAILURE_WINDOW - 1
+        for _ in range(auth.LOGIN_MAX_FAILURES):
+            auth.record_failed_login("10.0.0.1", now=old)
+        assert auth.login_attempt_allowed("10.0.0.1")[0] is True
+    finally:
+        auth.reset_login_throttle()
+
+
 # --- enable/disable -------------------------------------------------------
 
 def test_enabling_without_a_password_raises(auth_home):
@@ -96,37 +238,37 @@ def test_enabling_without_a_password_raises(auth_home):
 
 
 def test_enable_requires_a_password_then_is_enabled(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     auth.enable()
     assert auth.is_enabled() is True
 
 
 def test_setting_a_password_does_not_itself_enable_it(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     assert auth.is_enabled() is False
 
 
 def test_disable_keeps_the_password_hash(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     auth.enable()
     auth.disable()
     cfg = auth.load_config()
     assert cfg["enabled"] is False
     assert cfg["password_hash"] is not None
-    assert auth.verify_password("x123", cfg) is True
+    assert auth.verify_password("test-password-x123", cfg) is True
 
 
 # --- RELION_US_FORCE_AUTH (Run-RelionUS --auth / --no-auth) ---------------
 
 def test_force_auth_0_disables_even_if_persisted_enabled(auth_home, monkeypatch):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     auth.enable()
     monkeypatch.setenv("RELION_US_FORCE_AUTH", "0")
     assert auth.is_enabled() is False
 
 
 def test_force_auth_1_enables_if_a_password_exists(auth_home, monkeypatch):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     # Deliberately not calling enable() -- the whole point is the override.
     monkeypatch.setenv("RELION_US_FORCE_AUTH", "1")
     assert auth.is_enabled() is True
@@ -143,27 +285,27 @@ def test_force_auth_1_is_a_no_op_without_a_password(auth_home, monkeypatch):
 # --- sessions ---------------------------------------------------------------
 
 def test_fresh_session_token_is_valid(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     cfg = auth.load_config()
     token = auth.new_session_token(cfg)
     assert auth.session_is_valid(token, cfg) is True
 
 
 def test_no_token_is_invalid(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     assert auth.session_is_valid(None) is False
     assert auth.session_is_valid("") is False
 
 
 def test_malformed_token_is_invalid(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     cfg = auth.load_config()
     assert auth.session_is_valid("not.a.valid.token.shape.but.has.dots", cfg) is False
     assert auth.session_is_valid("nodothere", cfg) is False
 
 
 def test_tampered_token_is_invalid(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     cfg = auth.load_config()
     token = auth.new_session_token(cfg)
     expiry, sig = token.split(".", 1)
@@ -172,7 +314,7 @@ def test_tampered_token_is_invalid(auth_home):
 
 
 def test_expired_token_is_invalid(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     cfg = auth.load_config()
     expired_expiry = str(int(time.time()) - 10)
     sig = auth._sign(expired_expiry, cfg["session_secret"])
@@ -180,12 +322,12 @@ def test_expired_token_is_invalid(auth_home):
 
 
 def test_changing_password_invalidates_existing_sessions(auth_home):
-    auth.set_password("first")
+    auth.set_password("first-password")
     cfg1 = auth.load_config()
     token = auth.new_session_token(cfg1)
     assert auth.session_is_valid(token, auth.load_config()) is True
 
-    auth.set_password("second")
+    auth.set_password("second-password")
     cfg2 = auth.load_config()
     assert cfg2["session_secret"] != cfg1["session_secret"]
     assert auth.session_is_valid(token, cfg2) is False
@@ -233,7 +375,7 @@ def test_cli_enable_without_password_fails(auth_home, capsys):
 
 
 def test_cli_enable_then_disable(auth_home):
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     assert auth.cli_enable() == 0
     assert auth.is_enabled() is True
     assert auth.cli_disable() == 0
@@ -243,7 +385,7 @@ def test_cli_enable_then_disable(auth_home):
 def test_cli_is_enabled_reflects_whether_protection_is_currently_on(auth_home):
     # No config at all yet -- Run-RelionUS's startup prompt should still ask.
     assert auth.cli_is_enabled() == 1
-    auth.set_password("x123")
+    auth.set_password("test-password-x123")
     # A password alone doesn't count as "enabled" -- still asks.
     assert auth.cli_is_enabled() == 1
     auth.enable()

@@ -233,6 +233,57 @@ project_manager.remember_project(PROJECT_DIR)
 _AUTH_PUBLIC_PATHS = {"/login.html", "/api/auth/status", "/api/auth/login", "/favicon.ico"}
 
 
+def _is_secure_request(request: Request) -> bool:
+    """Whether this request actually arrived over TLS.
+
+    Checks X-Forwarded-Proto as well as the URL scheme because the supported
+    "real certificate" deployment is a TLS-terminating reverse proxy, where
+    the app itself only ever sees plain HTTP and request.url.scheme would say
+    "http" on a connection the browser made over HTTPS. Getting that wrong
+    means never setting Secure on the cookie in exactly the deployment that
+    most deserves it.
+
+    Trusting a client-settable header is only safe behind a proxy that
+    overwrites it, which is why this is used ONLY to *add* protections
+    (Secure, HSTS) and never to grant access: a forged header can make a
+    plain-HTTP client's own cookie stricter than necessary, which breaks
+    nothing an attacker benefits from.
+    """
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+
+
+# Cheap, always-on response headers. None of these replace TLS; they close
+# the ordinary browser-side gaps that remain once TLS is in place.
+_SECURITY_HEADERS = {
+    # This app renders server-side file paths and RELION's own output; stop
+    # the browser from second-guessing declared content types.
+    "X-Content-Type-Options": "nosniff",
+    # Nothing here is meant to be embedded elsewhere, and framing it is the
+    # setup for clickjacking a Run button.
+    "X-Frame-Options": "DENY",
+    # Don't leak project paths in the Referer when a link goes off-site.
+    "Referrer-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    # HSTS only over a connection that is ALREADY TLS, and only when opted
+    # into: it tells the browser to refuse plain HTTP to this host for the
+    # given period, which is exactly right in front of a real certificate and
+    # a self-inflicted lockout if you are still evaluating a self-signed one
+    # and want to drop back to http. RELION_US_HSTS=1 turns it on.
+    if os.environ.get("RELION_US_HSTS") == "1" and _is_secure_request(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     cfg = auth.load_config()
@@ -256,14 +307,36 @@ def auth_status():
 
 
 @app.post("/api/auth/login")
-async def auth_login(req: LoginRequest):
+async def auth_login(req: LoginRequest, request: Request):
+    # Lock out repeated failures BEFORE spending a KDF on the guess: scrypt
+    # costs ~0.12s and ~32MB, so an unthrottled login endpoint is both a
+    # guessing oracle and a cheap way to exhaust this machine's memory. The
+    # old fixed 0.5s sleep did neither job -- it rate-limited one connection
+    # while a script with 50 in parallel was unaffected.
+    client = request.client.host if request.client else "unknown"
+    allowed, retry_after = auth.login_attempt_allowed(client)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
     cfg = auth.load_config()
-    if not auth.verify_password(req.password, cfg):
-        # A small fixed delay on a wrong guess -- cheap insurance against a
-        # trivial guessing script, in keeping with this being a deterrent
-        # rather than a hardened login (see auth.py's module docstring).
-        await asyncio.sleep(0.5)
+    # Off the event loop: scrypt holds the GIL for its whole run, so hashing
+    # inline would stall every other request and websocket in the app for
+    # ~0.12s per login attempt.
+    ok = await asyncio.to_thread(auth.verify_password, req.password, cfg)
+    if not ok:
+        auth.record_failed_login(client)
         raise HTTPException(status_code=401, detail="Incorrect password")
+    auth.clear_failed_logins(client)
+    # A correct password is the only moment the plaintext exists to re-hash
+    # with, so an install still on the old PBKDF2 hash migrates here -- see
+    # auth.upgrade_hash_if_needed. Best-effort and off the event loop for
+    # the same reason as above.
+    if auth.needs_rehash(cfg):
+        await asyncio.to_thread(auth.upgrade_hash_if_needed, req.password, cfg)
+        cfg = auth.load_config()
     response = JSONResponse({"ok": True})
     response.set_cookie(
         auth.COOKIE_NAME,
@@ -271,14 +344,29 @@ async def auth_login(req: LoginRequest):
         max_age=auth.SESSION_LIFETIME_SECONDS,
         httponly=True,
         samesite="lax",
+        # Set only over TLS: a Secure cookie is never sent over plain HTTP,
+        # so hard-coding it would silently break every plain-HTTP install
+        # (the login would appear to succeed and every next request would
+        # 401). Over TLS it is what stops the session token from leaking if
+        # anything ever downgrades this host to http.
+        secure=_is_secure_request(request),
     )
     return response
 
 
 @app.post("/api/auth/logout")
-def auth_logout():
+def auth_logout(request: Request):
     response = JSONResponse({"ok": True})
-    response.delete_cookie(auth.COOKIE_NAME)
+    # delete_cookie must repeat the attributes the cookie was SET with:
+    # a browser treats path/samesite/secure as part of the cookie's identity,
+    # so a bare delete leaves an HTTPS-set Secure cookie in place and the
+    # user stays logged in after clicking Log out.
+    response.delete_cookie(
+        auth.COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=_is_secure_request(request),
+    )
     return response
 
 

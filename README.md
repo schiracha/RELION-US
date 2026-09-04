@@ -22,7 +22,7 @@ or an HPC login node and open it from any browser on the network — no Qt, no
 X11 forwarding, no display server.
 
 **Contents:** [Why](#why-this-exists) · [Install](#installing-it) ·
-[Running it](#running-it) · [Password](#password-protection) ·
+[Running it](#running-it) · [Security](#security-https-and-the-password) ·
 [Using it](#using-it) · [Job types](#what-jobs-are-available) ·
 [The draft command](#how-the-draft-command-is-built) ·
 [Working alongside RELION](#working-alongside-relions-own-gui) ·
@@ -134,8 +134,9 @@ http://localhost:8420/
 ```
 
 To reach it directly from another machine without a tunnel, opt in explicitly
-with `--host 0.0.0.0` — read [Password protection](#password-protection)
-first, because that's the point at which it starts to matter.
+with `--host 0.0.0.0` — read [Security](#security-https-and-the-password)
+first and turn on `--tls`, because that's the point at which it starts to
+matter.
 
 **You don't have to run it from inside a project directory.** If you `cd` into
 an existing RELION project first, it's picked up automatically; otherwise it
@@ -154,44 +155,129 @@ ln -s "$(pwd)/Run-RelionUS" ~/bin/Run-RelionUS
 sudo ln -s "$(pwd)/Run-RelionUS" /usr/local/bin/Run-RelionUS
 ```
 
-## Password protection
+## Security: HTTPS and the password
 
-RELION-US binds `127.0.0.1` by default, so it isn't reachable from another
-machine unless you opt in with `--host 0.0.0.0`. But even at the default bind,
-anyone who can already reach this machine's localhost — another user on a
-shared login node, say — can open jobs, run them, delete run history, and open
-a full interactive shell through the Terminal popup, with no login at all.
+Two separate things, and they protect against different attacks. **Turn on
+both** if this is reachable from any machine other than the one running it.
 
-A password is available as a basic deterrent against that. It is **not real
-security**: this app sets up no encryption, so the password crosses the
-network in plain text like everything else. If you need actual
-confidentiality, put it behind a reverse proxy (nginx/Caddy) with TLS
-termination, or reach it over the SSH tunnel above.
+### HTTPS (encrypts the connection)
+
+This is the one that matters most, and the one to set up first. Without it
+every byte crosses the network in the clear — the password, your project
+paths, job commands, and anything the Terminal popup shows. How well the
+password is hashed on disk is irrelevant to that: someone on the path reads
+the password itself, not the hash.
+
+```bash
+./Run-RelionUS --make-cert    # generate a certificate and key (once)
+./Run-RelionUS --tls          # serve HTTPS with it
+```
+
+`--make-cert` writes a 4096-bit key and a self-signed certificate into the
+config directory (key mode `0600`), records their paths so plain `--tls` finds
+them later, and prints the certificate's SHA-256 fingerprint. The certificate
+names this host plus `localhost`/`127.0.0.1`/`::1`, so it works whether you
+reach the app directly or through an SSH tunnel.
+
+**Your browser will warn once that the certificate isn't trusted.** That is
+expected and does not mean the connection is unencrypted — traffic is TLS 1.3
+either way. What a self-signed certificate can't do is *prove which server you
+reached*, which is the one thing a certificate authority sells. Two ways to
+close that gap:
+
+- Compare the fingerprint the browser shows against the SHA-256 that
+  `--make-cert` printed. If they match, there's no one in the middle. Do this
+  the first time and the exception is remembered.
+- Or use a real certificate — from your institution, or Let's Encrypt — and
+  skip the warning entirely:
+  ```bash
+  ./Run-RelionUS --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+  ```
+
+With a real CA-issued certificate you can also add `--hsts`, which tells
+browsers to refuse plain HTTP to this host for a year. Deliberately off by
+default and **not** recommended with a self-signed certificate: it's a
+one-way door that will lock you out of `http://` on that hostname while
+you're still evaluating.
+
+A TLS-terminating reverse proxy (nginx/Caddy) in front of the app also works
+and is a perfectly good choice if you already run one. The app reads
+`X-Forwarded-Proto`, so the session cookie is still marked `Secure` in that
+setup.
+
+**Alternative: an SSH tunnel.** If you'd rather not manage certificates at
+all, leave the default `--host 127.0.0.1` and tunnel — SSH provides the
+encryption, and this is the setup the [Running it](#running-it) section
+describes:
+
+```bash
+ssh -L 8420:localhost:8420 <host>
+```
+
+### The password (proves who is connecting)
+
+Encryption stops eavesdropping; it doesn't stop the person on the next
+workstation opening the page. Even at the localhost-only default bind, anyone
+who can already reach this machine's localhost — another user on a shared HPC
+login node — can open jobs, run them, delete history, and get an interactive
+shell through the Terminal popup, with no login at all.
 
 Every time `Run-RelionUS` starts at an interactive terminal without protection
 already on, it offers to set one up. Decline and it asks again next time
-rather than staying quiet forever. Otherwise it's all terminal flags, on the
-machine running the backend — deliberately with no in-browser way to turn it
-on or change it, since anyone who can already reach a shell there can read and
-edit project files directly anyway:
+rather than staying quiet forever. Otherwise it's terminal flags, on the
+machine running the backend — deliberately with no in-browser way to change
+it, since anyone who can already reach a shell there can edit project files
+directly anyway:
 
 ```bash
 ./Run-RelionUS --set-password   # set/change it (hidden input, twice to confirm)
 ./Run-RelionUS --enable-auth    # require it from now on, every run
 ./Run-RelionUS --disable-auth   # stop requiring it (password kept, not deleted)
-./Run-RelionUS --auth-status    # what's set, and whether it's currently on
+./Run-RelionUS --auth-status    # what's set, how it's hashed, and TLS state
 ./Run-RelionUS --auth           # force it ON for just this one run
 ./Run-RelionUS --no-auth        # force it OFF for just this one run
 ```
 
-Changing the password logs out every existing session at once, on every
-device — there's no separate "log everyone out" step. Sessions otherwise last
-30 days.
+How the password is protected:
 
-When it's on, anyone opening the app lands on a login page first, and the
-password gates every page, every API call, and both websockets (live job
+- **Stored as a salted [scrypt](https://datatracker.ietf.org/doc/html/rfc7914)
+  hash** (n=2¹⁵, r=8, p=1 — RFC 7914's own interactive-login parameters,
+  ~32 MB and ~0.12 s per guess), never in the clear. scrypt is *memory*-hard,
+  which is what makes bulk GPU or ASIC guessing expensive rather than merely
+  slow. It's stdlib, so this adds no dependency.
+- **Upgrades itself.** An instance set up before this used PBKDF2-SHA256; that
+  hash still verifies and is quietly re-hashed to scrypt the next time you log
+  in successfully. Nobody has to reset a password, and `--auth-status` shows
+  which one you're on.
+- **Locked out after repeated failures** — 5 wrong guesses from one address
+  within 5 minutes closes the door for 5 minutes, with a looser global
+  backstop so rotating source addresses doesn't walk around it. The hashing
+  cost only prices *offline* guessing against a stolen config file; 0.12 s per
+  try is no obstacle to a script hammering the login endpoint, so that needs
+  its own control.
+- **Minimum 8 characters**, and the handful of passwords every guessing script
+  tries first are refused. No composition rules — length is what actually
+  predicts guessing cost, and "must contain a symbol" mostly produces
+  `Password1!`, which is in every wordlist.
+- **Session cookie** is `HttpOnly`, `SameSite=lax`, and `Secure` whenever the
+  connection is HTTPS. It's a signed, stateless token, so a backend restart
+  doesn't log everyone out. Sessions last 30 days.
+- **Changing the password logs out every existing session at once**, on every
+  device — there's no separate "log everyone out" step.
+
+The password gates every page, every API call, and both websockets (live job
 output and the Terminal shell), not just the initial page load. A **🔒 Log
-out** item appears under **☰ Menu**.
+out** item appears under **☰ Menu** once you're in.
+
+### What this still isn't
+
+- **One shared password, not user accounts.** There's nothing here to audit
+  who did what — it only answers "did whoever's asking know the password".
+- Responses carry `X-Content-Type-Options`, `X-Frame-Options: DENY` and
+  `Referrer-Policy: same-origin`, and the app sets no CORS policy at all, so
+  another origin can't drive the API. But anyone who *is* logged in can run
+  arbitrary shell commands — that is the app's whole purpose. Treat access to
+  it as equivalent to shell access on that machine.
 
 ## Using it
 
@@ -302,7 +388,7 @@ irreversible one.
 A real interactive shell in the current project directory, in a popup. Handy
 for `module load`, a quick `ls`, or anything the UI doesn't cover. Note that
 this is exactly why the password option exists — see
-[above](#password-protection).
+[above](#security-https-and-the-password).
 
 ## What jobs are available
 

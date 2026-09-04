@@ -11,13 +11,19 @@ who does open it up that way, or who shares a login node where other users
 can already reach localhost, gets no login at all otherwise. This module is
 a deliberately simple deterrent against that, not a security system:
 
-- No TLS is set up by this app, so the password (like everything else this
-  app sends) crosses the network in plain text. That is an accepted
-  trade-off, not an oversight -- ask before adding HTTPS here rather than
-  assuming it's missing by mistake. If you need real confidentiality, put
-  this behind a reverse proxy (nginx/Caddy) with TLS termination, or tunnel
-  over SSH (`ssh -L 8420:localhost:8420 <host>`, already how the README
-  suggests reaching a remote/HPC-hosted instance).
+- **TLS is supported and is what makes this real.** `Run-RelionUS --tls`
+  serves HTTPS directly (uvicorn's own SSL support), and `--make-cert`
+  generates a self-signed certificate if you don't have a real one. Without
+  TLS the password -- like everything else this app sends -- crosses the
+  network in plain text, and no amount of hashing at rest helps, because the
+  attacker reads the password itself off the wire. Run this over HTTPS, an
+  SSH tunnel, or a TLS-terminating reverse proxy any time it is reachable
+  from another machine.
+- A self-signed certificate encrypts exactly as well as a CA-issued one; what
+  it does not do is prove *which* server you reached, so the browser shows a
+  one-time warning and an active man-in-the-middle is not ruled out on a
+  hostile network. Pin the fingerprint `--make-cert` prints, or use a real
+  certificate, if that matters where you are.
 - One shared password, not per-user accounts. There is nothing here to
   audit "who did what" -- it only answers "did whoever's asking know the
   password".
@@ -31,11 +37,23 @@ a deliberately simple deterrent against that, not a security system:
 
 Storage: `project_manager.config_root() / "auth.json"` -- per-*user*, like
 the recent-projects cache, not per-project (the whole point is protecting
-the app before it even shows a project). Only a salted hash is stored, never
-the password itself, using stdlib `hashlib.pbkdf2_hmac` rather than pulling
-in bcrypt/argon2 as a new dependency -- iteration count is tuned to still be
-a real cost per guess, appropriate for "deter casual access to a lab
-instrument," not for defending a password worth targeting with a GPU.
+the app before it even shows a project). The file is created 0600 and never
+holds the password itself, only a salted hash.
+
+Hashing is stdlib `hashlib.scrypt` (RFC 7914) at n=2**15, r=8, p=1 -- the
+parameters RFC 7914 itself gives for interactive logins, ~32 MB and ~0.12 s
+per guess on a normal machine. scrypt is *memory*-hard, which is the
+property that makes bulk GPU/ASIC guessing expensive rather than merely
+slow, and it needs no new dependency (no bcrypt, no argon2). Hashes written
+by the older PBKDF2-HMAC-SHA256 scheme are still verified, and are silently
+re-hashed to scrypt on the next successful login (see needs_rehash /
+upgrade_hash_if_needed), so an existing install upgrades itself without
+anyone having to reset a password.
+
+Online guessing is bounded separately, by a lockout (see
+login_attempt_allowed): the KDF cost only prices *offline* guessing against
+a stolen auth.json, and 0.12 s per try is no obstacle at all to a script
+hammering the login endpoint.
 
 Sessions: a signed, stateless cookie (HMAC-SHA256 over an expiry timestamp,
 keyed by a random secret stored alongside the password hash) rather than a
@@ -51,6 +69,8 @@ import hmac
 import json
 import os
 import secrets
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -63,9 +83,36 @@ COOKIE_NAME = "relion_us_session"
 SESSION_LIFETIME_SECONDS = 30 * 24 * 60 * 60  # 30 days -- a lab instrument
 # left logged in, not a banking site; re-entering a shared password every
 # day would just train people to leave the tab open forever instead.
-PBKDF2_ITERATIONS = 260_000  # ~OWASP's current floor for PBKDF2-SHA256
-MIN_PASSWORD_LENGTH = 4  # a deterrent floor, not a strength policy -- see
-# the module docstring for the threat model this is (and isn't) sized for.
+
+# --- Password hashing -------------------------------------------------------
+# scrypt (RFC 7914) at the RFC's own "interactive login" parameters. Memory-
+# hardness is the point: n=2**15/r=8 forces ~32 MB of working memory per
+# guess, which is what makes a GPU or ASIC farm expensive rather than just
+# a bit slower. OpenSSL refuses scrypt above a 32 MB default unless maxmem
+# is raised explicitly, so SCRYPT_MAXMEM is passed on every call -- without
+# it hashlib.scrypt raises "memory limit exceeded" at exactly these params.
+KDF_SCRYPT = "scrypt"
+KDF_PBKDF2 = "pbkdf2_sha256"
+CURRENT_KDF = KDF_SCRYPT
+SCRYPT_N = 2 ** 15
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 128 * SCRYPT_N * SCRYPT_R * 2   # 2x the requirement, headroom
+PBKDF2_ITERATIONS = 260_000  # legacy only -- still VERIFIED, never written
+MIN_PASSWORD_LENGTH = 8  # see _password_complaint for what else is refused
+
+# --- Online guessing --------------------------------------------------------
+# The KDF above prices OFFLINE guessing (someone who stole auth.json). It does
+# nothing against a script POSTing /api/auth/login in a loop, where 0.12s per
+# try is no obstacle. This lockout is that second, separate control.
+#
+# Kept in memory rather than persisted: a restart clears it, but restarting
+# the backend already requires a shell on this machine, and at that point the
+# attacker can read auth.json directly -- so persisting would add I/O on every
+# failed login to defend a case that is already lost.
+LOGIN_MAX_FAILURES = 5          # consecutive failures before the door shuts
+LOGIN_FAILURE_WINDOW = 300.0    # ...counted over this many seconds
+LOGIN_LOCKOUT_SECONDS = 300.0   # ...and then locked out for this long
 
 
 def config_path() -> Path:
@@ -73,7 +120,21 @@ def config_path() -> Path:
 
 
 def _default_config() -> dict[str, Any]:
-    return {"enabled": False, "password_hash": None, "salt": None, "session_secret": None}
+    return {
+        "enabled": False,
+        "password_hash": None,
+        "salt": None,
+        "session_secret": None,
+        # Which KDF produced password_hash. Absent in files written before
+        # scrypt existed here, which is exactly what makes them PBKDF2 --
+        # see load_config's own back-fill and needs_rehash.
+        "kdf": None,
+        # Paths to the TLS certificate/key --make-cert generated (or that
+        # --tls-cert/--tls-key were last pointed at), so `--tls` alone can
+        # find them on later runs. Not secret; the KEY FILE they name is.
+        "tls_cert": None,
+        "tls_key": None,
+    }
 
 
 def load_config() -> dict[str, Any]:
@@ -89,38 +150,116 @@ def load_config() -> dict[str, Any]:
         return _default_config()
     cfg = _default_config()
     cfg.update({k: data.get(k, v) for k, v in cfg.items()})
+    if cfg.get("password_hash") and not cfg.get("kdf"):
+        # Written before this module had more than one KDF, so it can only
+        # be the PBKDF2 one. Named explicitly here so every later check can
+        # just read cfg["kdf"] instead of re-deriving "no key means old".
+        cfg["kdf"] = KDF_PBKDF2
     return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> None:
+    """Write auth.json 0600-from-creation, atomically.
+
+    Two things this deliberately does NOT do, both of which the previous
+    version did:
+
+    * `write_text()` then `chmod(0600)` creates the file at the umask's
+      permissions first and tightens them a moment later. On a shared login
+      node -- the exact machine this feature exists for -- that is a real
+      window in which another user can read the session-signing secret, and
+      winning it needs nothing cleverer than a loop. `os.open(..., 0o600)`
+      passes the mode to the syscall that creates the file, so the file never
+      exists at wider permissions.
+    * Writing in place truncates the real file before the new content lands,
+      so a crash mid-write leaves an empty or half-written auth.json --
+      which load_config would read as "no password set", silently turning
+      protection off. Writing a temp file in the same directory and
+      os.replace()-ing it is atomic on POSIX: readers see either the old
+      file or the new one, never a partial.
+    """
     p = config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2))
-    # Holds a password hash and a session-signing secret -- neither is the
-    # plaintext password, but there's no reason to leave it group/world
-    # readable on a shared machine either. Best-effort: not every filesystem
-    # (e.g. some network mounts) honours chmod, and that's not worth failing
-    # startup over.
+    tmp = p.with_name(p.name + f".tmp{os.getpid()}")
+    payload = json.dumps(cfg, indent=2)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        # Never leave a stray .tmp holding the session secret behind.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
-def _hash_password(password: str, salt: bytes) -> str:
-    return hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
-    ).hex()
+def _hash_password(password: str, salt: bytes, kdf: str = CURRENT_KDF) -> str:
+    """One password + salt -> hex digest, under the named KDF.
+
+    `kdf` is a parameter rather than always CURRENT_KDF because verifying an
+    existing hash has to use whichever function actually produced it; only
+    set_password/upgrade_hash_if_needed get to choose."""
+    pw = password.encode("utf-8")
+    if kdf == KDF_SCRYPT:
+        return hashlib.scrypt(
+            pw, salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
+            maxmem=SCRYPT_MAXMEM, dklen=32,
+        ).hex()
+    if kdf == KDF_PBKDF2:
+        return hashlib.pbkdf2_hmac("sha256", pw, salt, PBKDF2_ITERATIONS).hex()
+    raise ValueError(f"unknown KDF: {kdf!r}")
+
+
+def _password_complaint(password: str) -> str | None:
+    """Why this password is refused, or None if it's acceptable.
+
+    Deliberately a floor, not a strength meter: length is the only property
+    that reliably predicts guessing cost, and composition rules ("must have a
+    digit and a symbol") mostly push people toward `Password1!` -- which is
+    in every cracking wordlist -- while doing nothing about length. So this
+    checks length, rejects the handful of passwords that are literally the
+    first thing anyone tries, and otherwise gets out of the way. Matches
+    NIST SP 800-63B's guidance (long minimum, screen against known-common
+    values, no composition rules, no forced rotation)."""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return f"Password must be at least {MIN_PASSWORD_LENGTH} characters."
+    if password.lower() in _COMMON_PASSWORDS:
+        return "That is one of the most commonly guessed passwords -- pick another."
+    if len(set(password)) < 3:
+        return "Password is too repetitive (fewer than 3 distinct characters)."
+    return None
+
+
+# Not a wordlist -- just the handful an unattended script tries in its first
+# second. A real wordlist belongs behind the lockout, not in this file.
+_COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password123", "12345678", "123456789",
+    "1234567890", "qwertyui", "qwerty123", "letmein1", "iloveyou",
+    "admin123", "welcome1", "abc12345", "relion", "relionus", "relion-us",
+    "cryosparc", "changeme", "P@ssw0rd".lower(),
+})
 
 
 def set_password(password: str) -> None:
     """Stores a new password (as a salted hash) and rotates the session
     secret, so every session anywhere -- including one an attacker who'd
-    guessed the *old* password is holding -- is invalidated at once."""
+    guessed the *old* password is holding -- is invalidated at once.
+
+    Raises ValueError if the password is refused (see _password_complaint);
+    callers surface the message rather than storing something unusable."""
+    complaint = _password_complaint(password)
+    if complaint:
+        raise ValueError(complaint)
     cfg = load_config()
     salt = secrets.token_bytes(16)
     cfg["salt"] = salt.hex()
-    cfg["password_hash"] = _hash_password(password, salt)
+    cfg["kdf"] = CURRENT_KDF
+    cfg["password_hash"] = _hash_password(password, salt, CURRENT_KDF)
     cfg["session_secret"] = secrets.token_hex(32)
     save_config(cfg)
 
@@ -129,9 +268,51 @@ def verify_password(password: str, cfg: dict[str, Any] | None = None) -> bool:
     cfg = cfg if cfg is not None else load_config()
     if not cfg.get("password_hash") or not cfg.get("salt"):
         return False
-    salt = bytes.fromhex(cfg["salt"])
-    candidate = _hash_password(password, salt)
+    try:
+        salt = bytes.fromhex(cfg["salt"])
+        candidate = _hash_password(password, salt, cfg.get("kdf") or KDF_PBKDF2)
+    except ValueError:
+        # Corrupt salt, or a kdf name this build doesn't know (a config
+        # written by a NEWER RELION-US). Refusing the login is the only safe
+        # answer -- never fall through to "no password set".
+        return False
     return hmac.compare_digest(candidate, cfg["password_hash"])
+
+
+def needs_rehash(cfg: dict[str, Any] | None = None) -> bool:
+    """Whether the stored hash was made by an older KDF than the current one."""
+    cfg = cfg if cfg is not None else load_config()
+    return bool(cfg.get("password_hash")) and cfg.get("kdf") != CURRENT_KDF
+
+
+def upgrade_hash_if_needed(password: str, cfg: dict[str, Any] | None = None) -> bool:
+    """Re-hash an old PBKDF2 password under scrypt, in place.
+
+    Called only from the login path, with a password that has JUST verified
+    -- which is the one moment the plaintext is available to re-hash with,
+    and so the only way to migrate without making everyone reset. Returns
+    whether anything was written. Deliberately does not rotate the session
+    secret the way set_password does: the password itself hasn't changed, so
+    logging every device out would be a confusing side effect of an upgrade
+    nobody asked for.
+
+    Best-effort: a read-only config directory means the next login just tries
+    again, which is strictly better than failing a login that was correct."""
+    cfg = cfg if cfg is not None else load_config()
+    if not needs_rehash(cfg):
+        return False
+    fresh = load_config()          # re-read: this runs after a slow KDF
+    if not needs_rehash(fresh) or not verify_password(password, fresh):
+        return False               # changed underneath us; leave it alone
+    salt = secrets.token_bytes(16)
+    fresh["salt"] = salt.hex()
+    fresh["kdf"] = CURRENT_KDF
+    fresh["password_hash"] = _hash_password(password, salt, CURRENT_KDF)
+    try:
+        save_config(fresh)
+    except OSError:
+        return False
+    return True
 
 
 def is_enabled(cfg: dict[str, Any] | None = None) -> bool:
@@ -149,6 +330,170 @@ def is_enabled(cfg: dict[str, Any] | None = None) -> bool:
             return False
         return has_password
     return bool(cfg.get("enabled")) and has_password
+
+
+# --- Online guessing: lockout ----------------------------------------------
+# See the LOGIN_* constants for why this exists alongside the KDF cost.
+
+_failed_logins: dict[str, list[float]] = {}
+
+
+def _prune(times: list[float], now: float) -> list[float]:
+    return [t for t in times if now - t < LOGIN_FAILURE_WINDOW]
+
+
+def login_attempt_allowed(key: str, now: float | None = None) -> tuple[bool, int]:
+    """(allowed, seconds_to_wait) for the next login attempt from `key`.
+
+    `key` is the client's address; the caller decides what that means. A
+    second, fixed "global" key is checked alongside it by
+    record_failed_login, so someone rotating source addresses still trips a
+    limit -- per-address alone would be bypassed by exactly that.
+
+    Read-only: call record_failed_login on an actual failure.
+    """
+    now = time.time() if now is None else now
+    for bucket in (key, _GLOBAL_KEY):
+        times = _prune(_failed_logins.get(bucket, []), now)
+        _failed_logins[bucket] = times
+        if len(times) >= _limit_for(bucket):
+            wait = int(LOGIN_LOCKOUT_SECONDS - (now - max(times))) + 1
+            if wait > 0:
+                return False, wait
+            # Lockout elapsed -- forget the failures rather than making the
+            # next single mistake re-lock instantly.
+            _failed_logins[bucket] = []
+    return True, 0
+
+
+_GLOBAL_KEY = "*"
+
+
+def _limit_for(bucket: str) -> int:
+    # The global bucket is deliberately looser than a single address's: it is
+    # a backstop against address rotation, and setting it equal would let one
+    # clumsy user lock out the whole instance.
+    return LOGIN_MAX_FAILURES * 4 if bucket == _GLOBAL_KEY else LOGIN_MAX_FAILURES
+
+
+def record_failed_login(key: str, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    for bucket in (key, _GLOBAL_KEY):
+        _failed_logins[bucket] = _prune(_failed_logins.get(bucket, []), now) + [now]
+    # Bound memory: without this, one address per request grows this dict
+    # forever. Anything already outside the window is dead weight.
+    if len(_failed_logins) > 4096:
+        for k in [k for k, v in _failed_logins.items() if not v and k != _GLOBAL_KEY]:
+            _failed_logins.pop(k, None)
+
+
+def clear_failed_logins(key: str) -> None:
+    """A correct password clears that address's failures -- but NOT the global
+    bucket, which would otherwise let an attacker who knows any one valid
+    login reset the backstop for everyone."""
+    _failed_logins.pop(key, None)
+
+
+def reset_login_throttle() -> None:
+    """Test hook -- module state is process-global, so a test that fills the
+    buckets would otherwise leak into whatever runs next."""
+    _failed_logins.clear()
+
+
+# --- TLS --------------------------------------------------------------------
+
+def tls_paths(cfg: dict[str, Any] | None = None) -> tuple[str | None, str | None]:
+    """The stored (cert, key) paths, or (None, None). Existence is checked by
+    the caller at start time, not here -- a path recorded months ago can be
+    gone, and the CLI wants to say so rather than silently serving plain
+    HTTP."""
+    cfg = cfg if cfg is not None else load_config()
+    return cfg.get("tls_cert"), cfg.get("tls_key")
+
+
+def set_tls_paths(cert: str | None, key: str | None) -> None:
+    cfg = load_config()
+    cfg["tls_cert"] = str(cert) if cert else None
+    cfg["tls_key"] = str(key) if key else None
+    save_config(cfg)
+
+
+def default_cert_paths() -> tuple[Path, Path]:
+    root = project_manager.config_root()
+    return root / "tls_cert.pem", root / "tls_key.pem"
+
+
+def generate_self_signed_cert(hostname: str, days: int = 825) -> tuple[Path, Path, str]:
+    """Generate a self-signed cert+key with `openssl`, returning
+    (cert, key, sha256_fingerprint).
+
+    Shells out to openssl rather than adding `cryptography` to
+    requirements.txt: openssl is already present anywhere RELION is (RELION
+    links it), and this app's whole install story is "no more dependencies
+    than necessary". Raises RuntimeError with openssl's own message if it
+    isn't there or fails.
+
+    825 days is the CA/Browser Forum's maximum for a publicly-trusted leaf;
+    matching it here means a browser that enforces that ceiling on ALL certs
+    (Safari does, for anything issued after 2019) won't reject this one for
+    lasting too long.
+
+    The SAN covers `hostname` plus localhost/127.0.0.1/::1, because the
+    normal way to reach this app is an SSH tunnel to localhost even when the
+    certificate names the real host. A cert without a matching SAN entry is
+    rejected outright by every current browser -- CN alone has not been
+    accepted for years.
+    """
+    cert_path, key_path = default_cert_paths()
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    san = f"DNS:{hostname},DNS:localhost,IP:127.0.0.1,IP:::1"
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:4096", "-nodes",
+        "-keyout", str(key_path), "-out", str(cert_path),
+        "-days", str(days), "-subj", f"/CN={hostname}",
+        "-addext", f"subjectAltName={san}",
+        "-addext", "basicConstraints=critical,CA:FALSE",
+        "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+        "-addext", "extendedKeyUsage=serverAuth",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "openssl is not on PATH, so a certificate can't be generated here. "
+            "Install it, or point --tls-cert/--tls-key at a certificate you "
+            "already have."
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("openssl did not finish within 120s.") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"openssl failed: {(proc.stderr or '').strip()}")
+    # The private key is the whole secret here -- openssl writes it at the
+    # umask, which on most systems is world-readable.
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+    return cert_path, key_path, cert_fingerprint(cert_path)
+
+
+def cert_fingerprint(cert_path: Path) -> str:
+    """SHA-256 fingerprint of a certificate, as openssl prints it.
+
+    This is what makes a self-signed cert genuinely checkable: compare what
+    the browser shows against this and a man-in-the-middle is ruled out,
+    which is the one guarantee a CA would otherwise be providing."""
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509", "-in", str(cert_path), "-noout",
+             "-fingerprint", "-sha256"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "(could not read fingerprint)"
+    if proc.returncode != 0:
+        return "(could not read fingerprint)"
+    return (proc.stdout or "").strip().split("=", 1)[-1].strip()
 
 
 def enable() -> None:
@@ -214,8 +559,9 @@ def _prompt_new_password() -> str | None:
     try:
         while True:
             pw1 = getpass.getpass("New RELION-US password: ")
-            if len(pw1) < MIN_PASSWORD_LENGTH:
-                print(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+            complaint = _password_complaint(pw1)
+            if complaint:
+                print(complaint)
                 continue
             pw2 = getpass.getpass("Confirm: ")
             if pw1 != pw2:
@@ -232,7 +578,13 @@ def cli_set_password() -> int:
     if pw is None:
         print("Cancelled -- password unchanged.")
         return 1
-    set_password(pw)
+    try:
+        set_password(pw)
+    except ValueError as exc:
+        # _prompt_new_password already applied the same rule, so reaching
+        # here means the two disagree -- report rather than crash.
+        print(str(exc))
+        return 1
     cfg = load_config()
     print(f"Password set. ({config_path()})")
     if not cfg.get("enabled"):
@@ -268,7 +620,61 @@ def cli_status() -> int:
     has_pw = bool(cfg.get("password_hash"))
     print(f"Config file:  {config_path()}")
     print(f"Password set: {'yes' if has_pw else 'no'}")
+    if has_pw:
+        kdf = cfg.get("kdf") or KDF_PBKDF2
+        note = "" if kdf == CURRENT_KDF else "  (upgrades to scrypt on next login)"
+        print(f"Hashed with:  {kdf}{note}")
     print(f"Protection:   {'ON' if is_enabled(cfg) else 'OFF'}")
+    cert, key = tls_paths(cfg)
+    if cert and key:
+        missing = [p for p in (cert, key) if not Path(p).exists()]
+        if missing:
+            print(f"TLS:          configured, but MISSING: {', '.join(missing)}")
+        else:
+            print(f"TLS:          {cert}")
+            print(f"  key:        {key}")
+            print(f"  SHA-256:    {cert_fingerprint(Path(cert))}")
+    else:
+        print("TLS:          not set up -- run `Run-RelionUS --make-cert` "
+              "(traffic is plain text without it)")
+    return 0
+
+
+def cli_make_cert(hostname: str | None = None) -> int:
+    host = hostname or socket.getfqdn() or "localhost"
+    print(f"Generating a self-signed certificate for {host} ...")
+    try:
+        cert, key, fingerprint = generate_self_signed_cert(host)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    set_tls_paths(str(cert), str(key))
+    print(f"  certificate: {cert}")
+    print(f"  private key: {key}  (0600)")
+    print(f"  SHA-256:     {fingerprint}")
+    print()
+    print("Start with HTTPS:  ./Run-RelionUS --tls")
+    print()
+    print("Your browser will warn once that this certificate isn't from a")
+    print("recognized authority -- that is expected, and it does NOT mean the")
+    print("connection is unencrypted. Check the fingerprint it shows matches")
+    print("the SHA-256 above, then accept it. To avoid the warning entirely,")
+    print("use a certificate from your institution or Let's Encrypt with")
+    print("--tls-cert/--tls-key instead.")
+    return 0
+
+
+def cli_tls_paths() -> int:
+    """Silent except for the paths -- Run-RelionUS reads these to build its
+    uvicorn command. Exit 1 (printing nothing) when TLS isn't configured, so
+    the caller can branch on the exit code alone."""
+    cert, key = tls_paths()
+    if not cert or not key:
+        return 1
+    if not Path(cert).exists() or not Path(key).exists():
+        return 1
+    print(cert)
+    print(key)
     return 0
 
 
@@ -288,10 +694,19 @@ def main(argv: list[str]) -> int:
         "enable": cli_enable,
         "disable": cli_disable,
         "is-enabled": cli_is_enabled,
+        "tls-paths": cli_tls_paths,
     }
+    # make-cert is the one verb taking an argument (the hostname to put in
+    # the certificate), so it's matched before the no-argument table.
+    if argv and argv[0] == "make-cert":
+        if len(argv) > 2:
+            print("Usage: make-cert [hostname]")
+            return 2
+        return cli_make_cert(argv[1] if len(argv) == 2 else None)
     if len(argv) != 1 or argv[0] not in commands:
         print(f"Usage: {Path(sys.argv[0]).name} "
-              "{status|set-password|enable|disable|is-enabled}")
+              "{status|set-password|enable|disable|is-enabled|tls-paths|"
+              "make-cert [hostname]}")
         return 2
     return commands[argv[0]]()
 
