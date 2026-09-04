@@ -1079,6 +1079,18 @@ html, body {
 .progress-section { margin-bottom: 14px; position: relative; }
 .progress-section h4 { margin: 0 0 4px; font-size: 11px; font-weight: 500; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
 .progress-chart { width: 100%; height: auto; display: block; overflow: visible; }
+/* Wraps the small line/bar/histogram charts (never the thumbnail grid or
+   the viewing-direction heatmap, which stay full-width) so they sit side
+   by side instead of each one stretching to the full popup width and
+   stacking into a long scroll -- see drawResolutionChart's own comment on
+   why W is shared across every chart function; minmax's lower bound is
+   what keeps a chart from getting too cramped to read on a narrow popup. */
+.progress-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 16px;
+}
+.progress-chart-grid .progress-section { margin-bottom: 10px; }
 .progress-empty { color: var(--text-dim); font-size: 12px; padding: 14px 2px; font-style: italic; }
 .progress-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .tip-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }

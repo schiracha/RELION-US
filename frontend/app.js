@@ -1874,10 +1874,12 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     const is3D = d.dimensionality === 3;
     const showOrientation = ORIENTATION_JOB_TYPES.has(internalName);
     host.innerHTML = `
-      <div class="progress-section"><h4>Resolution by iteration</h4><div data-role="chart-res"></div></div>
-      <div class="progress-section"><h4>Angular sampling accuracy by iteration</h4><div data-role="chart-acc-rot"></div></div>
-      <div class="progress-section"><h4>Translational sampling accuracy by iteration</h4><div data-role="chart-acc-trans"></div></div>
-      <div class="progress-section"><h4>Particles per class (iteration ${shown.iteration})</h4><div data-role="chart-dist"></div></div>
+      <div class="progress-chart-grid">
+        <div class="progress-section"><h4>Resolution by iteration</h4><div data-role="chart-res"></div></div>
+        <div class="progress-section"><h4>Angular sampling accuracy by iteration</h4><div data-role="chart-acc-rot"></div></div>
+        <div class="progress-section"><h4>Translational sampling accuracy by iteration</h4><div data-role="chart-acc-trans"></div></div>
+        <div class="progress-section"><h4>Particles per class (iteration ${shown.iteration})</h4><div data-role="chart-dist"></div></div>
+      </div>
       <div class="progress-section"><h4>${is3D ? "Class volumes (central slice)" : "Class averages"}</h4><div data-role="thumbs"></div></div>
       ${showOrientation ? `
       <div class="progress-section">
@@ -2041,10 +2043,12 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     if (statusEl) statusEl.textContent = `${d.count} micrograph${d.count === 1 ? "" : "s"}`;
 
     host.innerHTML = `
-      <div class="progress-section"><h4>Defocus by micrograph</h4><div data-role="chart-defocus"></div></div>
-      <div class="progress-section"><h4>Max resolution (CTF fit)</h4><div data-role="chart-maxres"></div></div>
-      <div class="progress-section"><h4>Astigmatism</h4><div data-role="chart-astig"></div></div>
-      <div class="progress-section"><h4>Figure of merit</h4><div data-role="chart-fom"></div></div>
+      <div class="progress-chart-grid">
+        <div class="progress-section"><h4>Defocus by micrograph</h4><div data-role="chart-defocus"></div></div>
+        <div class="progress-section"><h4>Max resolution (CTF fit)</h4><div data-role="chart-maxres"></div></div>
+        <div class="progress-section"><h4>Astigmatism</h4><div data-role="chart-astig"></div></div>
+        <div class="progress-section"><h4>Figure of merit</h4><div data-role="chart-fom"></div></div>
+      </div>
       <div class="progress-section"><h4 data-role="worst-title"></h4><div data-role="ctfqc-thumbs"></div></div>
     `;
     const mics = d.micrographs;
@@ -3661,29 +3665,32 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
     }
 
     chartsEl.innerHTML = `
-      <div class="progress-section">
-        <div class="analyze-chart-head">
-          <h4>Convergence</h4>
-          ${convergence.columns.length > 1 ? '<select data-role="an-convergence-col"></select>' : ""}
+      <div class="progress-chart-grid">
+        <div class="progress-section">
+          <div class="analyze-chart-head">
+            <h4>Convergence</h4>
+            ${convergence.columns.length > 1 ? '<select data-role="an-convergence-col"></select>' : ""}
+          </div>
+          <div data-role="an-convergence-chart"></div>
         </div>
-        <div data-role="an-convergence-chart"></div>
+        ${showDistribution ? `
+        <div class="progress-section">
+          <h4>Class distribution</h4>
+          <div data-role="an-distribution-chart"></div>
+        </div>` : ""}
+        ${show3d ? `
+        <div class="progress-section">
+          <div class="analyze-chart-head">
+            <h4>FSC${fsc.iteration != null ? ` (iteration ${fsc.iteration})` : ""}</h4>
+            <select data-role="an-fsc-metric">
+              <option value="fsc">Gold-standard FSC</option>
+              <option value="ssnr">SSNR</option>
+            </select>
+          </div>
+          <div data-role="an-fsc-chart"></div>
+        </div>` : ""}
       </div>
-      ${showDistribution ? `
-      <div class="progress-section">
-        <h4>Class distribution</h4>
-        <div data-role="an-distribution-chart"></div>
-      </div>` : ""}
       ${show3d ? `
-      <div class="progress-section">
-        <div class="analyze-chart-head">
-          <h4>FSC${fsc.iteration != null ? ` (iteration ${fsc.iteration})` : ""}</h4>
-          <select data-role="an-fsc-metric">
-            <option value="fsc">Gold-standard FSC</option>
-            <option value="ssnr">SSNR</option>
-          </select>
-        </div>
-        <div data-role="an-fsc-chart"></div>
-      </div>
       <div class="progress-section">
         <h4>Viewing-direction distribution</h4>
         <div class="progress-controls" style="border-bottom:none;margin-bottom:4px;padding:0 0 6px;">
@@ -5422,7 +5429,7 @@ function drawResolutionChart(host, iterations) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 180, ML = 46, MR = 58, MT = 22, MB = 26;
+  const W = 460, H = 140, ML = 46, MR = 58, MT = 22, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const its = iterations.map((p) => p.iteration);
   const xMin = Math.min(...its), xMax = Math.max(...its);
@@ -5534,7 +5541,7 @@ function drawAccuracyChart(host, iterations, { key, label, unit = "", color = "s
     return;
   }
   const c = themeColors();
-  const W = 460, H = 150, ML = 46, MR = 20, MT = 18, MB = 26;
+  const W = 460, H = 120, ML = 46, MR = 20, MT = 18, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const xMin = Math.min(...iterations.map((p) => p.iteration));
   const xMax = Math.max(...iterations.map((p) => p.iteration));
@@ -5609,7 +5616,7 @@ function drawClassDistributionChart(host, classes) {
     return;
   }
   const c = themeColors();
-  const W = 460, barH = 16, gap = 6, ML = 34, MR = 46, MT = 6;
+  const W = 460, barH = 13, gap = 4, ML = 34, MR = 46, MT = 6;
   const H = MT + classes.length * (barH + gap);
   const plotW = W - ML - MR;
   const maxV = Math.max(...classes.map((k) => k.distribution), 0.0001);
@@ -5648,9 +5655,36 @@ function drawClassDistributionChart(host, classes) {
 // looked up. Fixed saturation/lightness read reasonably against both
 // dark and light --panel (a filled area's contrast partner is the grid/
 // border around it, not the page background, unlike a thin line).
-function classColor(index, total) {
-  const hue = ((index - 1) / Math.max(total, 1)) * 360;
-  return `hsl(${hue.toFixed(0)}, 65%, 55%)`;
+// Okabe & Ito (2008)'s colorblind-safe qualitative palette -- chosen
+// specifically to stay distinguishable under the common forms of color
+// vision deficiency (deuteranopia/protanopia, ~8% of men), unlike an
+// arbitrary hue-wheel rotation (the previous approach here), which sweeps
+// straight through the red/orange/green region that collapses to
+// near-identical browns for exactly that group. Omits the original
+// palette's black (this app supports a dark theme, where black is
+// invisible against the chart background). A chart can have more classes
+// than the palette has entries (Class2D routinely has 20-50+), so beyond
+// one full pass through it this cycles with a lightness shift rather than
+// picking a new hue -- any new hue eventually re-enters the unsafe region,
+// while a lightness shift never does.
+const COLORBLIND_SAFE_PALETTE = [
+  "#e69f00", "#56b4e9", "#009e73", "#f0e442", "#0072b2", "#d55e00", "#cc79a7",
+];
+function _shadeHex(hex, percent) {
+  const n = parseInt(hex.slice(1), 16);
+  const clamp = (v) => Math.max(0, Math.min(255, v));
+  const r = clamp(((n >> 16) & 0xff) + Math.round(255 * (percent / 100)));
+  const g = clamp(((n >> 8) & 0xff) + Math.round(255 * (percent / 100)));
+  const b = clamp((n & 0xff) + Math.round(255 * (percent / 100)));
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+function classColor(index, _total) {
+  const n = COLORBLIND_SAFE_PALETTE.length;
+  const i = Math.max(0, index - 1);
+  const base = COLORBLIND_SAFE_PALETTE[i % n];
+  const pass = Math.floor(i / n);
+  if (pass === 0) return base;
+  return _shadeHex(base, pass % 2 === 1 ? -22 : 22);
 }
 
 // Stacked-area chart: each class's share of particles, across every
@@ -5671,7 +5705,7 @@ function drawClassDistributionSeriesChart(host, iterations, classes) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 200, ML = 40, MR = 20, MT = 18, MB = 26;
+  const W = 460, H = 160, ML = 40, MR = 20, MT = 18, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const n = iterations.length;
   const xMin = iterations[0], xMax = iterations[n - 1];
@@ -5778,7 +5812,7 @@ function drawClassFscChart(host, classes, { metric = "fsc" } = {}) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 200, ML = 40, MR = 20, MT = 18, MB = 30;
+  const W = 460, H = 160, ML = 40, MR = 20, MT = 18, MB = 30;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const n = Math.max(...series.map((s) => s.values.length));
   const yRef = metric === "fsc" ? 0.143 : 1.0; // gold-standard threshold vs. SSNR=1
@@ -5879,7 +5913,7 @@ function drawDefocusTrendChart(host, micrographs) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 180, ML = 54, MR = 20, MT = 22, MB = 26;
+  const W = 460, H = 140, ML = 54, MR = 20, MT = 22, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const n = micrographs.length;
   const vals = [];
@@ -5970,7 +6004,7 @@ function drawHistogramChart(host, values, { unit = "", color = "s1" } = {}) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 170, ML = 34, MR = 12, MT = 10, MB = 28;
+  const W = 460, H = 130, ML = 34, MR = 12, MT = 10, MB = 28;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   let vMin = Math.min(...nums), vMax = Math.max(...nums);
   if (vMax - vMin < 1e-9) { vMin -= 0.5; vMax += 0.5; }
@@ -6043,7 +6077,7 @@ function drawOrientationHeatmap(host, data) {
     return;
   }
   const c = themeColors();
-  const W = 460, H = 240, ML = 54, MR = 12, MT = 10, MB = 30;
+  const W = 460, H = 200, ML = 54, MR = 12, MT = 10, MB = 30;
   const plotW = W - ML - MR, plotH = H - MT - MB;
   const cellW = plotW / nRot, cellH = plotH / nTilt;
 
