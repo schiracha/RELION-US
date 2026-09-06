@@ -39,7 +39,9 @@ RELION's own GUI is a compiled Qt5/C++ application that assembles each job's
 command internally and hands it straight to the shell. RELION-US puts that
 command in front of you first and lets you edit it: whatever is in the command
 box when you click **Run** is executed exactly as written, nothing added or
-removed. The draft that pre-fills it is built from the standard inputs (see
+removed. More importantly, you can run that job from anywhere, from any machine,
+without X11 forwarding, if you port forward and have a browser, you can run it.
+The draft that pre-fills it is built from the standard inputs (see
 [How the draft command is built](#how-the-draft-command-is-built)) — always
 check it, and the job's real RELION C++ source is one tab away for
 cross-referencing.
@@ -59,8 +61,7 @@ programs).
 Python 3.10 or newer, and `backend/requirements.txt` installed into it.
 There's no install script — build the environment with whatever Python tooling
 you already use, so this stays portable across distributions rather than
-assuming one package manager. A plain venv is the least assumption-laden
-option:
+assuming one package manager. A plain venv works great:
 
 ```bash
 python3 -m venv relion-us
