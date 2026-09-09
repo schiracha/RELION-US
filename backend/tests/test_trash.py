@@ -387,12 +387,26 @@ def test_job_number_reuse_after_trashing_makes_a_later_restore_collide(tmp_path)
 # for why keying this by RELION's own job_number is safe.
 # ---------------------------------------------------------------------------
 
-_FAKE_PIPELINE_STAR = """
+
+def _make_pipeline_synced_run(tmp_path, job_number=5):
+    """job_number defaults to 5, an arbitrary mid-project value -- pass 0 to
+    cover RELION's own job numbering, which starts at 0, not 1 (a fresh
+    project's first synced job really is job_number 0). A bare `if
+    job_number:`/`.get("job_number")` truthy check anywhere in this path
+    silently treats that job as unregistered, which is exactly the bug the
+    job000 tests below guard against."""
+    project_manager.init_new_project(tmp_path)
+    manager = JobRunManager(tmp_path)
+    slug = f"job{job_number:03d}"
+    job_dir = tmp_path / "CtfFind" / slug
+    job_dir.mkdir(parents=True)
+    (job_dir / "micrographs_ctf.star").write_text("dummy output\n")
+    pipeline_star = f"""
 # version 30001
 
 data_pipeline_general
 
-_rlnPipeLineJobCounter                      5
+_rlnPipeLineJobCounter                      {job_number}
 
 
 # version 30001
@@ -404,22 +418,14 @@ _rlnPipeLineProcessName #1
 _rlnPipeLineProcessAlias #2
 _rlnPipeLineProcessTypeLabel #3
 _rlnPipeLineProcessStatusLabel #4
-CtfFind/job005/          None            relion.ctffind.ctffind4  Succeeded
+CtfFind/{slug}/          None            relion.ctffind.ctffind4  Succeeded
 """
-
-
-def _make_pipeline_synced_run(tmp_path):
-    project_manager.init_new_project(tmp_path)
-    manager = JobRunManager(tmp_path)
-    job_dir = tmp_path / "CtfFind" / "job005"
-    job_dir.mkdir(parents=True)
-    (job_dir / "micrographs_ctf.star").write_text("dummy output\n")
-    (tmp_path / "default_pipeline.star").write_text(_FAKE_PIPELINE_STAR)
+    (tmp_path / "default_pipeline.star").write_text(pipeline_star)
 
     run = JobRun(
         run_id="abc123", internal_name="CtfFind", display_name="CTF Estimation",
         command="true", cwd=str(job_dir), project_dir=str(tmp_path),
-        job_number=5, status=STATUS_COMPLETED, pipeline_registered=True,
+        job_number=job_number, status=STATUS_COMPLETED, pipeline_registered=True,
     )
     manager.runs[run.run_id] = run
     project_manager.save_history(tmp_path, [run.to_summary()])
@@ -476,6 +482,52 @@ def test_restore_from_trash_unhides_the_relion_pipeline_row(tmp_path):
 
     assert restored is not None
     assert 5 not in project_manager.load_relion_deleted_job_numbers(tmp_path)
+    assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
+
+
+# ---------------------------------------------------------------------------
+# job_number 0 specifically: RELION's own `_rlnPipeLineJobCounter` starts at
+# 0, so a fresh project's FIRST synced job is genuinely job_number 0 -- a
+# real, confirmed bug (not hypothetical): every `if job_number:`/
+# `.get("job_number")` truthy check in this dedup path treated that job as
+# if it had no number at all, so its own already-registered slot never made
+# it into own_job_numbers, and its RELION-pipeline placeholder was never
+# recognized as a duplicate -- a fresh project's first job always showed up
+# TWICE in the Command Center (once as this app's own entry, once as a
+# read-only "source: relion" ghost row), even though the native RELION GUI
+# was never opened. Fixed by switching every one of those checks to
+# `is not None`. These three mirror the job005 tests above exactly, just at
+# job_number 0, so a regression here fails loudly instead of only showing up
+# on someone's very first real job.
+# ---------------------------------------------------------------------------
+
+
+def test_list_runs_dedupes_a_pipeline_synced_job_numbered_zero(tmp_path):
+    manager, _run = _make_pipeline_synced_run(tmp_path, job_number=0)
+    assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
+
+
+def test_delete_run_hides_the_orphaned_relion_pipeline_ghost_row_for_job_zero(tmp_path):
+    manager, run = _make_pipeline_synced_run(tmp_path, job_number=0)
+    assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
+
+    ok, reason = manager.delete_run(run.run_id, remove_files=False)
+    assert ok is True
+
+    assert manager.list_runs() == []
+    assert 0 in project_manager.load_relion_deleted_job_numbers(tmp_path)
+
+
+def test_restore_from_trash_unhides_the_relion_pipeline_row_for_job_zero(tmp_path):
+    manager, run = _make_pipeline_synced_run(tmp_path, job_number=0)
+    manager.delete_run(run.run_id, remove_files=True)
+    assert 0 in project_manager.load_relion_deleted_job_numbers(tmp_path)
+
+    trash_id = project_manager.list_trash(tmp_path)[0]["trash_id"]
+    restored = manager.restore_from_trash(trash_id)
+
+    assert restored is not None
+    assert 0 not in project_manager.load_relion_deleted_job_numbers(tmp_path)
     assert [r["run_id"] for r in manager.list_runs()] == ["abc123"]
 
 

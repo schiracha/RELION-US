@@ -438,12 +438,18 @@ class JobRunManager:
             run_id = entry.get("run_id")
             if run_id:
                 own_entries[run_id] = entry
-                if entry.get("job_number"):
+                # `is not None`, not a bare truthy check: RELION's own job
+                # counter starts at 0, so a synced project's first job is
+                # genuinely job_number 0 -- `if entry.get("job_number"):`
+                # silently dropped it out of this set, leaving that one
+                # job's real, already-registered slot looking untracked and
+                # its RELION-pipeline placeholder unfiltered below.
+                if entry.get("job_number") is not None:
                     own_job_numbers.add(entry["job_number"])
         for run in self.runs.values():
             if run.project_dir == target:
                 own_entries[run.run_id] = run.to_summary()
-                if run.job_number:
+                if run.job_number is not None:
                     own_job_numbers.add(run.job_number)
         # Jobs RELION itself ran, from its own default_pipeline.star -- but
         # ONLY for job numbers this app has no record of. Once two-way sync
@@ -547,7 +553,7 @@ class JobRunManager:
             # before the route ever matches. RELION's job number is unique
             # across the project (one counter for every job type), which makes
             # it the natural identifier.
-            slug = (f"job{proc['job_number']:03d}" if proc["job_number"]
+            slug = (f"job{proc['job_number']:03d}" if proc["job_number"] is not None
                     else name.replace("/", "-"))
             status = project_manager.RELION_STATUS_MAP.get(proc["status_label"], "completed")
             started_at = ended_at = None
@@ -2515,7 +2521,7 @@ class JobRunManager:
             # uncaught into an unhandled 500 (found in code review).
             note = " (its files were already moved to Trash and remain recoverable there)" if remove_files else ""
             return False, f"Could not update job history: {exc}{note}"
-        if summary.get("pipeline_registered") and summary.get("job_number"):
+        if summary.get("pipeline_registered") and summary.get("job_number") is not None:
             # This app's own record is gone, but relion_pipeliner has no CLI
             # verb to remove the matching process from RELION's own
             # default_pipeline.star (see project_manager.
@@ -2566,7 +2572,7 @@ class JobRunManager:
         project_manager.save_history(
             self.project_dir, [h for h in history if h.get("run_id") != run.run_id] + [run.to_summary()]
         )
-        if run.pipeline_registered and run.job_number:
+        if run.pipeline_registered and run.job_number is not None:
             # Undo delete_run's own hide -- own_job_numbers in list_runs
             # already excludes RELION's duplicate for a tracked job number,
             # this just stops the hidden set accumulating restored jobs.
