@@ -21,7 +21,48 @@ It's a normal web page, so it's portable: run the backend on your workstation
 or an HPC login node and open it from any browser on the network — no Qt, no
 X11 forwarding, no display server.
 
-**Contents:** [Why](#why-this-exists) · [Install](#installing-it) ·
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**Command Center** — every job you've run, as a sortable table or a
+lineage-linked timeline
+<a href="docs/screenshots/dashboard.png"><img src="docs/screenshots/dashboard.png" width="420"></a>
+
+</td>
+<td width="50%">
+
+**Job popup** — every option RELION's own GUI shows, plus the editable
+command box you approve before anything runs
+<a href="docs/screenshots/job-popup.png"><img src="docs/screenshots/job-popup.png" width="420"></a>
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Live Progress tab** — resolution, sampling accuracy, and class-distribution
+charts, updated while the job runs
+<a href="docs/screenshots/progress-tab.png"><img src="docs/screenshots/progress-tab.png" width="420"></a>
+
+</td>
+<td width="50%">
+
+**Tomogram / particle-pick viewer** — three linked orthogonal views with
+real pick overlays
+<a href="docs/screenshots/tomogram-viewer.png"><img src="docs/screenshots/tomogram-viewer.png" width="420"></a>
+
+</td>
+</tr>
+</table>
+
+**Interactive class selection** (the Select job's in-browser replacement for
+`relion_display --gui` — see [What jobs are available](#what-jobs-are-available)):
+<a href="docs/screenshots/select-classes.png"><img src="docs/screenshots/select-classes.png" width="860"></a>
+
+**Contents:** [Screenshots](#screenshots) · [Why](#why-this-exists) · [Install](#installing-it) ·
 [Running it](#running-it) · [Security](#security-https-and-the-password) ·
 [Using it](#using-it) · [Job types](#what-jobs-are-available) ·
 [The draft command](#how-the-draft-command-is-built) ·
