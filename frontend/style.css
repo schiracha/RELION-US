@@ -129,8 +129,16 @@ html, body {
 .menu-item.hidden { display: none; }
 .menu-divider { height: 1px; background: var(--border); margin: 4px 2px; }
 .menu-submenu { position: relative; }
+/* Opens to the LEFT, not the right (issue #76): .menu-panel itself is
+   always right-pinned to the top bar's own right edge (#menuWrap's
+   margin-left:auto + .menu-panel's right:0 above), so a submenu that
+   opened further right (the original `left: 100%`) was guaranteed to run
+   off the viewport every time, not just on a narrow window -- there is
+   never space to its right. The space it needs is already reserved to
+   its left, the same side .menu-panel itself hangs into from the Menu
+   button. */
 .menu-submenu-panel {
-  position: absolute; left: 100%; top: 0; margin-left: 4px;
+  position: absolute; right: 100%; top: 0; margin-right: 4px;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 6px; min-width: 160px; padding: 4px; z-index: 10002;
 }
@@ -1013,7 +1021,12 @@ html, body {
 .xt-image-row.xt-excluded { opacity: 0.45; }
 .xt-image-row.xt-excluded .xt-angle { text-decoration: line-through; }
 .xt-thumb {
-  width: 64px; height: 64px; object-fit: cover; flex-shrink: 0;
+  /* Set from JS (openExcludeTiltsEditor's size control, issue #75 -- the
+     default 64px is too small to judge ice contamination/thickness by
+     eye) as a CSS variable on the popup root, so every row's thumbnail
+     resizes together without a re-render. */
+  width: var(--xt-thumb-size, 64px); height: var(--xt-thumb-size, 64px);
+  object-fit: cover; flex-shrink: 0;
   background: #000; border-radius: 3px;
 }
 .xt-thumb-missing { display: inline-block; }

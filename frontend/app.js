@@ -5040,6 +5040,14 @@ document.getElementById("visualizeBtn").addEventListener("click", () => openVisu
 // "always re-derive from the original input" contract (see its module
 // docstring), so there's no accumulation across saves and re-checking a
 // previously-excluded image genuinely re-includes it.
+//
+// Thumbnail size (issue #75 -- the fixed 64px thumbnail was too small to
+// judge ice contamination/thickness by eye) is a remembered preference,
+// same storage pattern as CC_VIEW_KEY etc. above: a UI choice, not job
+// data, so it survives reloads but starts every NEW user at the original
+// 64px default rather than forcing a size on them.
+const XT_THUMB_SIZE_KEY = "relion_us_xt_thumb_size";
+
 async function openExcludeTiltsEditor({ runId, sourcePath }) {
   const body = document.createElement("div");
   body.className = "xt-popup";
@@ -5051,6 +5059,15 @@ async function openExcludeTiltsEditor({ runId, sourcePath }) {
       <div class="xt-toolbar">
         <span class="xt-series-title" data-role="xt-series-title">Select a tilt series</span>
         <div class="xt-toolbar-actions">
+          <label class="progress-select" title="Enlarge thumbnails to check for ice contamination, uneven ice thickness, or other image-quality issues before excluding an image">
+            Size
+            <select data-role="xt-thumb-size">
+              <option value="64">Small</option>
+              <option value="128">Medium</option>
+              <option value="240">Large</option>
+              <option value="400">X-Large</option>
+            </select>
+          </label>
           <button type="button" class="btn btn-sm" data-role="xt-select-all">Include all</button>
           <button type="button" class="btn btn-sm" data-role="xt-select-none">Exclude all</button>
           <button type="button" class="btn primary btn-sm" data-role="xt-save">💾 Save exclusions</button>
@@ -5068,10 +5085,33 @@ async function openExcludeTiltsEditor({ runId, sourcePath }) {
   const seriesTitleEl = q('[data-role="xt-series-title"]');
   const statusEl = q('[data-role="xt-status"]');
   const imageListEl = q('[data-role="xt-image-list"]');
+  const thumbSizeSelect = q('[data-role="xt-thumb-size"]');
 
   let seriesList = [];   // [{name, n_images, n_excluded}]
   let currentName = null;
   let currentImages = []; // last-loaded images for currentName
+  let thumbSize = 64;     // px -- see applyThumbSize below
+
+  // Fetches at 2x the displayed size so a scaled-up thumbnail stays sharp
+  // rather than just stretching the original 64px render.
+  function maxDimFor(size) {
+    return size * 2;
+  }
+
+  function applyThumbSize(size) {
+    thumbSize = size;
+    body.style.setProperty("--xt-thumb-size", `${size}px`);
+    try { localStorage.setItem(XT_THUMB_SIZE_KEY, String(size)); } catch (e) { /* noop */ }
+  }
+
+  let storedThumbSize = NaN;
+  try { storedThumbSize = parseInt(localStorage.getItem(XT_THUMB_SIZE_KEY), 10); } catch (e) { /* noop */ }
+  applyThumbSize(Number.isFinite(storedThumbSize) ? storedThumbSize : thumbSize);
+  thumbSizeSelect.value = String(thumbSize);
+  thumbSizeSelect.addEventListener("change", () => {
+    applyThumbSize(Number(thumbSizeSelect.value));
+    renderImages();
+  });
 
   function renderSeriesList() {
     seriesListEl.innerHTML = seriesList.map((s) => `
@@ -5100,7 +5140,7 @@ async function openExcludeTiltsEditor({ runId, sourcePath }) {
       <label class="xt-image-row ${img.excluded ? "xt-excluded" : ""}" data-index="${i}">
         <input type="checkbox" data-role="xt-check" ${img.excluded ? "" : "checked"} />
         ${img.mic_name
-          ? `<img class="xt-thumb" loading="lazy" alt="" src="/api/viz/slice?mrc_path=${encodeURIComponent(img.mic_name)}&axis=z&index=0&max_dim=160" />`
+          ? `<img class="xt-thumb" loading="lazy" alt="" src="/api/viz/slice?mrc_path=${encodeURIComponent(img.mic_name)}&axis=z&index=0&max_dim=${maxDimFor(thumbSize)}" />`
           : '<span class="xt-thumb xt-thumb-missing"></span>'}
         <span class="xt-image-meta">
           <span class="xt-angle">${img.tilt_angle === null || img.tilt_angle === undefined ? "?" : img.tilt_angle.toFixed(1)}°</span>
