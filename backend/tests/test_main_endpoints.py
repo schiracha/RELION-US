@@ -595,6 +595,45 @@ def test_terminal_websocket_refuses_connection_when_auth_enabled_without_session
 
 
 # ---------------------------------------------------------------------------
+# Manual Picking (Manualpick) -- just the issue #77 restart-reachability
+# regression; full CRUD coverage of /api/manual-pick/* lives at the module
+# level in test_manual_pick.py (list_spa_micrographs/save_spa_picks/etc.
+# called directly, no HTTP layer).
+# ---------------------------------------------------------------------------
+
+
+def test_manual_pick_reachable_after_a_simulated_backend_restart(picker_client):
+    """Issue #77: _manual_pick_job_dir used to call run_manager.get(run_id),
+    which only checks self.runs (in-memory, this backend process only) --
+    so a picking session started in an EARLIER backend session 404'd the
+    instant the backend restarted, even though the job's own directory
+    (holding its already-saved picks) is sitting right there in persisted
+    history. Dropping the run from self.runs here (never touching
+    run_history.json, which _persist already wrote when the run started)
+    is exactly what a real restart does to this process's state."""
+    fn_in, names = _seed_micrographs_project(main.run_manager.project_dir, n=1)
+    resp = picker_client.post("/api/runs", json={
+        "internal_name": "Manualpick",
+        "field_values": {"fn_in": fn_in},
+    })
+    assert resp.status_code == 200, resp.text
+    run_id = resp.json()["run_id"]
+    deadline = time.monotonic() + 5.0
+    last = None
+    while time.monotonic() < deadline:
+        last = picker_client.get(f"/api/runs/{run_id}").json()
+        if last.get("status") in ("running", "failed") and last.get("stdout_lines"):
+            break
+        time.sleep(0.02)
+    assert last["status"] == "running", last
+    del main.run_manager.runs[run_id]
+
+    load = picker_client.get(f"/api/manual-pick/{run_id}/spa/load", params={"mic_path": names[0]})
+    assert load.status_code == 200, load.text
+    assert load.json() == {"picks": []}
+
+
+# ---------------------------------------------------------------------------
 # Exclude Tilt Images (TomoExcludeTiltImages) -- HTTP-level coverage for the
 # /api/exclude-tilts/* routes the reviewer popup actually calls. Module-level
 # STAR-writing coverage lives in test_exclude_tilts.py; this only exercises
@@ -690,6 +729,23 @@ def test_exclude_tilts_images_unknown_tomogram_is_400(picker_client):
 def test_exclude_tilts_unknown_run_id_404s(client):
     resp = client.get("/api/exclude-tilts/no-such-run/series")
     assert resp.status_code == 404
+
+
+def test_exclude_tilts_reachable_after_a_simulated_backend_restart(picker_client):
+    """Issue #77: _exclude_tilts_job used to call run_manager.get(run_id),
+    which only checks self.runs (in-memory, this backend process only) --
+    so a review session started in an EARLIER backend session 404'd the
+    instant the backend restarted, even though the job's own directory and
+    in_tiltseries are sitting right there in persisted history. Dropping
+    the run from self.runs here (never touching run_history.json, which
+    _persist already wrote when the run started) is exactly what a real
+    restart does to this process's state."""
+    run_id = _start_exclude_tilts_run(picker_client)
+    del main.run_manager.runs[run_id]
+
+    series = picker_client.get(f"/api/exclude-tilts/{run_id}/series")
+    assert series.status_code == 200, series.text
+    assert series.json() == {"series": [{"name": "TS_01", "n_images": 2, "n_excluded": 0}]}
 
 
 def test_exclude_tilts_done_button_completes_it_like_a_picker_job(picker_client):
@@ -853,6 +909,20 @@ def test_select_save_writes_particles_and_class_averages(picker_client):
 def test_select_classes_unknown_run_id_404s(client):
     resp = client.get("/api/select/no-such-run/classes")
     assert resp.status_code == 404
+
+
+def test_select_classes_reachable_after_a_simulated_backend_restart(picker_client):
+    """Issue #77 -- same fix as exclude-tilts' own restart test above,
+    for _select_job. Dropping the run from self.runs (never touching
+    run_history.json) is exactly what a real backend restart does to this
+    process's state."""
+    fn_model = _seed_class2d_project(main.run_manager.project_dir, nc=3, n_particles=6)
+    run_id = _start_select_run(picker_client, {"fn_model": fn_model})
+    del main.run_manager.runs[run_id]
+
+    resp = picker_client.get(f"/api/select/{run_id}/classes")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == "classes"
 
 
 def test_select_classes_missing_fn_model_is_400(picker_client):

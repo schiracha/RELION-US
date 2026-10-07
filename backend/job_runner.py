@@ -2621,64 +2621,78 @@ class JobRunManager:
     # happens" principle this app already applies to the command box,
     # applied to deletion instead of execution.
 
-    def run_internal_name(self, run_id: str) -> Optional[str]:
-        """This run's job type, whether it's live in memory (this session) or
-        only in persisted history (a previous session).
+    def _resolve_run_record(self, run_id: str) -> Optional[dict]:
+        """The full record for ANY run_id -- whether it's live in self.runs
+        (this session), a job RELION itself ran (only in
+        default_pipeline.star), or only in persisted history (a previous
+        session this app started it in) -- as one dict with consistent key
+        names across all three sources (run_id/internal_name/cwd/
+        field_values/... -- JobRun.to_summary(), relion_run_detail(), and a
+        raw persisted-history entry all agree on these). The shared lookup
+        run_internal_name/_resolve_run_cwd/run_field_values each build on,
+        so a caller needing one more field off a run never has to add a
+        fourth near-identical linear scan.
 
-        Deliberately NOT list_runs(): four endpoints needed exactly this one
-        string and each reached for list_runs() to get it, which merges the
-        persisted history with a full parse of RELION's own
-        default_pipeline.star and then resolves every job directory on disk to
-        attach input lineage -- all discarded here but the one field. The
-        Progress tab polls one of those endpoints every few seconds by default,
-        so a job reopened from an earlier session paid that whole merge on a
-        timer. Reading the history directly costs one JSON load and no pipeline
-        parse at all.
+        Deliberately NOT list_runs(): several endpoints needed exactly one
+        field off a run and each reached for list_runs() to get it, which
+        merges the persisted history with a full parse of RELION's own
+        default_pipeline.star and then resolves every job directory on disk
+        to attach input lineage -- all discarded here but the one field.
+        The Progress tab polls one of those endpoints every few seconds by
+        default, so a job reopened from an earlier session paid that whole
+        merge on a timer. Reading the history directly costs one JSON load
+        and no pipeline parse at all.
 
-        A job RELION itself ran exists in NEITHER of those two places -- it
-        only exists in default_pipeline.star -- so it still needs the pipeline
-        read, same as _resolve_run_cwd below. That branch is gated on the
-        run_id's own "relion:" prefix, so an ordinary run never pays for it:
-        the point of this method is that the common case is cheap, not that
-        the pipeline is never read. Getting this wrong is not subtle -- an
+        A job RELION itself ran exists in NEITHER self.runs nor persisted
+        history -- it only exists in default_pipeline.star -- so it still
+        needs the pipeline read. That branch is gated on the run_id's own
+        "relion:" prefix, so an ordinary run never pays for it: the point
+        of this method is that the common case is cheap, not that the
+        pipeline is never read. Getting this wrong is not subtle -- an
         imported Class2D silently loses its Progress tab, which is exactly
-        what test_legacy_project.py asserts against.
+        what test_legacy_project.py asserts against (and, for the picker-
+        style jobs this method now also serves, issue #77: Exclude Tilt
+        Images/Manual Picking/Select Classes becoming permanently
+        unreachable -- 404 Unknown run_id -- the moment the backend that
+        started them restarts, even though the job's own directory and
+        field_values are sitting right there in persisted history).
         """
         run = self.get(run_id)
         if run is not None:
-            return run.internal_name
+            return run.to_summary()
         if self.is_relion_run(run_id):
-            detail = self.relion_run_detail(run_id)
-            return detail.get("internal_name") if detail else None
-        entry = next(
-            (h for h in project_manager.load_history(self.project_dir)
-             if h.get("run_id") == run_id),
-            None,
-        )
-        return entry.get("internal_name") if entry else None
-
-    def _resolve_run_cwd(self, run_id: str) -> Optional[Path]:
-        """cwd for a run whether it's still live in self.runs (this
-        session) or only survives in persisted history (a previous
-        session) -- see delete_run()'s docstring for why both need to be
-        supported for file operations, not just in-memory ones."""
-        run = self.get(run_id)
-        if run is not None:
-            return Path(run.cwd)
-        if self.is_relion_run(run_id):
-            # A job RELION itself ran. Its directory is real and full of real
-            # output, so browsing files and reading its per-iteration progress
-            # work exactly as they do for this app's own runs -- an old
-            # classification's resolution curve is worth seeing.
-            detail = self.relion_run_detail(run_id)
-            return Path(detail["cwd"]) if detail else None
-        entry = next(
+            return self.relion_run_detail(run_id)
+        return next(
             (h for h in project_manager.load_history(self.project_dir) if h.get("run_id") == run_id),
             None,
         )
-        if entry is None or not entry.get("cwd"):
+
+    def run_internal_name(self, run_id: str) -> Optional[str]:
+        """This run's job type -- see _resolve_run_record for where it can
+        come from."""
+        record = self._resolve_run_record(run_id)
+        return record.get("internal_name") if record else None
+
+    def run_field_values(self, run_id: str) -> Optional[dict]:
+        """This run's recorded field_values (e.g. a picker-style job's own
+        input tilt-series/micrographs/fn_model) -- see _resolve_run_record
+        for where it can come from. None only when the run_id itself is
+        unknown; a run genuinely recorded with no field values returns {},
+        not None, so callers can tell "unknown run" (404) apart from "run
+        exists but has nothing recorded" (400) -- see main.py's exclude-
+        tilts/manual-pick/select job-dir resolvers."""
+        record = self._resolve_run_record(run_id)
+        return record.get("field_values") or {} if record else None
+
+    def _resolve_run_cwd(self, run_id: str) -> Optional[Path]:
+        """cwd for a run whether it's still live in self.runs (this
+        session) or only survives in persisted history or RELION's own
+        pipeline -- see delete_run()'s docstring for why both need to be
+        supported for file operations, not just in-memory ones."""
+        record = self._resolve_run_record(run_id)
+        if record is None or not record.get("cwd"):
             return None
-        return Path(entry["cwd"])
+        return Path(record["cwd"])
 
     def list_output_files(self, run_id: str) -> Optional[list[dict]]:
         cwd = self._resolve_run_cwd(run_id)

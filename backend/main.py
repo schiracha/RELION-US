@@ -1593,11 +1593,16 @@ def viz_picks(req: VizPicksRequest):
 
 def _manual_pick_job_dir(run_id: str) -> Path:
     """The output directory of a manual-picking job, by run_id -- 404 if the
-    run doesn't exist, matching every other run_id-scoped endpoint."""
-    run = run_manager.get(run_id)
-    if run is None:
+    run doesn't exist, matching every other run_id-scoped endpoint.
+
+    _resolve_run_cwd (not run_manager.get) so a picking session started in
+    an earlier backend session -- Continue, reached after a restart -- is
+    still reachable: its picks and job directory are sitting right there
+    in persisted history/RELION's own pipeline, same fix as issue #77."""
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    return Path(run.cwd)
+    return cwd
 
 
 class SpaPickSaveRequest(BaseModel):
@@ -1665,14 +1670,22 @@ def _exclude_tilts_job(run_id: str) -> tuple[Path, str]:
     if the run doesn't exist, 400 if it has no input recorded (shouldn't
     happen in practice: the runner requires it -- see custom_jobs.
     run_exclude_tilt_images -- but a hand-crafted/imported run could lack
-    it)."""
-    run = run_manager.get(run_id)
-    if run is None:
+    it).
+
+    run_field_values/_resolve_run_cwd (not run_manager.get) so a review
+    session started in an earlier backend session is still reachable after
+    a restart -- see issue #77: this used to 404 the moment the backend
+    that started the job was no longer the one running, even though the
+    job's own directory and in_tiltseries are sitting right there in
+    persisted history/RELION's own pipeline."""
+    field_values = run_manager.run_field_values(run_id)
+    if field_values is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    in_tiltseries = (run.field_values or {}).get("in_tiltseries", "")
+    in_tiltseries = field_values.get("in_tiltseries", "")
     if not in_tiltseries:
         raise HTTPException(status_code=400, detail="This job has no input tilt series STAR recorded.")
-    return Path(run.cwd), in_tiltseries
+    cwd = run_manager._resolve_run_cwd(run_id)
+    return cwd, in_tiltseries
 
 
 @app.get("/api/exclude-tilts/{run_id}/series")
@@ -1725,14 +1738,17 @@ def _select_job(run_id: str) -> tuple[Path, dict]:
     run doesn't exist, 400 if none of fn_model/fn_mic/fn_data are recorded
     (shouldn't happen in practice: the runner requires one -- see
     select_interactive.run_select_interactive -- but a hand-crafted/
-    imported run could lack it)."""
-    run = run_manager.get(run_id)
-    if run is None:
+    imported run could lack it).
+
+    run_field_values/_resolve_run_cwd (not run_manager.get) so a selection
+    session started in an earlier backend session is still reachable after
+    a restart -- see issue #77."""
+    field_values = run_manager.run_field_values(run_id)
+    if field_values is None:
         raise HTTPException(status_code=404, detail="Unknown run_id")
-    field_values = run.field_values or {}
     if not (field_values.get("fn_model") or field_values.get("fn_mic") or field_values.get("fn_data")):
         raise HTTPException(status_code=400, detail="This job has no fn_model/fn_mic/fn_data recorded.")
-    return Path(run.cwd), field_values
+    return run_manager._resolve_run_cwd(run_id), field_values
 
 
 @app.get("/api/select/{run_id}/classes")
