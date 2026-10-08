@@ -4,8 +4,10 @@
 // nearly window-filling with rounded corners — mounted with a form built
 // from the job definition the backend serves. See style.css for the popup's
 // internal layout (standard fields on top, tabs, editable command box, live
-// output at the bottom). Only one job popup is open at a time (see
-// currentJobWinbox below); opening a new one closes whichever was open.
+// output at the bottom). Multiple job popups can be open at once -- each
+// manages its own websocket/progress polling independently, so they can be
+// minimized or dragged side by side to compare or copy parameters between
+// jobs (see issue #74).
 
 
 async function api(path, opts) {
@@ -600,11 +602,6 @@ function buildFieldRow(key, option, value) {
 // type's defaults, and the command box shows the command that was ACTUALLY
 // run rather than a fresh draft, so reopening history shows history.
 
-// Tracks the one job popup allowed open at a time. Closed (not just
-// covered) right before a new one mounts, so its websocket/progress polling
-// tears down properly rather than streaming into a hidden window.
-let currentJobWinbox = null;
-
 // Cached global settings (Menu > Settings), fetched once and reused across
 // every job popup opened this session rather than re-fetched per popup;
 // cleared whenever Settings successfully saves so the next popup opened
@@ -657,6 +654,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // websocket) -- with only the prefilled field values coming from
   // somewhere other than the job type's own defaults.
   const cloneFieldValues = opts.cloneFieldValues || null;
+  // Reopening a saved draft (see Save Draft below): prefilled via
+  // cloneFieldValues too (not existingRun -- a draft never ran, so none of
+  // the run-only toolbar state below should treat it like one), but
+  // mutable here so Save Draft updates the SAME draft in place on repeat
+  // saves instead of piling up duplicates, and so a successful Run deletes
+  // it (issue #73).
+  let draftId = opts.draftId || null;
 
   let def;
   try {
@@ -757,6 +761,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     <div class="command-row active" data-role="command-row">
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
+        <button class="btn" data-role="save-draft-btn" title="Save these inputs to come back to later without running">💾 Save Draft</button>
         ${def.is_picker ? `<button class="btn primary" data-role="done-btn" hidden title="Finish this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — marks the job complete, including in RELION's own pipeline">✓ Done</button>` : ""}
         <span class="status-line" data-role="status-line"></span>
       </div>
@@ -797,6 +802,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       </div>
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
+        <button class="btn" data-role="save-draft-btn" title="Save these inputs to come back to later without running">💾 Save Draft</button>
         <span class="status-line" data-role="status-line"></span>
       </div>
     </div>`}
@@ -1112,6 +1118,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // declare these.
   const runBtn = body.querySelector('[data-role="run-btn"]');
   const doneBtn = body.querySelector('[data-role="done-btn"]');
+  const saveDraftBtn = body.querySelector('[data-role="save-draft-btn"]');
 
   // --- "Submit to SLURM cluster" (only present for a non-custom job --
   // see the command-row template above; def.is_custom jobs never render
@@ -2342,7 +2349,11 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // in the toolbar, is for — re-running into the SAME job explicitly).
     // Show status/output immediately instead.
     const commandRow = body.querySelector('[data-role="command-row"]');
-    if (commandRow) commandRow.querySelector('[data-role="run-btn"]').style.display = "none";
+    if (commandRow) {
+      commandRow.querySelector('[data-role="run-btn"]').style.display = "none";
+      // Already a real run -- nothing left to "save for later" (issue #73).
+      if (saveDraftBtn) saveDraftBtn.style.display = "none";
+    }
     // Keep the SLURM row available (unchecked, same as a fresh job) only
     // if THIS run was originally submitted to SLURM -- otherwise Overwrite
     // would offer an option that never applied to this job. Fully hide it
@@ -2381,12 +2392,53 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         refreshToolbarState();
         connectWebSocket(run.run_id);
         refreshCommandCenter();
+        if (saveDraftBtn) saveDraftBtn.style.display = "none";
+        // This job actually ran now -- the draft it came from (if any) is
+        // spent. Best-effort: a failed delete just leaves a stale draft
+        // behind, which is harmless (and still editable/removable later),
+        // never worth blocking or re-reporting a successful Run over.
+        if (draftId) {
+          const spentDraftId = draftId;
+          draftId = null;
+          api(`/api/drafts/${spentDraftId}`, { method: "DELETE" })
+            .then(refreshDrafts)
+            .catch(() => { /* noop */ });
+        }
       } catch (err) {
         appendOutputLine("Failed to start run: " + err.message, true);
         // Re-enable only on failure, so a successful start can't be double
         // clicked into launching a second job and orphaning the first
         // job's websocket.
         runBtn.disabled = false;
+      }
+    });
+  }
+
+  if (saveDraftBtn) {
+    saveDraftBtn.addEventListener("click", async () => {
+      if (currentRun) return;   // already a real run -- button is hidden by now anyway
+      saveDraftBtn.disabled = true;
+      try {
+        const field_values = collectValues();
+        const saved = draftId
+          ? await api(`/api/drafts/${draftId}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ field_values }),
+            })
+          : await api("/api/drafts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ internal_name: internalName, display_name: displayName, field_values }),
+            });
+        draftId = saved.draft_id;
+        statusLine.textContent = "Draft saved";
+        statusLine.className = "status-line";
+        refreshDrafts();
+      } catch (err) {
+        errorDialog("Could not save draft: " + err.message);
+      } finally {
+        saveDraftBtn.disabled = false;
       }
     });
   }
@@ -2420,14 +2472,6 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     });
   }
 
-  // Only one job popup at a time: close whichever was open right before
-  // mounting this one (not merely re-focusing it), so its websocket and
-  // progress polling stop cleanly instead of streaming into a hidden window.
-  if (currentJobWinbox) {
-    try { currentJobWinbox.close(); } catch (e) { /* noop */ }
-    currentJobWinbox = null;
-  }
-
   const win = new WinBox({
     title: displayName,
     width: "94%",
@@ -2441,11 +2485,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       if (progressSplitCleanup) { progressSplitCleanup(); progressSplitCleanup = null; }
       document.removeEventListener("relion-us-theme-changed", onThemeChange);
       if (ws) try { ws.close(); } catch (e) { /* noop */ }
-      if (currentJobWinbox === win) currentJobWinbox = null;
       return false;
     },
   });
-  currentJobWinbox = win;
 }
 
 loadCatalog().catch((err) => {
@@ -2855,6 +2897,96 @@ async function reopenRun(run) {
   openJobPopup(run.internal_name, run.display_name || run.internal_name, run);
 }
 
+// --- Job drafts (issue #73) -- inputs saved without running, reopened via
+// the same cloneFieldValues prefill path Clone already uses (see
+// openJobPopup's draftId). Lives in its own small dropdown off the Command
+// Center toolbar, mirroring the top-bar Menu dropdown's open/close idiom
+// (click-outside via containment check, Escape to dismiss) rather than a
+// row type bolted onto the table/timeline/network views, which all assume
+// a real run's shape (status, started_at, duration, charts).
+let ccDrafts = [];
+
+async function refreshDrafts() {
+  try {
+    ccDrafts = await api("/api/drafts");
+  } catch (err) {
+    ccDrafts = [];
+  }
+  renderDraftsPanel();
+}
+
+function renderDraftsPanel() {
+  const countEl = document.getElementById("draftsCount");
+  countEl.textContent = String(ccDrafts.length);
+  countEl.classList.toggle("hidden", ccDrafts.length === 0);
+
+  const listEl = document.getElementById("draftsList");
+  document.getElementById("draftsEmpty").classList.toggle("hidden", ccDrafts.length > 0);
+
+  const sorted = ccDrafts.slice().sort((a, b) => (b.saved_at || 0) - (a.saved_at || 0));
+  listEl.innerHTML = sorted.map((d) => `
+    <div class="menu-item drafts-row" data-draft-id="${escapeHtml(d.draft_id)}" role="menuitem">
+      <span class="drafts-row-label" title="Reopen this draft">
+        ${escapeHtml(d.display_name || d.internal_name)}
+        <span class="drafts-row-time">saved ${formatTimestamp(d.saved_at)}</span>
+      </span>
+      <button type="button" class="btn drafts-row-delete" data-draft-id="${escapeHtml(d.draft_id)}" title="Discard this draft">✕</button>
+    </div>
+  `).join("");
+
+  listEl.querySelectorAll(".drafts-row-label").forEach((el) => {
+    el.addEventListener("click", () => {
+      const row = el.closest(".drafts-row");
+      const draft = ccDrafts.find((d) => d.draft_id === row.dataset.draftId);
+      if (!draft) return;
+      document.getElementById("draftsPanel").classList.add("hidden");
+      openJobPopup(draft.internal_name, draft.display_name || draft.internal_name, null, {
+        cloneFieldValues: draft.field_values, draftId: draft.draft_id,
+      });
+    });
+  });
+  listEl.querySelectorAll(".drafts-row-delete").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/drafts/${btn.dataset.draftId}`, { method: "DELETE" });
+        await refreshDrafts();
+      } catch (err) {
+        errorDialog("Could not discard this draft: " + err.message);
+      }
+    });
+  });
+}
+
+{
+  const draftsWrap = document.getElementById("draftsWrap");
+  const draftsBtn = document.getElementById("draftsBtn");
+  const draftsPanel = document.getElementById("draftsPanel");
+  let closeDraftsListeners = null;
+
+  function closeDraftsPanel() {
+    draftsPanel.classList.add("hidden");
+    if (closeDraftsListeners) { closeDraftsListeners(); closeDraftsListeners = null; }
+  }
+
+  function openDraftsPanel() {
+    draftsPanel.classList.remove("hidden");
+    const onDocClick = (e) => { if (!draftsWrap.contains(e.target)) closeDraftsPanel(); };
+    const onEsc = (e) => { if (e.key === "Escape") closeDraftsPanel(); };
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    closeDraftsListeners = () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }
+
+  draftsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    draftsPanel.classList.contains("hidden") ? openDraftsPanel() : closeDraftsPanel();
+  });
+}
+
 document.querySelectorAll(".cc-view-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     ccView = btn.dataset.view;
@@ -3203,6 +3335,7 @@ async function onProjectChanged() {
   await refreshProjectLabel();
   await refreshCommandCenter();
   await refreshPipelineSync();   // the setting is per project
+  await refreshDrafts();         // drafts are per project too (issue #73)
 }
 
 changeProjectBtn.addEventListener("click", openProjectModal);
@@ -6384,3 +6517,4 @@ function currentTheme() {
 refreshProjectLabel();
 refreshCommandCenter();
 refreshPipelineSync();
+refreshDrafts();

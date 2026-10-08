@@ -146,6 +146,8 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -674,6 +676,68 @@ async def start_run(req: StartRunRequest):
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return run.to_summary()
+
+
+# ---------------------------------------------------------------------------
+# Job drafts (issue #73) -- save a job's inputs without running it, and come
+# back to them later. Unlike a run, a draft has no job directory/run_id and
+# never touches run_manager at all; it's just field_values parked in
+# project_manager's own per-project JSON file (see load_drafts/save_drafts),
+# the same way recent-projects and settings are. The popup reopens a draft
+# through the existing cloneFieldValues prefill path (frontend/app.js), not
+# as an existingRun -- a draft was never started, so none of the run-only
+# toolbar state (status, abort, overwrite, etc.) applies to it.
+# ---------------------------------------------------------------------------
+class SaveDraftRequest(BaseModel):
+    internal_name: str
+    display_name: str | None = None
+    field_values: dict = {}
+
+
+class UpdateDraftRequest(BaseModel):
+    field_values: dict
+
+
+@app.get("/api/drafts")
+def list_drafts():
+    return project_manager.load_drafts(run_manager.project_dir)
+
+
+@app.post("/api/drafts")
+def save_draft(req: SaveDraftRequest):
+    drafts = project_manager.load_drafts(run_manager.project_dir)
+    draft = {
+        "draft_id": uuid.uuid4().hex[:12],
+        "internal_name": req.internal_name,
+        "display_name": req.display_name or req.internal_name,
+        "field_values": req.field_values,
+        "saved_at": time.time(),
+    }
+    drafts.append(draft)
+    project_manager.save_drafts(run_manager.project_dir, drafts)
+    return draft
+
+
+@app.put("/api/drafts/{draft_id}")
+def update_draft(draft_id: str, req: UpdateDraftRequest):
+    drafts = project_manager.load_drafts(run_manager.project_dir)
+    for d in drafts:
+        if d.get("draft_id") == draft_id:
+            d["field_values"] = req.field_values
+            d["saved_at"] = time.time()
+            project_manager.save_drafts(run_manager.project_dir, drafts)
+            return d
+    raise HTTPException(status_code=404, detail="Unknown draft_id")
+
+
+@app.delete("/api/drafts/{draft_id}")
+def delete_draft(draft_id: str):
+    drafts = project_manager.load_drafts(run_manager.project_dir)
+    remaining = [d for d in drafts if d.get("draft_id") != draft_id]
+    if len(remaining) == len(drafts):
+        raise HTTPException(status_code=404, detail="Unknown draft_id")
+    project_manager.save_drafts(run_manager.project_dir, remaining)
+    return {"ok": True}
 
 
 def _reject_relion_run(run_id: str, action: str) -> None:

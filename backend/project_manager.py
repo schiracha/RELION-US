@@ -826,6 +826,38 @@ def save_history(project_dir: Path, entries: list[dict[str, Any]]) -> None:
 
 
 # --------------------------------------------------------------------------
+# Job drafts (issue #73) -- a job's inputs saved before Run is ever clicked,
+# so it can be come back to later instead of re-entering everything from
+# scratch. Deliberately separate from run_history.json: a draft never ran,
+# has no job directory, status, or output -- nothing RELION's own pipeline
+# or this app's run tracking needs to know about. Same best-effort
+# load/write contract as load_history/save_history above.
+# --------------------------------------------------------------------------
+DRAFTS_FILENAME = "drafts.json"
+
+
+def _drafts_path(project_dir: Path) -> Path:
+    return project_dir / MARKER_DIRNAME / DRAFTS_FILENAME
+
+
+def load_drafts(project_dir: Path) -> list[dict[str, Any]]:
+    p = _drafts_path(project_dir)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_drafts(project_dir: Path, entries: list[dict[str, Any]]) -> None:
+    marker = project_dir / MARKER_DIRNAME
+    marker.mkdir(exist_ok=True)
+    _drafts_path(project_dir).write_text(json.dumps(entries, indent=2))
+
+
+# --------------------------------------------------------------------------
 # Trash / job recovery (issue #2) -- mirrors real RELION's own Delete-moves
 # -to-Trash + Undelete-reads-a-companion-file + separate-Empty-trash model
 # (PipeLine::deleteNodesAndProcesses/undeleteJob, src/pipeliner.cpp), with

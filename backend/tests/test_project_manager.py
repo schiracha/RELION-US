@@ -81,6 +81,43 @@ def test_load_history_corrupt_file_returns_empty_list_not_error(tmp_path):
     assert project_manager.load_history(d) == []
 
 
+# --------------------------------------------------------------------------
+# Job drafts (issue #73) -- same contract as run history above, just a
+# separate file since a draft never ran.
+# --------------------------------------------------------------------------
+
+def test_drafts_round_trip(tmp_path):
+    d = tmp_path / "proj"
+    project_manager.init_new_project(d)
+    entries = [
+        {"draft_id": "abc123", "internal_name": "Import", "field_values": {"fn_in": "foo.star"}, "saved_at": 1.0},
+    ]
+    project_manager.save_drafts(d, entries)
+    assert project_manager.load_drafts(d) == entries
+
+
+def test_load_drafts_missing_file_returns_empty_list(tmp_path):
+    d = tmp_path / "proj_no_drafts"
+    d.mkdir()
+    assert project_manager.load_drafts(d) == []
+
+
+def test_load_drafts_corrupt_file_returns_empty_list_not_error(tmp_path):
+    d = tmp_path / "proj"
+    project_manager.init_new_project(d)
+    (d / project_manager.MARKER_DIRNAME / project_manager.DRAFTS_FILENAME).write_text("{not json")
+    assert project_manager.load_drafts(d) == []
+
+
+def test_drafts_and_history_are_independent_files(tmp_path):
+    d = tmp_path / "proj"
+    project_manager.init_new_project(d)
+    project_manager.save_history(d, [{"run_id": "r1"}])
+    project_manager.save_drafts(d, [{"draft_id": "abc"}])
+    assert project_manager.load_history(d) == [{"run_id": "r1"}]
+    assert project_manager.load_drafts(d) == [{"draft_id": "abc"}]
+
+
 def test_list_dir_reports_subdirectories_and_project_status(tmp_path):
     d = tmp_path / "parent_dir"
     d.mkdir()

@@ -56,6 +56,13 @@
             <button type="button" class="cc-view-btn" data-view="network" title="Lineage graph: oldest jobs at top, with branches down to every job that used their output">🕸 Network</button>
           </div>
           <button type="button" id="ccDirectionBtn" class="btn" title="Currently showing newest jobs first — click to show oldest first">Newest first ↑</button>
+          <div id="draftsWrap" class="menu-wrap">
+            <button type="button" id="draftsBtn" class="btn" title="Job inputs saved without running — reopen or discard one">💾 Drafts<span id="draftsCount" class="badge hidden">0</span></button>
+            <div id="draftsPanel" class="menu-panel hidden" role="menu">
+              <div id="draftsList"></div>
+              <div id="draftsEmpty" class="cc-empty">No saved drafts.</div>
+            </div>
+          </div>
           <span id="ccHint">Select a job type from the list to launch it — every job you run shows up here.</span>
         </div>
         <div id="ccTableView" class="cc-view">

@@ -988,3 +988,73 @@ def test_select_save_with_do_regroup_writes_group_names(picker_client):
     written = starfile.read(Path(run["cwd"]) / "particles.star", always_dict=True)["particles"]
     assert "rlnGroupNumber" not in written.columns
     assert written["rlnGroupName"].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# Job drafts (issue #73) -- save a job's inputs without running it, and come
+# back to them later. Pure CRUD over project_manager.load_drafts/save_drafts;
+# no job_runner/run_manager involvement at all, so the plain `client`
+# fixture is enough (no fire-and-forget async task to keep alive).
+# ---------------------------------------------------------------------------
+
+def test_save_and_list_drafts(client):
+    resp = client.post("/api/drafts", json={
+        "internal_name": "Import", "display_name": "Import", "field_values": {"fn_in": "foo.star"},
+    })
+    assert resp.status_code == 200, resp.text
+    draft = resp.json()
+    assert draft["internal_name"] == "Import"
+    assert draft["field_values"] == {"fn_in": "foo.star"}
+    assert draft["draft_id"]
+    assert draft["saved_at"]
+
+    listed = client.get("/api/drafts")
+    assert listed.status_code == 200
+    assert listed.json() == [draft]
+
+
+def test_save_draft_defaults_display_name_to_internal_name(client):
+    resp = client.post("/api/drafts", json={"internal_name": "Import", "field_values": {}})
+    assert resp.json()["display_name"] == "Import"
+
+
+def test_update_draft_overwrites_field_values_in_place(client):
+    created = client.post("/api/drafts", json={
+        "internal_name": "Import", "field_values": {"fn_in": "foo.star"},
+    }).json()
+
+    updated = client.put(f"/api/drafts/{created['draft_id']}", json={"field_values": {"fn_in": "bar.star"}})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["field_values"] == {"fn_in": "bar.star"}
+    assert updated.json()["draft_id"] == created["draft_id"]
+
+    listed = client.get("/api/drafts").json()
+    assert len(listed) == 1
+    assert listed[0]["field_values"] == {"fn_in": "bar.star"}
+
+
+def test_update_unknown_draft_id_404s(client):
+    resp = client.put("/api/drafts/nonexistent", json={"field_values": {}})
+    assert resp.status_code == 404
+
+
+def test_delete_draft_removes_it(client):
+    created = client.post("/api/drafts", json={"internal_name": "Import", "field_values": {}}).json()
+    deleted = client.delete(f"/api/drafts/{created['draft_id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert client.get("/api/drafts").json() == []
+
+
+def test_delete_unknown_draft_id_404s(client):
+    resp = client.delete("/api/drafts/nonexistent")
+    assert resp.status_code == 404
+
+
+def test_drafts_are_scoped_to_their_own_project(client, tmp_path):
+    client.post("/api/drafts", json={"internal_name": "Import", "field_values": {}})
+    assert len(client.get("/api/drafts").json()) == 1
+
+    other_project = tmp_path / "other_project"
+    project_manager.init_new_project(other_project)
+    main.run_manager.set_project_dir(other_project)
+    assert client.get("/api/drafts").json() == []
