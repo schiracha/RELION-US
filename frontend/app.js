@@ -4995,10 +4995,15 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
           kind === "spa"
             ? `/api/manual-pick/${runId}/spa/load?mic_path=${encodeURIComponent(currentKey)}`
             : `/api/manual-pick/${runId}/tomo/load?tomo_name=${encodeURIComponent(currentKey)}`
+              + `&tomograms_star_path=${encodeURIComponent(sourcePath)}`
         );
         state.picks = resp.picks || [];
         drawOverlays();
         updateMeta();
+        // Picks made on a different-sized reconstruction of this tomogram were
+        // moved onto the current one on load -- say so, since they only
+        // become permanent on the next Save.
+        if (resp.notice) q('[data-role="pk-status"]').textContent = resp.notice;
       } catch (err) {
         q('[data-role="pk-status"]').textContent = "Could not load existing picks: " + err.message;
       }
@@ -5008,6 +5013,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       const statusRole = q('[data-role="pk-status"]');
       if (!currentKey) return;
       statusRole.textContent = "Saving…";
+      let saved = null;
       try {
         if (kind === "spa") {
           await api(`/api/manual-pick/${runId}/spa/save`, {
@@ -5018,7 +5024,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
             }),
           });
         } else {
-          await api(`/api/manual-pick/${runId}/tomo/save`, {
+          saved = await api(`/api/manual-pick/${runId}/tomo/save`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               tomo_name: currentKey,
@@ -5027,7 +5033,9 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
             }),
           });
         }
-        statusRole.textContent = `Saved ${state.picks.length} pick(s).`;
+        statusRole.textContent = `Saved ${state.picks.length} pick(s).`
+          + (saved && saved.n_outside_volume
+            ? ` ${saved.n_outside_volume} lie outside this volume.` : "");
       } catch (err) {
         statusRole.textContent = "Error: " + err.message;
       }

@@ -1704,9 +1704,11 @@ class TomoPickSaveRequest(BaseModel):
 
 
 @app.get("/api/manual-pick/{run_id}/tomo/load")
-def manual_pick_tomo_load(run_id: str, tomo_name: str = Query(...)):
+def manual_pick_tomo_load(run_id: str, tomo_name: str = Query(...),
+                          tomograms_star_path: str | None = Query(None)):
     job_dir = _manual_pick_job_dir(run_id)
-    return {"picks": manual_pick.load_tomo_picks(run_manager.project_dir, job_dir, tomo_name)}
+    return manual_pick.load_tomo_picks_info(
+        run_manager.project_dir, job_dir, tomo_name, tomograms_star_path)
 
 
 @app.post("/api/manual-pick/{run_id}/tomo/save")

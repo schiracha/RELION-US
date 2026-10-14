@@ -645,3 +645,80 @@ def test_overwrite_works_directly_on_a_still_running_picking_session(synced_proj
     run, overwritten = asyncio.run(go())
     assert overwritten.run_id == run.run_id
     assert overwritten.status == "running"
+
+
+# --------------------------------------------------------------------------
+# Re-reference to a re-reconstructed tomogram (DeepETPicker/IMOD importers)
+# --------------------------------------------------------------------------
+
+_BIN = 1000 / 344.0   # rlnTomoTomogramBinning of a 1000 px-thick reconstruction
+
+
+def _reref_project(tmp_path, coords_text):
+    import pandas as pd
+    import starfile
+
+    (tmp_path / "picks.coords").write_text(coords_text)
+    starfile.write({"global": pd.DataFrame({
+        "rlnTomoName": ["TS_01"], "rlnTomoSizeX": [4000], "rlnTomoSizeY": [4000],
+        "rlnTomoSizeZ": [1000], "rlnTomoTomogramBinning": [_BIN],
+    })}, tmp_path / "tomograms.star", overwrite=True)
+    job_dir = tmp_path / "DeepETPickerImport" / "job001"
+    job_dir.mkdir(parents=True)
+    values = {
+        "coords_path": "picks.coords", "tomo_name": "TS_01", "binning_factor": 1.0,
+        "out_path": "particles.star", "target_tomograms_star": "tomograms.star",
+        "src_size_z": "2000", "drop_outside": True,
+    }
+    return values, job_dir
+
+
+def test_deepetpicker_import_rereferences_a_thickness_change(tmp_path):
+    """Picks made on a 2000 px-thick reconstruction, tomogram since redone at
+    1000: the old centre lands on the new centre (172 voxel Z shift) and a
+    pick in the cropped-away slab is dropped into out_of_bounds.star."""
+    import starfile
+
+    values, job_dir = _reref_project(tmp_path, "1 10 20 344\n1 10 20 0\n")
+    summary = asyncio.run(custom_jobs.run_deepetpicker_import(tmp_path, values, job_dir))
+
+    kept = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    assert len(kept) == 1
+    assert kept["rlnCoordinateZ"].iloc[0] == pytest.approx(172.0)
+    assert kept["rlnCoordinateX"].iloc[0] == pytest.approx(10.0)
+    dropped = starfile.read(job_dir / "out_of_bounds.star", always_dict=True)["particles"]
+    assert len(dropped) == 1 and dropped["rlnCoordinateZ"].iloc[0] == pytest.approx(-172.0)
+    assert "Dropped 1 of 2" in summary and "-172.00" in summary
+
+
+def test_deepetpicker_import_without_target_star_is_unchanged(tmp_path):
+    import starfile
+
+    values, job_dir = _reref_project(tmp_path, "1 10 20 344\n")
+    values["target_tomograms_star"] = ""
+    asyncio.run(custom_jobs.run_deepetpicker_import(tmp_path, values, job_dir))
+    out = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    assert out["rlnCoordinateZ"].iloc[0] == pytest.approx(344.0)
+    assert not (job_dir / "out_of_bounds.star").exists()
+
+
+def test_rereference_refuses_to_scale_twice(tmp_path):
+    values, job_dir = _reref_project(tmp_path, "1 10 20 344\n")
+    values["binning_factor"] = 1.032
+    with pytest.raises(ValueError, match="scaled twice"):
+        asyncio.run(custom_jobs.run_deepetpicker_import(tmp_path, values, job_dir))
+
+
+def test_rereference_all_picks_outside_fails_loudly(tmp_path):
+    values, job_dir = _reref_project(tmp_path, "1 10 20 5000\n")
+    with pytest.raises(ValueError, match="All 1 picks fall outside"):
+        asyncio.run(custom_jobs.run_deepetpicker_import(tmp_path, values, job_dir))
+    assert not (job_dir / "particles.star").exists()
+
+
+def test_rereference_options_are_on_both_voxel_importers():
+    for name in ("DeepETPickerImport", "ImodImport"):
+        d = CUSTOM_JOB_DEFINITIONS[name]
+        keys = {o["key"] for o in d["options"]}
+        assert set(custom_jobs.REREF_FIELD_KEYS) <= keys
+        assert any(g["name"] == custom_jobs.REREF_GROUP_NAME for g in d["standard_groups"])
