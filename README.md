@@ -830,7 +830,20 @@ tall/wide as the volume actually is, not stretched to fill a box.
 Everything else lives in a narrow rail on the right so the images get the
 window: the two file inputs, black/white-point contrast sliders (default is a
 robust 0.5–99.5% percentile, since raw cryo-ET min/max is usually washed out),
-pick diameter and line width, and toggles for the pick overlay and crosshair.
+a **Gaussian σ** slider, pick diameter and line width, and toggles for the pick
+overlay and crosshair.
+
+**Gaussian σ** (0–4 voxels, off by default) smooths the displayed slices the way
+DeepETPicker's own viewer did: in all three directions, not just within the slice.
+Its "kernel size" box never did anything, so only σ is offered. While it is on,
+the contrast window is picked per slice, because the blur narrows the intensity
+range the raw-data sliders were set for; moving Black/White takes over again. The
+volume itself is not filtered, only the sections inside the kernel are read.
+
+Pick circles are coloured by `rlnClassNumber`: classes 1–8 get eight distinct
+colours (classes 1–5 keep the colours they always had), later classes repeat them,
+and a small legend under the pick controls lists the classes present in the file.
+Picks without a class column stay green.
 
 Picks are overlaid using DeepETPicker's own model — a particle is drawn on
 every slice within ±(diameter/2) of its centre, with radius `sqrt(r² − Δ²)` so
