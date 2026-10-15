@@ -1073,6 +1073,34 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
 Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
 `GET /api/viz/slice` (`?transpose`), `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
 
+## External command-line jobs (IsoNet2, DeepETPicker)
+
+Tools that are neither RELION programs nor fast converters run through the same
+primitive as RELION jobs, `job_runner.start_subprocess_job`, so they get local
+and SLURM execution, an editable command box, abort-by-process-group and the
+Outputs/Clean/Delete machinery for free. `isonet_jobs.py` and
+`deepetpicker_jobs.py` each hold a table of field definitions and a command
+builder; `main.py` treats both through `EXTERNAL_COMMAND_JOBS` and
+`build_external_command`, and `job_catalog.CUSTOM_JOBS` gives them menu entries
+with fabricated `custom.*` labels (no RELION class exists, so
+`relion_pipeliner` is not asked to register them).
+
+What the DeepETPicker command line promises, and what this side relies on:
+
+- every command takes `--output_dir <Category>/jobNNN/` and writes only inside
+  it; RELION-US owns numbering, `run.out`/`run.err` and the exit markers;
+- inputs from earlier jobs are project-relative paths, never absolute ones
+  stored inside outputs, so a project can be moved;
+- bad input exits non-zero with a one-line `error: ...` on stderr;
+- `train` writes `metrics.csv` and keeps `loss_full.png` up to date, which the
+  Progress tab shows the way it shows IsoNet2's loss plot.
+
+Because the popup always sends its command box content along with the fields,
+`start_run` cannot use "no command" to decide whether to validate the fields.
+For DeepETPicker it validates when the command still equals a draft this app
+would build (for the current fields, or for the untouched defaults) and leaves a
+hand-edited command alone, as for every other job type.
+
 ## Invariants worth preserving
 
 Non-obvious rules the code depends on. Each one guards a failure mode that
