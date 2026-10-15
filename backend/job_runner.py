@@ -59,6 +59,18 @@ STATUS_ABORTED = "aborted"
 # SLURM" can legitimately last hours, not milliseconds.
 STATUS_QUEUED = "queued"
 
+# How often a job waiting on other jobs (issue #78, "wait_for") re-checks
+# whether they have finished. Module-level so tests can monkeypatch it down.
+WAIT_POLL_INTERVAL_S = 3
+# "success": start only if every job waited on completed (exit 0) -- cancel
+# this job as soon as any of them fails/aborts, like SLURM's afterok.
+# "any": start once every job waited on has ended, however it ended
+# (afterany) -- e.g. to run two heavy GPU jobs one after the other.
+WAIT_MODE_SUCCESS = "success"
+WAIT_MODE_ANY = "any"
+WAIT_MODES = (WAIT_MODE_SUCCESS, WAIT_MODE_ANY)
+_TERMINAL_STATUSES = (STATUS_COMPLETED, STATUS_FAILED, STATUS_ABORTED)
+
 # How often _run_slurm_job polls squeue/sacct for a status change. Not
 # configurable via Settings (yet) -- a module-level constant so tests can
 # monkeypatch it down for a fast poll loop rather than actually sleeping.
@@ -299,6 +311,14 @@ class JobRun:
     # a run from a previous backend session still knows whether to do the
     # handshake.
     pipeline_registered: bool = False
+    # Issue #78: run_ids of jobs this one must wait for before it starts, how
+    # their outcome gates it (WAIT_MODES), and whether it is still in that
+    # waiting stage (status is "queued" while it is). Persisted via
+    # to_summary() so the Command Center can say what a queued job is waiting
+    # on. Only jobs started through start_subprocess_job can wait.
+    wait_for: list[str] = field(default_factory=list)
+    wait_mode: str = WAIT_MODE_SUCCESS
+    waiting: bool = False
     # Set when Abort arrives before the subprocess handle exists (see
     # abort_run + _run_subprocess); the launcher honours it as soon as it
     # has a process to signal.
@@ -346,6 +366,9 @@ class JobRun:
                 self.proc is not None or self.task is not None or self.slurm_job_id is not None
             ),
             "pipeline_registered": self.pipeline_registered,
+            "wait_for": self.wait_for,
+            "wait_mode": self.wait_mode,
+            "waiting": self.waiting,
         }
 
     async def broadcast(self, message: dict) -> None:
@@ -357,6 +380,28 @@ class JobRunManager:
     def __init__(self, project_dir: Path):
         self.project_dir = project_dir
         self.runs: dict[str, JobRun] = {}
+        # Issue #79: queues of connected "something changed" listeners (the
+        # /ws/events websocket), one per browser tab. See _notify_changed.
+        self.event_subscribers: list[asyncio.Queue] = []
+
+    def _notify_changed(self, run_id: Optional[str] = None, status: Optional[str] = None) -> None:
+        """Tell every connected browser tab that the job list changed, so it
+        re-fetches instead of waiting for a manual refresh (issue #79). A tab
+        only needs to know THAT something changed -- it re-reads the whole
+        list -- so a full queue just drops the nudge (the next one, or the
+        periodic poll, covers it). Safe to call from any thread: a call with
+        no running event loop here (e.g. from asyncio.to_thread) is skipped
+        rather than raised."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        message = {"type": "runs_changed", "run_id": run_id, "status": status}
+        for queue in list(self.event_subscribers):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass
 
     def new_run_id(self) -> str:
         return uuid.uuid4().hex[:12]
@@ -434,7 +479,7 @@ class JobRunManager:
         target = str(project_dir if project_dir is not None else self.project_dir)
         own_entries: dict[str, dict] = {}
         own_job_numbers: set[int] = set()
-        for entry in project_manager.load_history(Path(target)):
+        for entry in self._reconcile_orphaned_waiting(Path(target)):
             run_id = entry.get("run_id")
             if run_id:
                 own_entries[run_id] = entry
@@ -491,6 +536,33 @@ class JobRunManager:
         )
         self._attach_input_lineage(runs, Path(target))
         return runs
+
+    def _reconcile_orphaned_waiting(self, project_dir: Path) -> list[dict]:
+        """Persisted history, with any job that was still waiting on others
+        (issue #78) when its backend died marked aborted. The waiting is an
+        in-memory task, so after a restart nothing will ever start it --
+        leaving it "queued" would be a lie that also blocks Overwrite/Delete.
+        Fixed once, in place, the first time the history is read."""
+        entries = project_manager.load_history(project_dir)
+        changed = False
+        for entry in entries:
+            if entry.get("waiting") and entry.get("run_id") not in self.runs:
+                entry["waiting"] = False
+                entry["status"] = STATUS_ABORTED
+                entry["ended_at"] = entry.get("ended_at") or time.time()
+                changed = True
+                cwd = entry.get("cwd")
+                if entry.get("pipeline_registered") and cwd:
+                    try:
+                        (Path(cwd) / "RELION_JOB_EXIT_ABORTED").touch()
+                    except OSError:
+                        pass
+        if changed:
+            try:
+                project_manager.save_history(project_dir, entries)
+            except OSError:
+                pass
+        return entries
 
     @staticmethod
     def _relion_pipeline_entries(project_dir: Path) -> list[dict]:
@@ -918,6 +990,7 @@ class JobRunManager:
             project_manager.save_history(project_dir, history)
         except OSError:
             pass
+        self._notify_changed(run.run_id, run.status)
 
     async def start_subprocess_job(
         self,
@@ -928,6 +1001,8 @@ class JobRunManager:
         field_values: Optional[dict] = None,
         overwrite_run_id: Optional[str] = None,
         slurm_options: Optional[dict] = None,
+        wait_for: Optional[list[str]] = None,
+        wait_mode: str = WAIT_MODE_SUCCESS,
     ) -> JobRun:
         """
         Launch `command` (the exact, user-edited string) via the shell,
@@ -975,7 +1050,24 @@ class JobRunManager:
         docstring for why local-subprocess abort/
         status-polling logic (deeply PID/process-group-based) isn't reused
         for this path at all.
+
+        wait_for / wait_mode (issue #78): run_ids of jobs this one must wait
+        for. The run is created, numbered and registered immediately like
+        any other (so it shows up in the Command Center -- and, with sync
+        on, as "Scheduled" in RELION's own GUI) but sits at status "queued"
+        until every job it waits on has ended; only then does it launch
+        (locally or via SLURM, whichever slurm_options selected). With
+        wait_mode "success" it is cancelled instead if any of them fails or
+        is aborted; with "any" it starts whatever their outcome. Raises
+        ValueError for an unknown job, a job that can already never satisfy
+        "success", waiting on itself, or a dependency cycle -- before
+        anything (job number, directory) is allocated.
         """
+        wait_for = list(dict.fromkeys(wait_for or []))   # de-duplicated, order kept
+        if wait_mode not in WAIT_MODES:
+            raise ValueError(f"wait_mode must be one of {WAIT_MODES}, got {wait_mode!r}")
+        if wait_for:
+            self._validate_wait_for(wait_for, wait_mode, overwrite_run_id)
         project_dir = self.project_dir
         rewrite_note = None
         pipeline_sync_error = None
@@ -1127,16 +1219,131 @@ class JobRunManager:
         )
         run.rewrite_note = rewrite_note
         run.pipeline_sync_error = pipeline_sync_error
+        if wait_for:
+            run.wait_for, run.wait_mode = wait_for, wait_mode
+            run.waiting = True
+            run.status = STATUS_QUEUED
         self.runs[run_id] = run
         self._persist(run)
         if slurm_options is not None:
             if slurm_options.get("array_items"):
-                run.task = asyncio.create_task(self._run_slurm_array_job(run, slurm_options))
+                work = lambda: self._run_slurm_array_job(run, slurm_options)  # noqa: E731
             else:
-                run.task = asyncio.create_task(self._run_slurm_job(run, slurm_options))
+                work = lambda: self._run_slurm_job(run, slurm_options)  # noqa: E731
         else:
-            run.task = asyncio.create_task(self._run_subprocess(run))
+            work = lambda: self._run_subprocess(run)  # noqa: E731
+        run.task = asyncio.create_task(self._launch_when_ready(run, work))
         return run
+
+    # --- Waiting on other jobs (issue #78) ---------------------------------
+
+    def _dependency_status(self, run_id: str, project_dir: Optional[Path] = None) -> Optional[str]:
+        """Current status of a job some other job is waiting on, wherever it
+        lives (this session, persisted history, or RELION's own pipeline).
+        None means the job no longer exists (e.g. deleted)."""
+        run = self.get(run_id)
+        if run is not None:
+            return run.status
+        if self.is_relion_run(run_id):
+            detail = self.relion_run_detail(run_id, project_dir)
+            return detail.get("status") if detail else None
+        history = project_manager.load_history(project_dir or self.project_dir)
+        entry = next((h for h in history if h.get("run_id") == run_id), None)
+        return entry.get("status") if entry else None
+
+    def _validate_wait_for(self, wait_for: list[str], wait_mode: str,
+                           overwrite_run_id: Optional[str]) -> None:
+        for dep in wait_for:
+            if overwrite_run_id and dep == overwrite_run_id:
+                raise ValueError("A job can't wait for itself.")
+            status = self._dependency_status(dep)
+            if status is None:
+                raise ValueError(f"Can't wait for job {dep!r}: no such job in this project.")
+            if wait_mode == WAIT_MODE_SUCCESS and status in (STATUS_FAILED, STATUS_ABORTED):
+                raise ValueError(
+                    f"Can't wait for job {dep!r} to succeed: it already {status}. "
+                    f"Choose 'whether or not it succeeds', or re-run that job first.")
+            # A cycle needs the overwritten job to be (transitively) waiting
+            # on something that waits on it -- only possible while a chain of
+            # in-memory waiting jobs exists, so walk that chain.
+            seen, stack = set(), [dep]
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                if overwrite_run_id and cur == overwrite_run_id:
+                    raise ValueError(
+                        f"Waiting for job {dep!r} would create a cycle (it is already "
+                        f"waiting, directly or indirectly, on the job being overwritten).")
+                cur_run = self.get(cur)
+                if cur_run is not None and cur_run.waiting:
+                    stack.extend(cur_run.wait_for)
+
+    async def _launch_when_ready(self, run: JobRun, work) -> None:
+        """Run `work()` (the real execution coroutine) -- after first waiting
+        for this run's dependencies, if it has any."""
+        if run.wait_for and not await self._wait_for_dependencies(run):
+            return
+        await work()
+
+    async def _wait_for_dependencies(self, run: JobRun) -> bool:
+        """Block until this run's dependencies allow it to start. Returns
+        True to go ahead, False if it was aborted while waiting or cancelled
+        because a dependency failed (already finalised in that case)."""
+        while True:
+            if run.abort_requested or run.status == STATUS_ABORTED:
+                run.waiting = False
+                # abort_run() already set/persisted/broadcast the status;
+                # all that's left is telling RELION's pipeline, as a running
+                # job's abort does at the end of its process.
+                if run.pipeline_registered:
+                    await self._finish_pipeline_registration(run, Path(run.cwd))
+                return False
+            statuses = {dep: self._dependency_status(dep, Path(run.project_dir)) for dep in run.wait_for}
+            if run.wait_mode == WAIT_MODE_SUCCESS:
+                broken = {d: st for d, st in statuses.items() if st in (None, STATUS_FAILED, STATUS_ABORTED)}
+                if broken:
+                    await self._cancel_waiting_run(run, broken)
+                    return False
+                ready = all(st == STATUS_COMPLETED for st in statuses.values())
+            else:
+                ready = all(st is None or st in _TERMINAL_STATUSES for st in statuses.values())
+            if ready:
+                run.waiting = False
+                note = (f"[RELION-US] Waited for {', '.join(self._dependency_label(d) for d in run.wait_for)}"
+                        f" -- starting now.")
+                run.stdout_lines.append(note)
+                await run.broadcast({"type": "stdout", "line": note})
+                return True
+            await asyncio.sleep(WAIT_POLL_INTERVAL_S)
+
+    def _dependency_label(self, run_id: str) -> str:
+        run = self.get(run_id)
+        if run is not None:
+            return run.job_name
+        record = self._resolve_run_record(run_id)
+        if record:
+            return record.get("job_name") or record.get("alias") or run_id
+        return run_id
+
+    async def _cancel_waiting_run(self, run: JobRun, broken: dict) -> None:
+        """A job set to run only after others succeed: one of them didn't, so
+        this one never starts. Recorded as aborted (it never ran), with the
+        reason in its Errors tab."""
+        wanted = ", ".join(self._dependency_label(d) for d in run.wait_for)
+        outcome = ", ".join(f"{self._dependency_label(d)} {st or 'was deleted'}" for d, st in broken.items())
+        msg = (f"[RELION-US] Cancelled before starting: this job was set to run only after "
+               f"{wanted} succeeded, but {outcome}.")
+        run.waiting = False
+        run.status = STATUS_ABORTED
+        run.ended_at = time.time()
+        run.stderr_lines.append(msg)
+        self._persist(run)
+        await run.broadcast({"type": "stderr", "line": msg})
+        await run.broadcast({"type": "status", "status": run.status})
+        if run.pipeline_registered:
+            await self._finish_pipeline_registration(run, Path(run.cwd))
 
     async def _run_subprocess(self, run: JobRun) -> None:
         if run.abort_requested:
@@ -2286,6 +2493,7 @@ class JobRunManager:
             return None
         entry.update(fields)
         project_manager.save_history(self.project_dir, history)
+        self._notify_changed(run_id, entry.get("status"))
         return entry
 
     def set_alias(self, run_id: str, alias: str) -> Optional[dict]:
@@ -2521,6 +2729,7 @@ class JobRunManager:
             # uncaught into an unhandled 500 (found in code review).
             note = " (its files were already moved to Trash and remain recoverable there)" if remove_files else ""
             return False, f"Could not update job history: {exc}{note}"
+        self._notify_changed(run_id)
         if summary.get("pipeline_registered") and summary.get("job_number") is not None:
             # This app's own record is gone, but relion_pipeliner has no CLI
             # verb to remove the matching process from RELION's own
@@ -2577,6 +2786,7 @@ class JobRunManager:
             # already excludes RELION's duplicate for a tracked job number,
             # this just stops the hidden set accumulating restored jobs.
             project_manager.unmark_relion_job_number_deleted(self.project_dir, run.job_number)
+        self._notify_changed(run.run_id, run.status)
         return run
 
     def _safe_rmtree(self, cwd_str: str, project_dir_str: str) -> tuple[bool, str]:

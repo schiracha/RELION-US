@@ -771,6 +771,22 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
       </label>
       <textarea class="command-box" data-role="command-box"></textarea>
+      <div class="wait-row" data-role="wait-row">
+        <label class="wait-toggle-label"><input type="checkbox" data-role="wait-toggle"> Wait for other job(s) before starting</label>
+        <div class="wait-fields" data-role="wait-fields" hidden>
+          <label>Job(s) to wait for (Ctrl/Cmd-click to pick several)
+            <select multiple size="5" data-role="wait-jobs"></select>
+          </label>
+          <label>Start when
+            <select data-role="wait-mode">
+              <option value="success">they finish successfully (this job is cancelled if one fails)</option>
+              <option value="any">they have finished, whether or not they succeeded</option>
+            </select>
+          </label>
+          <p class="wait-help">This job is created now and shows as <b>queued</b>; it starts by itself once the
+            others are done. If the RELION-US backend is restarted while it waits, it is marked aborted.</p>
+        </div>
+      </div>
       <div class="slurm-row" data-role="slurm-row">
         <label class="slurm-toggle-label"><input type="checkbox" data-role="slurm-toggle"> Submit to SLURM cluster</label>
         <div class="slurm-fields" data-role="slurm-fields" hidden>
@@ -1133,6 +1149,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // -- same "only override if actually set" rule applicableJobDefaults()
   // already uses for job_defaults.* above, just against raw DOM elements
   // here rather than a field-values map.
+  let buildWaitOptions = () => undefined;   // replaced below once the wait row is wired
   const slurmRow = body.querySelector('[data-role="slurm-row"]');
   if (slurmRow) {
     const slurmToggle = slurmRow.querySelector('[data-role="slurm-toggle"]');
@@ -1171,6 +1188,47 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         opt.label = `job${String(r.job_number).padStart(3, "0")} — ${r.display_name || r.internal_name}`;
         slurmActiveJobsList.appendChild(opt);
       });
+  }
+
+  // --- "Wait for other job(s) before starting" (issue #78) ---------------
+  // Lets a job queue behind others -- e.g. Reconstruct only once Align has
+  // finished, or two heavy GPU jobs one after the other. The list comes from
+  // the Command Center's run list (refreshed when the box is ticked, so a job
+  // started a moment ago is there). Active jobs first, then the most recent
+  // finished ones.
+  const waitRow = body.querySelector('[data-role="wait-row"]');
+  if (waitRow) {
+    const waitToggle = waitRow.querySelector('[data-role="wait-toggle"]');
+    const waitFields = waitRow.querySelector('[data-role="wait-fields"]');
+    const waitJobs = waitRow.querySelector('[data-role="wait-jobs"]');
+    const ACTIVE = ["running", "queued", "pending"];
+    async function fillWaitJobs() {
+      await refreshCommandCenter();
+      const chosen = new Set(Array.from(waitJobs.selectedOptions).map((o) => o.value));
+      const candidates = (ccRuns || []).filter((r) => !(currentRun && r.run_id === currentRun.run_id));
+      const byNumberDesc = (a, b) => (b.job_number || 0) - (a.job_number || 0);
+      const active = candidates.filter((r) => ACTIVE.includes(r.status)).sort(byNumberDesc);
+      const finished = candidates.filter((r) => !ACTIVE.includes(r.status)).sort(byNumberDesc).slice(0, 8);
+      waitJobs.innerHTML = "";
+      [...active, ...finished].forEach((r) => {
+        const opt = document.createElement("option");
+        opt.value = r.run_id;
+        opt.textContent = `${r.job_name || "job" + String(r.job_number).padStart(3, "0")} — `
+          + `${r.display_name || r.internal_name} (${r.status})`;
+        opt.selected = chosen.has(r.run_id);
+        waitJobs.appendChild(opt);
+      });
+    }
+    waitToggle.addEventListener("change", () => {
+      waitFields.hidden = !waitToggle.checked;
+      if (waitToggle.checked) fillWaitJobs();
+    });
+    buildWaitOptions = () => {
+      if (!waitToggle.checked) return undefined;
+      const ids = Array.from(waitJobs.selectedOptions).map((o) => o.value);
+      if (!ids.length) throw new Error("Pick at least one job to wait for, or untick \"Wait for other job(s)\".");
+      return { wait_for: ids, wait_mode: waitRow.querySelector('[data-role="wait-mode"]').value };
+    };
   }
 
   // Shared by both submission paths below (Run and Overwrite) so the
@@ -1519,6 +1577,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         payload.subdir = popupOutputSubdir;
         const slurmOptions = buildSlurmOptions();
         if (slurmOptions) payload.slurm = slurmOptions;
+        Object.assign(payload, buildWaitOptions() || {});
       }
       const run = await api("/api/runs", {
         method: "POST",
@@ -2317,10 +2376,15 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     ws = new WebSocket(`${proto}://${location.host}/ws/runs/${runId}`);
     ws.onmessage = (evt) => {
       const msg = JSON.parse(evt.data);
-      if (msg.type === "stdout") appendOutputLine(msg.line, false);
-      else if (msg.type === "stderr") appendOutputLine(msg.line, true);
+      if (msg.type === "stdout") {
+        // The backend says this once a waiting job's dependencies are done.
+        if (currentRun && msg.line.startsWith("[RELION-US] Waited for")) currentRun.waiting = false;
+        appendOutputLine(msg.line, false);
+      } else if (msg.type === "stderr") appendOutputLine(msg.line, true);
       else if (msg.type === "status") {
+        if (currentRun && msg.status !== "queued") currentRun.waiting = false;
         statusLine.textContent = `Status: ${msg.status}` +
+          (msg.status === "queued" && waitingOn(currentRun) ? ` — waiting for ${waitingOn(currentRun)}` : "") +
           (msg.exit_code !== undefined && msg.exit_code !== null ? ` (exit ${msg.exit_code})` : "");
         statusLine.className = statusLineClass(msg.status);
         if (currentRun) currentRun.status = msg.status;
@@ -2361,7 +2425,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     // silently rerun a SLURM job as a plain local subprocess with no
     // indication the execution target changed.
     if (slurmRow && !currentRun.slurm_job_id) slurmRow.style.display = "none";
-    statusLine.textContent = `Status: ${currentRun.status}`;
+    statusLine.textContent = `Status: ${currentRun.status}`
+      + (waitingOn(currentRun) ? ` — waiting for ${waitingOn(currentRun)}` : "");
     statusLine.className = statusLineClass(currentRun.status);
     connectWebSocket(currentRun.run_id);
   } else {
@@ -2382,6 +2447,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           payload.subdir = popupOutputSubdir;
           const slurmOptions = buildSlurmOptions();
           if (slurmOptions) payload.slurm = slurmOptions;
+          Object.assign(payload, buildWaitOptions() || {});
         }
         const run = await api("/api/runs", {
           method: "POST",
@@ -2517,8 +2583,29 @@ try {
   if (savedNetDir === "asc" || savedNetDir === "desc") ccNetworkDirection = savedNetDir;
 } catch (e) { /* fall back to defaults */ }
 
+// Job names a queued job is waiting on (issue #78), from the Command Center's
+// own run list; the raw id if that job isn't in it. "" when not waiting.
+function waitingOn(run) {
+  if (!run || !run.waiting || !(run.wait_for || []).length) return "";
+  return run.wait_for.map((id) => {
+    const r = (ccRuns || []).find((x) => x.run_id === id);
+    return r ? (r.job_name || id) : id;
+  }).join(", ");
+}
+
+// Marks a running job's duration cell so the 1s ticker above keeps it moving.
+function liveDurationAttr(run) {
+  return run && run.status === "running" && run.started_at && !run.ended_at && !run.timestamp_estimated
+    ? ` data-live-start="${run.started_at}"` : "";
+}
+
 function statusBadge(status, run) {
-  const badge = `<span class="cc-status-badge status-${escapeHtml(status || "pending")}">${escapeHtml(status || "pending")}</span>`;
+  let badge = `<span class="cc-status-badge status-${escapeHtml(status || "pending")}">${escapeHtml(status || "pending")}</span>`;
+  const waiting = waitingOn(run);
+  if (waiting) {
+    badge += ` <span class="cc-array-progress" title="Starts automatically once ${escapeHtml(waiting)} has finished${
+      run.wait_mode === "success" ? " successfully (cancelled if it fails)" : ""}.">⏳ waiting for ${escapeHtml(waiting)}</span>`;
+  }
   // SLURM array runs (issue #52) get a live "K/N tasks" count alongside
   // the overall status badge -- there's no per-task tailing (see GitHub
   // issue #63), so this progress summary is the only live signal the
@@ -2533,12 +2620,24 @@ function statusBadge(status, run) {
   return badge;
 }
 
+// A job that is queued/pending hasn't started, so it has no start time -- but
+// it is the NEWEST thing in the project, not the oldest. Without this a job
+// waiting on another one (issue #78) sank to the bottom of the newest-first
+// table (and the top of the timeline), looking like it had vanished.
+// One that was cancelled before it ever started has only an end time, which
+// is where it belongs chronologically.
+function startedSortKey(run) {
+  if (run.started_at) return run.started_at;
+  if (run.status === "queued" || run.status === "pending") return Number.MAX_SAFE_INTEGER;
+  return run.ended_at || 0;
+}
+
 function sortedRuns() {
   const rows = ccRuns.slice();
   const { key, dir } = ccSort;
   rows.sort((a, b) => {
-    let av = a[key];
-    let bv = b[key];
+    let av = key === "started_at" ? startedSortKey(a) : a[key];
+    let bv = key === "started_at" ? startedSortKey(b) : b[key];
     if (key === "job_name") { av = (av || "").toLowerCase(); bv = (bv || "").toLowerCase(); }
     if (av === undefined || av === null) av = "";
     if (bv === undefined || bv === null) bv = "";
@@ -2565,7 +2664,7 @@ function renderTable() {
       <td>${escapeHtml(run.display_name || run.internal_name)}</td>
       <td>${statusBadge(run.status, run)}</td>
       <td>${formatTimestamp(run.started_at, run.timestamp_estimated)}</td>
-      <td>${formatDuration(run.started_at, run.ended_at, run.timestamp_estimated)}</td>
+      <td${liveDurationAttr(run)}>${formatDuration(run.started_at, run.ended_at, run.timestamp_estimated)}</td>
     `;
     tr.addEventListener("click", () => reopenRun(run));
     tbody.appendChild(tr);
@@ -2580,7 +2679,7 @@ function renderTimeline() {
   const list = document.getElementById("ccTimelineList");
   const empty = document.getElementById("ccTimelineEmpty");
   list.innerHTML = "";
-  let rows = ccRuns.slice().sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+  let rows = ccRuns.slice().sort((a, b) => startedSortKey(a) - startedSortKey(b));
   if (ccDirection === "desc") rows = rows.reverse();
   empty.classList.toggle("hidden", rows.length > 0);
   for (const run of rows) {
@@ -2861,14 +2960,99 @@ function renderCommandCenterViews() {
   else { ensureNetworkResizeObserver(); renderNetwork(); }
 }
 
-async function refreshCommandCenter() {
+// Coalesced: a refresh requested while one is in flight just runs once more
+// when it ends (rather than racing it), and a refresh whose data is identical
+// to what's on screen skips the re-render -- both matter now that the list
+// refreshes on every pushed job event and on a timer (issue #79), not only on
+// the occasional click. keepOnError: a background refresh failing (backend
+// restarting, session expired) leaves the table as it was instead of blanking it.
+let ccRefreshInFlight = false;
+let ccRefreshQueued = false;
+let ccLastSnapshot = null;
+
+async function refreshCommandCenter({ keepOnError = false } = {}) {
+  if (ccRefreshInFlight) { ccRefreshQueued = true; return; }
+  ccRefreshInFlight = true;
   try {
-    const proj = await api("/api/project");
-    ccRuns = proj.history || [];
-  } catch (err) {
-    ccRuns = [];
+    let next;
+    try {
+      const proj = await api("/api/project");
+      next = proj.history || [];
+    } catch (err) {
+      if (keepOnError) return;
+      next = [];
+    }
+    const snapshot = JSON.stringify(next);
+    ccRuns = next;
+    if (snapshot === ccLastSnapshot) return;
+    ccLastSnapshot = snapshot;
+    renderCommandCenterViews();
+  } finally {
+    ccRefreshInFlight = false;
+    if (ccRefreshQueued) { ccRefreshQueued = false; refreshCommandCenter({ keepOnError }); }
   }
-  renderCommandCenterViews();
+}
+
+// --- Live Command Center (issue #79) ---------------------------------------
+// The backend pushes {"type": "runs_changed"} on /ws/events whenever any job's
+// state is recorded; we just re-fetch the list (debounced, so a burst of
+// changes is one refresh). A slow poll stays as a safety net for what the
+// backend can't see happening -- jobs run from RELION's own GUI, a job on
+// SLURM finishing between polls -- and for when the socket is down.
+{
+  const LIVE_POLL_MS = 10000;
+  const liveEl = document.getElementById("ccLive");
+  let eventsWs = null;
+  let reconnectDelay = 1000;
+  let debounce = null;
+
+  function setLive(on) {
+    liveEl.classList.toggle("live", on);
+    liveEl.textContent = on ? "● live" : "○ polling";
+    liveEl.title = on
+      ? "Job status updates arrive instantly."
+      : `Live connection is down; the job list is re-checked every ${LIVE_POLL_MS / 1000}s.`;
+  }
+  function scheduleRefresh() {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => refreshCommandCenter({ keepOnError: true }), 250);
+  }
+  function connectEvents() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    try {
+      eventsWs = new WebSocket(`${proto}://${location.host}/ws/events`);
+    } catch (e) {
+      setTimeout(connectEvents, reconnectDelay);
+      return;
+    }
+    eventsWs.onopen = () => { reconnectDelay = 1000; setLive(true); scheduleRefresh(); };
+    eventsWs.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (e) { return; }
+      if (msg.type === "runs_changed") scheduleRefresh();
+    };
+    eventsWs.onclose = () => {
+      setLive(false);
+      eventsWs = null;
+      setTimeout(connectEvents, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+    };
+    eventsWs.onerror = () => { try { eventsWs.close(); } catch (e) { /* noop */ } };
+  }
+  setLive(false);
+  connectEvents();
+  setInterval(() => {
+    if (document.visibilityState === "visible") refreshCommandCenter({ keepOnError: true });
+  }, LIVE_POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshCommandCenter({ keepOnError: true });
+  });
+  // A running job's duration ticks every second without another fetch.
+  setInterval(() => {
+    document.querySelectorAll("[data-live-start]").forEach((el) => {
+      el.innerHTML = formatDuration(Number(el.dataset.liveStart), null, false);
+    });
+  }, 1000);
 }
 
 async function reopenRun(run) {
@@ -4995,10 +5179,15 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
           kind === "spa"
             ? `/api/manual-pick/${runId}/spa/load?mic_path=${encodeURIComponent(currentKey)}`
             : `/api/manual-pick/${runId}/tomo/load?tomo_name=${encodeURIComponent(currentKey)}`
+              + `&tomograms_star_path=${encodeURIComponent(sourcePath)}`
         );
         state.picks = resp.picks || [];
         drawOverlays();
         updateMeta();
+        // Picks made on a different-sized reconstruction of this tomogram were
+        // moved onto the current one on load -- say so, since they only
+        // become permanent on the next Save.
+        if (resp.notice) q('[data-role="pk-status"]').textContent = resp.notice;
       } catch (err) {
         q('[data-role="pk-status"]').textContent = "Could not load existing picks: " + err.message;
       }
@@ -5008,6 +5197,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       const statusRole = q('[data-role="pk-status"]');
       if (!currentKey) return;
       statusRole.textContent = "Saving…";
+      let saved = null;
       try {
         if (kind === "spa") {
           await api(`/api/manual-pick/${runId}/spa/save`, {
@@ -5018,7 +5208,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
             }),
           });
         } else {
-          await api(`/api/manual-pick/${runId}/tomo/save`, {
+          saved = await api(`/api/manual-pick/${runId}/tomo/save`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               tomo_name: currentKey,
@@ -5027,7 +5217,9 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
             }),
           });
         }
-        statusRole.textContent = `Saved ${state.picks.length} pick(s).`;
+        statusRole.textContent = `Saved ${state.picks.length} pick(s).`
+          + (saved && saved.n_outside_volume
+            ? ` ${saved.n_outside_volume} lie outside this volume.` : "");
       } catch (err) {
         statusRole.textContent = "Error: " + err.message;
       }

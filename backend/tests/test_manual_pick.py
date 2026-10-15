@@ -277,3 +277,133 @@ def test_clear_tomo_picks_on_a_fresh_job_dir_is_a_noop(tmp_path):
     job_dir = tmp_path / "Picks" / "job001"
     job_dir.mkdir(parents=True)
     assert manual_pick.clear_tomo_picks(job_dir) == 0
+
+
+# --------------------------------------------------------------------------
+# Re-reconstruction guard: annotations record the volume they were picked on,
+# so a tomogram redone at a different thickness doesn't displace old picks.
+# --------------------------------------------------------------------------
+
+
+def _rereconstruct(project, name="TS_01", nx=40, ny=50, nz=30, voxel=10.0):
+    """Replace the tomogram's MRC with a different-sized reconstruction."""
+    vol = (np.random.rand(nz, ny, nx) * 100).astype(np.float32)
+    with mrcfile.new(project / f"{name}.mrc", overwrite=True) as m:
+        m.set_data(vol)
+        m.voxel_size = voxel
+
+
+def _particles_angst(job_dir):
+    df = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    return df[["rlnCenteredCoordinateXAngst", "rlnCenteredCoordinateYAngst",
+               "rlnCenteredCoordinateZAngst"]].to_numpy()
+
+
+def test_save_records_the_volume_geometry(tmp_path):
+    project = _tomo_project(tmp_path, nx=40, ny=50, nz=60, voxel=10.0)
+    job_dir = project / "Picks" / "job006"
+    result = manual_pick.save_tomo_picks(
+        project, job_dir, "TS_01", [{"x": 5.0, "y": 6.0, "z": 7.0}], "tomograms.star")
+    blocks = starfile.read(result["annotation_path"], always_dict=True)
+    g = blocks[manual_pick.TOMO_GEOMETRY_BLOCK].iloc[0]
+    assert (g["rlnImageSizeX"], g["rlnImageSizeY"], g["rlnImageSizeZ"]) == (40, 50, 60)
+    assert g["rlnImagePixelSize"] == pytest.approx(10.0)
+    assert result["n_outside_volume"] == 0
+
+
+def test_thickness_change_moves_picks_onto_the_new_volume_and_keeps_angstrom_fixed(tmp_path):
+    project = _tomo_project(tmp_path, nx=40, ny=50, nz=60)   # picked on a 60-slice volume
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(
+        project, job_dir, "TS_01",
+        [{"x": 20.0, "y": 25.0, "z": 30.0},      # the centre
+         {"x": 10.0, "y": 10.0, "z": 50.0}],     # near the top, cropped away below
+        "tomograms.star")
+    before = _particles_angst(job_dir)
+
+    _rereconstruct(project, nx=40, ny=50, nz=30)              # redone at half the thickness
+
+    # Reloading in the picker: moved by (30-60)/2 = -15 voxels in Z, X/Y untouched
+    info = manual_pick.load_tomo_picks_info(project, job_dir, "TS_01", "tomograms.star")
+    assert info["rereferenced"] is True
+    zs = [p["z"] for p in info["picks"]]
+    assert zs == pytest.approx([15.0, 35.0])
+    assert [p["x"] for p in info["picks"]] == pytest.approx([20.0, 10.0])
+    assert info["n_outside"] == 1                       # z=35 >= 30
+    assert "60" in info["notice"] and "30" in info["notice"] and "1 now lie outside" in info["notice"]
+    assert len(info["picks"]) == 2                       # outside picks are kept, not lost
+
+    # The picker re-saving a pick it did NOT touch (the "dangerous" case: the
+    # job-level file is rebuilt against the new, thinner volume) must give the
+    # same physical positions as before.
+    manual_pick.save_tomo_picks(project, job_dir, "TS_01", info["picks"], "tomograms.star")
+    assert _particles_angst(job_dir) == pytest.approx(before)
+
+
+def test_rebuild_uses_recorded_geometry_not_the_current_volume(tmp_path):
+    """Even a rebuild triggered by ANOTHER tomogram's save (which never
+    reloads this one's picks) must not re-read this one's voxels against
+    the new volume."""
+    project = _tomo_project(tmp_path, name="TS_01", nx=40, ny=50, nz=60)
+    _tomo_project(project, name="TS_02", nx=40, ny=50, nz=60)
+    tomo_df = pd.DataFrame({
+        "rlnTomoName": ["TS_01", "TS_02"],
+        "rlnTomoReconstructedTomogram": ["TS_01.mrc", "TS_02.mrc"],
+    })
+    starfile.write({"tomograms": tomo_df}, project / "tomograms.star", overwrite=True)
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(project, job_dir, "TS_01", [{"x": 20.0, "y": 25.0, "z": 40.0}], "tomograms.star")
+    before = _particles_angst(job_dir)
+
+    _rereconstruct(project, name="TS_01", nz=30)
+    manual_pick.save_tomo_picks(project, job_dir, "TS_02", [{"x": 1.0, "y": 1.0, "z": 1.0}], "tomograms.star")
+
+    df = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    ts1 = df[df["rlnTomoName"] == "TS_01"]
+    assert ts1[["rlnCenteredCoordinateXAngst", "rlnCenteredCoordinateYAngst",
+                "rlnCenteredCoordinateZAngst"]].to_numpy() == pytest.approx(before)
+
+
+def test_binning_change_rescales_picks_about_the_centre(tmp_path):
+    project = _tomo_project(tmp_path, nx=40, ny=50, nz=60, voxel=10.0)
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(project, job_dir, "TS_01", [{"x": 30.0, "y": 25.0, "z": 30.0}], "tomograms.star")
+    _rereconstruct(project, nx=20, ny=25, nz=30, voxel=20.0)  # same field of view, binned 2x more
+    info = manual_pick.load_tomo_picks_info(project, job_dir, "TS_01", "tomograms.star")
+    p = info["picks"][0]
+    assert (p["x"], p["y"], p["z"]) == pytest.approx((15.0, 12.5, 15.0))
+    assert info["n_outside"] == 0
+
+
+def test_unchanged_volume_is_not_rereferenced(tmp_path):
+    project = _tomo_project(tmp_path)
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(project, job_dir, "TS_01", [{"x": 9.0, "y": 8.0, "z": 7.0}], "tomograms.star")
+    info = manual_pick.load_tomo_picks_info(project, job_dir, "TS_01", "tomograms.star")
+    assert info["rereferenced"] is False and info["notice"] == ""
+    assert (info["picks"][0]["x"], info["picks"][0]["z"]) == (9.0, 7.0)
+
+
+def test_load_without_star_path_never_moves_picks(tmp_path):
+    project = _tomo_project(tmp_path, nz=60)
+    job_dir = project / "Picks" / "job006"
+    manual_pick.save_tomo_picks(project, job_dir, "TS_01", [{"x": 9.0, "y": 8.0, "z": 50.0}], "tomograms.star")
+    _rereconstruct(project, nz=30)
+    assert manual_pick.load_tomo_picks(project, job_dir, "TS_01")[0]["z"] == 50.0
+
+
+def test_legacy_annotation_without_geometry_behaves_as_before(tmp_path):
+    """Annotation files written before geometry was recorded have no
+    pick_volume block: loaded verbatim and converted with the current volume."""
+    project = _tomo_project(tmp_path, nx=40, ny=50, nz=30)
+    job_dir = project / "Picks" / "job006"
+    ann = manual_pick.tomo_annotation_path(job_dir, "TS_01")
+    ann.parent.mkdir(parents=True)
+    starfile.write({"": pd.DataFrame({
+        "rlnTomoName": ["TS_01"], "rlnCoordinateX": [20.0],
+        "rlnCoordinateY": [25.0], "rlnCoordinateZ": [15.0]})}, ann, overwrite=True)
+
+    info = manual_pick.load_tomo_picks_info(project, job_dir, "TS_01", "tomograms.star")
+    assert info["rereferenced"] is False and info["picks"][0]["z"] == 15.0
+    assert manual_pick._rebuild_tomo_job_star(project, job_dir, "tomograms.star") == 1
+    assert _particles_angst(job_dir)[0] == pytest.approx([0.0, 0.0, 0.0])

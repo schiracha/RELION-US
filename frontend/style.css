@@ -660,6 +660,17 @@ html, body {
 .slurm-array-help { font-size: 11px; color: var(--text-dim); margin: 4px 0 0; }
 .slurm-array-help code { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 .cc-array-progress { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+
+/* Live Command Center indicator (issue #79) */
+.cc-live { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.cc-live.live { color: var(--ok); }
+
+/* "Wait for other job(s)" row in the job popup (issue #78) */
+.wait-row { margin: 6px 0; }
+.wait-fields { margin-top: 4px; padding-left: 4px; }
+.wait-fields label { display: block; margin-top: 6px; }
+.wait-fields select { width: 100%; margin-top: 2px; }
+.wait-help { font-size: 11px; color: var(--text-dim); margin: 4px 0 0; }
 .star-block { margin-bottom: 14px; }
 .star-block:last-child { margin-bottom: 0; }
 .star-block-name {

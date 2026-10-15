@@ -52,6 +52,79 @@ def _opt_float(value) -> float | None:
         return None
     return float(value)
 
+
+# "Re-reference to a re-reconstructed tomogram" -- shared by every importer
+# that writes voxel rlnCoordinateX/Y/Z (see converters/rereference.py for the
+# geometry). All optional; leaving the tomograms STAR blank skips the step.
+REREF_GROUP_NAME = "Re-reference to a different reconstruction (optional)"
+REREF_OPTIONS = [
+    {"key": "target_tomograms_star", "field_type": "filename", "label": "Tomograms STAR to re-reference to:", "default": "", "pattern": "*.star", "directory": ".", "help": "The tomograms.star of the reconstruction these picks should END UP on (e.g. Tomograms/job018/tomograms.star). Its size and binning for the tomogram named above are read from rlnTomoSizeX/Y/Z and rlnTomoTomogramBinning. Leave blank to skip. With only this set (no source fields) nothing moves and you just get an out-of-bounds check against that tomogram."},
+    {"key": "src_size_x", "field_type": "text", "label": "Source volume X size (unbinned px):", "default": "", "help": "Size of the volume the picks were made on, in UNBINNED tilt-series pixels (RELION's own 'Unbinned tomogram width'; for a volume stored at binning b, voxels x b). Blank = same as the target."},
+    {"key": "src_size_y", "field_type": "text", "label": "Source volume Y size (unbinned px):", "default": "", "help": "As above, for Y. Blank = same as the target."},
+    {"key": "src_size_z", "field_type": "text", "label": "Source volume Z size / thickness (unbinned px):", "default": "", "help": "As above, for Z -- e.g. 2000 if the picks were made on a 2000 px thick reconstruction that you have since redone at 1000. Blank = same as the target."},
+    {"key": "src_binning", "field_type": "text", "label": "Source volume binning:", "default": "", "help": "Binning of the volume the picks were made on (RELION's 'Binning for tomogram'). Blank = same as the target. When this differs, the coordinates are also scaled by source/target binning, so leave the binning/scale factor above at 1."},
+    {"key": "drop_outside", "field_type": "boolean", "label": "Drop picks outside the new volume:", "default": True, "help": "Picks that fall outside the target volume (e.g. in a slab you cropped away by reducing the thickness) are removed and written to out_of_bounds.star in this job's directory. Unchecked, they are kept with their out-of-range coordinates. They are never squeezed back in."},
+]
+REREF_FIELD_KEYS = [o["key"] for o in REREF_OPTIONS]
+
+
+def _apply_rereference(project_dir: Path, values: dict, df, tomo_name: str,
+                       scale_value, scale_label: str, job_dir: Path):
+    """Re-reference `df` (voxel coordinates) onto the target reconstruction
+    when the user asked for it. Returns (df, summary_lines); a no-op
+    returning (df, []) when no target tomograms STAR was given."""
+    from converters import rereference
+
+    star = (values.get("target_tomograms_star") or "").strip()
+    if not star:
+        return df, []
+    if float(scale_value) != 1.0:
+        raise ValueError(
+            f"{scale_label} is {scale_value} but a target tomograms STAR is set: "
+            f"the re-reference step already scales by source/target binning, so "
+            f"leave {scale_label} at 1 (otherwise the coordinates would be scaled twice)."
+        )
+    dst = rereference.read_target_geometry(_resolve_in(project_dir, star), tomo_name)
+    src = rereference.resolve_source_geometry(
+        dst,
+        _opt_float(values.get("src_size_x")), _opt_float(values.get("src_size_y")),
+        _opt_float(values.get("src_size_z")), _opt_float(values.get("src_binning")),
+    )
+    drop = bool(values.get("drop_outside", True))
+    kept, outside = rereference.rereference_coordinates(df, src, dst, drop_outside=drop)
+    scales, shifts = rereference.axis_scale_and_shift(src, dst)
+
+    lines = [
+        f"Re-referenced {len(df)} picks: source {src.size_unbinned} unbinned px @ binning "
+        f"{src.binning:g} -> target {dst.size_unbinned} @ {dst.binning:g} "
+        f"({'/'.join('%.2f' % v for v in dst.size_voxels)} voxels).",
+        f"Scale {scales[0]:.4f}; shift (X, Y, Z) = "
+        f"({shifts[0]:+.2f}, {shifts[1]:+.2f}, {shifts[2]:+.2f}) voxels.",
+    ]
+    if src == dst:
+        lines.append("Source geometry equals the target: no coordinates moved (out-of-bounds check only).")
+    if len(outside):
+        if drop:
+            if kept.empty:
+                raise ValueError(
+                    f"All {len(df)} picks fall outside the target volume "
+                    f"{'/'.join('%.0f' % v for v in dst.size_voxels)} voxels -- the source "
+                    f"geometry is probably wrong (nothing written)."
+                )
+            import starfile
+            job_dir.mkdir(parents=True, exist_ok=True)
+            oob_path = job_dir / "out_of_bounds.star"
+            starfile.write({"particles": outside}, oob_path, overwrite=True)
+            lines.append(
+                f"Dropped {len(outside)} of {len(df)} picks outside the target volume "
+                f"(kept {len(kept)}); they are in {oob_path}."
+            )
+        else:
+            lines.append(f"{len(outside)} of {len(df)} picks lie outside the target volume (kept, as requested).")
+    else:
+        lines.append(f"All {len(df)} picks are inside the target volume.")
+    return kept, lines
+
 # Field definitions for the custom jobs, in the same shape
 # job_registry.build_job_definition() produces for real RELION jobs, so the
 # frontend renders them identically. All fields are "standard" (no advanced
@@ -142,8 +215,12 @@ CUSTOM_JOB_DEFINITIONS = {
             {"key": "tomo_size_y", "field_type": "text", "label": "Tomogram Y size (px, for mirroring):", "default": "", "help": "Tomogram Y dimension in the SAME (scaled) pixels as the coordinates. Only needed if 'Mirror Y' is checked."},
             {"key": "tomo_size_z", "field_type": "text", "label": "Tomogram Z size (px, for mirroring):", "default": "", "help": "Tomogram Z dimension in the SAME (scaled) pixels as the coordinates. Only needed if 'Mirror Z' is checked. NB: this is the size along the axis BEFORE any Y/Z swap."},
             {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file. Relative paths land in this job's own output directory (<JobDir>/jobNNN/), the way a RELION job writes into its --o directory; an absolute path is honoured as given."},
+            *REREF_OPTIONS,
         ],
-        "standard_groups": [{"name": "", "fields": ["mod_path", "tomo_name", "scale", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"]}],
+        "standard_groups": [
+            {"name": "", "fields": ["mod_path", "tomo_name", "scale", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"]},
+            {"name": REREF_GROUP_NAME, "fields": REREF_FIELD_KEYS},
+        ],
         "program_guess": "converters.imod_bridge.model_to_coordinates",
         "flags_used": [],
         "commands_source": "(no subprocess — see backend/converters/imod_bridge.py:model_to_coordinates)",
@@ -184,8 +261,12 @@ CUSTOM_JOB_DEFINITIONS = {
             {"key": "tomo_size_y", "field_type": "text", "label": "Tomogram Y size (px, for mirroring):", "default": "", "help": "Tomogram Y dimension in the SAME (binned) voxels as the coordinates. Only needed if 'Mirror Y' is checked."},
             {"key": "tomo_size_z", "field_type": "text", "label": "Tomogram Z size (px, for mirroring):", "default": "", "help": "Tomogram Z dimension in the SAME (binned) voxels as the coordinates. Only needed if 'Mirror Z' is checked (size along the axis before any Y/Z swap)."},
             {"key": "out_path", "field_type": "filename", "label": "Output particles.star:", "default": "particles.star", "pattern": "*.star", "directory": ".", "help": "Where to write the converted RELION particles STAR file. Relative paths land in this job's own output directory (<JobDir>/jobNNN/), like a RELION job's --o directory; an absolute path is honoured as given."},
+            *REREF_OPTIONS,
         ],
-        "standard_groups": [{"name": "", "fields": ["coords_path", "tomo_name", "binning_factor", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"]}],
+        "standard_groups": [
+            {"name": "", "fields": ["coords_path", "tomo_name", "binning_factor", "swap_yz", "flip_x", "flip_y", "flip_z", "tomo_size_x", "tomo_size_y", "tomo_size_z", "out_path"]},
+            {"name": REREF_GROUP_NAME, "fields": REREF_FIELD_KEYS},
+        ],
         "program_guess": "converters.deepetpicker_bridge.coords_to_relion_particles",
         "flags_used": [],
         "commands_source": "(no subprocess — see backend/converters/deepetpicker_bridge.py)",
@@ -225,6 +306,8 @@ async def run_imod_import(project_dir: Path, values: dict, job_dir: Path) -> str
             tomo_size_y=_opt_float(values.get("tomo_size_y")),
             tomo_size_z=_opt_float(values.get("tomo_size_z")),
         )
+        df, reref_lines = _apply_rereference(
+            project_dir, values, df, values["tomo_name"], values["scale"], "Coordinate scale factor", job_dir)
         out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
         if out_path.exists():
             backup = backup_before_overwrite(out_path)
@@ -232,7 +315,8 @@ async def run_imod_import(project_dir: Path, values: dict, job_dir: Path) -> str
         else:
             note = ""
         write_particles(df, out_path, overwrite=True)
-        return f"Converted {len(df)} particles from {values['mod_path']}\nWrote {out_path}{note}"
+        return "\n".join([f"Converted {len(df)} particles from {values['mod_path']}", *reref_lines,
+                          f"Wrote {out_path}{note}"])
 
     return await asyncio.to_thread(work)
 
@@ -297,6 +381,8 @@ async def run_deepetpicker_import(project_dir: Path, values: dict, job_dir: Path
             tomo_size_y=_opt_float(values.get("tomo_size_y")),
             tomo_size_z=_opt_float(values.get("tomo_size_z")),
         )
+        df, reref_lines = _apply_rereference(
+            project_dir, values, df, values["tomo_name"], values["binning_factor"], "Binning factor", job_dir)
         out_path = _resolve_out(job_dir, values.get("out_path"), "particles.star")
         if out_path.exists():
             backup = backup_before_overwrite(out_path)
@@ -304,7 +390,8 @@ async def run_deepetpicker_import(project_dir: Path, values: dict, job_dir: Path
         else:
             note = ""
         write_particles(df, out_path, overwrite=True)
-        return f"Converted {len(df)} particles from {values['coords_path']}\nWrote {out_path}{note}"
+        return "\n".join([f"Converted {len(df)} particles from {values['coords_path']}", *reref_lines,
+                          f"Wrote {out_path}{note}"])
 
     return await asyncio.to_thread(work)
 

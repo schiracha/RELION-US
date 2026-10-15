@@ -1058,3 +1058,81 @@ def test_drafts_are_scoped_to_their_own_project(client, tmp_path):
     project_manager.init_new_project(other_project)
     main.run_manager.set_project_dir(other_project)
     assert client.get("/api/drafts").json() == []
+
+
+# ---------------------------------------------------------------------------
+# Waiting for other jobs (issue #78) and live Command Center events (#79)
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_status(client, run_id, wanted, timeout=8.0):
+    deadline = time.monotonic() + timeout
+    run = {}
+    while time.monotonic() < deadline:
+        run = client.get(f"/api/runs/{run_id}").json()
+        if run["status"] in wanted:
+            return run
+        time.sleep(0.05)
+    return run
+
+
+def _post_import(client, command, **extra):
+    return client.post("/api/runs", json={
+        "internal_name": "Import", "command": command, "subdir": "Import/job001", **extra})
+
+
+def test_wait_for_is_rejected_for_in_app_custom_jobs(client):
+    resp = client.post("/api/runs", json={
+        "internal_name": "DeepETPickerImport", "field_values": {}, "wait_for": ["abc"]})
+    assert resp.status_code == 400 and "can wait" in resp.json()["detail"]
+
+
+def test_bad_wait_mode_is_a_400(client):
+    resp = _post_import(client, "true", wait_for=["abc"], wait_mode="whenever")
+    assert resp.status_code == 400
+
+
+def test_waiting_on_an_unknown_job_is_a_409_and_creates_nothing(client):
+    resp = _post_import(client, "true", wait_for=["nope"])
+    assert resp.status_code == 409 and "no such job" in resp.json()["detail"]
+    assert client.get("/api/runs").json() == []
+
+
+def test_job_waits_then_runs_over_http(picker_client):
+    first = _post_import(picker_client, "sleep 0.6").json()
+    second = _post_import(picker_client, "echo second", wait_for=[first["run_id"]])
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["status"] == "queued" and body["waiting"] is True and body["wait_for"] == [first["run_id"]]
+    done = _wait_for_status(picker_client, body["run_id"], ("completed", "failed", "aborted"), timeout=15)
+    assert done["status"] == "completed", done
+    assert _wait_for_status(picker_client, first["run_id"], ("completed",))["status"] == "completed"
+
+
+def test_events_websocket_pushes_job_changes(picker_client):
+    with picker_client.websocket_connect("/ws/events") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        run = _post_import(picker_client, "true").json()
+        seen = []
+        for _ in range(30):
+            msg = ws.receive_json()
+            if msg["run_id"] == run["run_id"]:
+                seen.append(msg["status"])
+            if "completed" in seen:
+                break
+        assert msg["type"] == "runs_changed" and "completed" in seen
+
+
+def test_events_websocket_refuses_connection_when_auth_enabled_without_session(client):
+    import auth
+
+    auth.set_password("hunter22-events-test")
+    auth.enable()
+    try:
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/events"):
+                pass
+    finally:
+        auth.disable()

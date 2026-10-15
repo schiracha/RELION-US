@@ -43,6 +43,9 @@ Endpoints:
                                               (stdout/stderr buffers so far)
   WS   /ws/runs/{run_id}                  -> live stdout/stderr/status
                                               stream for one run
+  WS   /ws/events                         -> "job list changed" nudges for
+                                              the Command Center (see
+                                              events_websocket)
   POST /api/runs/{run_id}/abort           -> Command Center 'Abort' action
   PATCH /api/runs/{run_id}                -> Command Center 'Alias'/'Edit
                                               Note'/'Mark as finished'/'Mark
@@ -174,7 +177,7 @@ import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
 from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command
-from job_runner import MANUALLY_SETTABLE_STATUSES, JobRunManager
+from job_runner import MANUALLY_SETTABLE_STATUSES, WAIT_MODES, JobRunManager
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PROJECT_DIR = APP_DIR.parent / "relion_project"
@@ -554,10 +557,27 @@ class StartRunRequest(BaseModel):
     # a SLURM array instead of a single job (issue #52), with
     # "array_throttle" capping simultaneous tasks.
     slurm: dict | None = None
+    # Issue #78: hold this job until other jobs have finished. `wait_for` is a
+    # list of run_ids; `wait_mode` is "success" (start only if every one of
+    # them completed, otherwise cancel this job) or "any" (start once they've
+    # all ended, however they ended). Only real RELION/IsoNet jobs can wait.
+    wait_for: list[str] | None = None
+    wait_mode: str = "success"
 
 
 @app.post("/api/runs")
 async def start_run(req: StartRunRequest):
+    if req.wait_for:
+        if req.wait_mode not in WAIT_MODES:
+            raise HTTPException(status_code=400, detail=f"wait_mode must be one of {list(WAIT_MODES)}")
+        if req.internal_name in CUSTOM_JOB_DEFINITIONS or (
+            req.internal_name == "Select" and job_catalog.select_is_interactive(req.field_values or {})
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Only RELION and IsoNet command jobs can wait for another job; "
+                       "in-app converters and pickers start immediately.")
+
     if req.overwrite_run_id and not run_manager.pipeline_sync_enabled():
         # Overwriting means re-running into that job's own directory. For a
         # job RELION owns, that used to always mean silently replacing
@@ -654,6 +674,7 @@ async def start_run(req: StartRunRequest):
                 subdir=subdir, field_values=req.field_values,
                 overwrite_run_id=req.overwrite_run_id,
                 slurm_options=req.slurm,
+                wait_for=req.wait_for, wait_mode=req.wait_mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -672,6 +693,7 @@ async def start_run(req: StartRunRequest):
             subdir=req.subdir, field_values=req.field_values,
             overwrite_run_id=req.overwrite_run_id,
             slurm_options=req.slurm,
+            wait_for=req.wait_for, wait_mode=req.wait_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -1241,6 +1263,50 @@ def get_run(run_id: str):
     }
 
 
+@app.websocket("/ws/events")
+async def events_websocket(websocket: WebSocket):
+    """Issue #79: one socket per browser tab that says "the job list changed"
+    ({"type": "runs_changed", run_id, status}) the moment any job's state is
+    recorded, so the Command Center updates without a page refresh. It carries
+    no job data itself -- the tab just re-fetches /api/project -- which keeps
+    this correct for every kind of change (status, alias, note, delete,
+    restore) without enumerating them. Auth re-checked here for the same
+    reason as run_websocket below."""
+    cfg = auth.load_config()
+    if auth.is_enabled(cfg) and not auth.session_is_valid(
+        websocket.cookies.get(auth.COOKIE_NAME), cfg
+    ):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    run_manager.event_subscribers.append(queue)
+
+    async def watch_for_disconnect() -> None:
+        try:
+            while True:
+                await websocket.receive_text()
+        except Exception:  # noqa: BLE001 - any disconnect/protocol error ends it
+            pass
+
+    reader = asyncio.create_task(watch_for_disconnect())
+    try:
+        await websocket.send_json({"type": "hello"})
+        while True:
+            get_next = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait({get_next, reader}, return_when=asyncio.FIRST_COMPLETED)
+            if reader in done:
+                get_next.cancel()
+                break
+            await websocket.send_json(get_next.result())
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        reader.cancel()
+        if queue in run_manager.event_subscribers:
+            run_manager.event_subscribers.remove(queue)
+
+
 @app.websocket("/ws/runs/{run_id}")
 async def run_websocket(websocket: WebSocket, run_id: str):
     # @app.middleware("http") (the auth_gate above) only ever sees "http"
@@ -1704,9 +1770,11 @@ class TomoPickSaveRequest(BaseModel):
 
 
 @app.get("/api/manual-pick/{run_id}/tomo/load")
-def manual_pick_tomo_load(run_id: str, tomo_name: str = Query(...)):
+def manual_pick_tomo_load(run_id: str, tomo_name: str = Query(...),
+                          tomograms_star_path: str | None = Query(None)):
     job_dir = _manual_pick_job_dir(run_id)
-    return {"picks": manual_pick.load_tomo_picks(run_manager.project_dir, job_dir, tomo_name)}
+    return manual_pick.load_tomo_picks_info(
+        run_manager.project_dir, job_dir, tomo_name, tomograms_star_path)
 
 
 @app.post("/api/manual-pick/{run_id}/tomo/save")

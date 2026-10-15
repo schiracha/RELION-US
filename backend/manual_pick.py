@@ -45,6 +45,12 @@ SPA_MIC_NAME_COL = "rlnMicrographName"
 SPA_MIC_COORDS_COL = "rlnMicrographCoordinates"
 
 TOMO_ANNOTATIONS_DIRNAME = "annotations"
+# Second block in each per-tomogram annotation file recording the geometry of
+# the volume the picks were made on (voxels), so picks stay correct if the
+# tomogram is later re-reconstructed at a different size/binning -- see
+# _recentre_picks. Absent in annotation files written before this existed.
+TOMO_GEOMETRY_BLOCK = "pick_volume"
+_GEOM_COLS = ("rlnImageSizeX", "rlnImageSizeY", "rlnImageSizeZ", "rlnImagePixelSize")
 TOMO_PARTICLES_STAR_NAME = "particles.star"
 TOMO_OPTSET_STAR_NAME = "optimisation_set.star"
 
@@ -258,6 +264,68 @@ def tomo_annotation_path(job_dir: Path, tomo_name: str) -> Path:
     return Path(job_dir) / TOMO_ANNOTATIONS_DIRNAME / f"{safe}_particles.star"
 
 
+def _read_annotation(ann_path: Path):
+    """(picks DataFrame or None, recorded geometry dict or None)."""
+    import starfile
+
+    blocks = starfile.read(ann_path, always_dict=True)
+    df = blocks.get("") if "" in blocks else next(
+        (b for name, b in blocks.items() if name != TOMO_GEOMETRY_BLOCK), None)
+    geom = None
+    gdf = blocks.get(TOMO_GEOMETRY_BLOCK)
+    if gdf is not None and not gdf.empty and all(c in gdf.columns for c in _GEOM_COLS):
+        row = gdf.iloc[0]
+        geom = {"nx": float(row["rlnImageSizeX"]), "ny": float(row["rlnImageSizeY"]),
+                "nz": float(row["rlnImageSizeZ"]), "voxel_size": float(row["rlnImagePixelSize"])}
+    return df, geom
+
+
+def _volume_for(project_dir: Path, tomo_name: str, tomograms_star_path: str):
+    """Header geometry of this tomogram's CURRENT volume, or None if it isn't
+    in the star / can't be read (callers fall back to older behaviour)."""
+    try:
+        lookup = {
+            t["name"]: t["mrc_path"]
+            for t in viz._tomograms_from_star(project_dir, viz._safe(project_dir, tomograms_star_path))
+        }
+        mrc_path = lookup.get(tomo_name)
+        if not mrc_path:
+            return None
+        info = viz.volume_info(project_dir, mrc_path)
+    except (viz.VizError, OSError, ValueError, KeyError):
+        return None
+    return {"nx": float(info["nx"]), "ny": float(info["ny"]), "nz": float(info["nz"]),
+            "voxel_size": float(info["voxel_size"] or 1.0)}
+
+
+def _geometry_differs(a: dict, b: dict) -> bool:
+    if any(abs(a[k] - b[k]) > 0.5 for k in ("nx", "ny", "nz")):
+        return True
+    return abs(a["voxel_size"] - b["voxel_size"]) > 1e-3 * max(a["voxel_size"], b["voxel_size"], 1e-9)
+
+
+def _recentre_picks(xs, ys, zs, src: dict, dst: dict):
+    """Voxel coords on volume `src` -> voxel coords on volume `dst`, holding
+    the physical centre fixed (RELION anchors every reconstruction at N/2):
+    v' = (v - N_src/2) * (voxel_src / voxel_dst) + N_dst/2 per axis. A pure
+    shift when only the thickness changed, never a separate squeeze."""
+    ratio = src["voxel_size"] / dst["voxel_size"]
+    return (
+        (xs - src["nx"] / 2.0) * ratio + dst["nx"] / 2.0,
+        (ys - src["ny"] / 2.0) * ratio + dst["ny"] / 2.0,
+        (zs - src["nz"] / 2.0) * ratio + dst["nz"] / 2.0,
+    )
+
+
+def _count_outside(xs, ys, zs, vol: dict) -> int:
+    import numpy as np
+
+    xs, ys, zs = (np.asarray(a, dtype=float) for a in (xs, ys, zs))
+    inside = ((xs >= 0) & (xs < vol["nx"]) & (ys >= 0) & (ys < vol["ny"])
+              & (zs >= 0) & (zs < vol["nz"]))
+    return int((~inside).sum())
+
+
 def save_tomo_picks(
     project_dir: Path,
     job_dir: Path,
@@ -285,6 +353,7 @@ def save_tomo_picks(
 
     import starfile
 
+    n_outside = 0
     if picks:
         df = pd.DataFrame({
             "rlnTomoName": [tomo_name] * len(picks),
@@ -292,12 +361,21 @@ def save_tomo_picks(
             "rlnCoordinateY": [float(p["y"]) for p in picks],
             "rlnCoordinateZ": [float(p["z"]) for p in picks],
         })
-        starfile.write({"": df}, ann_path, overwrite=True)
+        blocks = {"": df}
+        vol = _volume_for(project_dir, tomo_name, tomograms_star_path)
+        if vol is not None:
+            blocks[TOMO_GEOMETRY_BLOCK] = pd.DataFrame({
+                "rlnImageSizeX": [vol["nx"]], "rlnImageSizeY": [vol["ny"]],
+                "rlnImageSizeZ": [vol["nz"]], "rlnImagePixelSize": [vol["voxel_size"]],
+            })
+            n_outside = _count_outside(df["rlnCoordinateX"], df["rlnCoordinateY"], df["rlnCoordinateZ"], vol)
+        starfile.write(blocks, ann_path, overwrite=True)
     else:
         ann_path.unlink(missing_ok=True)
 
     n_particles = _rebuild_tomo_job_star(project_dir, job_dir, tomograms_star_path)
-    return {"annotation_path": str(ann_path), "n_picks": len(picks), "n_particles": n_particles}
+    return {"annotation_path": str(ann_path), "n_picks": len(picks), "n_particles": n_particles,
+            "n_outside_volume": n_outside}
 
 
 def _rebuild_tomo_job_star(project_dir: Path, job_dir: Path, tomograms_star_path: str) -> int:
@@ -318,23 +396,31 @@ def _rebuild_tomo_job_star(project_dir: Path, job_dir: Path, tomograms_star_path
     names, xs, ys, zs = [], [], [], []
     if ann_dir.is_dir():
         for ann_file in sorted(ann_dir.glob("*_particles.star")):
-            blocks = starfile.read(ann_file, always_dict=True)
-            df = blocks.get("") if "" in blocks else next(iter(blocks.values()), None)
+            df, recorded = _read_annotation(ann_file)
             if df is None or df.empty or "rlnTomoName" not in df.columns:
                 continue
             tomo_name = str(df["rlnTomoName"].iloc[0])
-            mrc_path = tomo_lookup.get(tomo_name)
-            if not mrc_path:
-                # This tomogram's own MRC isn't in the CURRENT input
-                # tomograms.star (e.g. removed upstream since these picks
-                # were made) -- can't convert to Angstrom without its voxel
-                # size/dims. Skip it from the combined file rather than
-                # guess; the raw annotation file is untouched either way.
-                continue
-            try:
-                vinfo = viz.volume_info(project_dir, mrc_path)
-            except viz.VizError:
-                continue
+            if recorded is not None:
+                # Convert against the volume these picks were MADE on, not
+                # whatever the tomogram is now: centred Angstrom is
+                # independent of the reconstruction size, so this keeps a
+                # re-reconstructed tomogram (new thickness/binning) from
+                # silently displacing every earlier pick.
+                vinfo = recorded
+            else:
+                mrc_path = tomo_lookup.get(tomo_name)
+                if not mrc_path:
+                    # Legacy annotation with no recorded geometry, and this
+                    # tomogram isn't in the CURRENT input tomograms.star
+                    # (e.g. removed upstream since these picks were made) --
+                    # can't convert to Angstrom without its voxel size/dims.
+                    # Skip it rather than guess; the raw annotation file is
+                    # untouched either way.
+                    continue
+                try:
+                    vinfo = viz.volume_info(project_dir, mrc_path)
+                except viz.VizError:
+                    continue
             vs = vinfo["voxel_size"] or 1.0
             names.extend([tomo_name] * len(df))
             xs.extend((df["rlnCoordinateX"].to_numpy(dtype=float) - vinfo["nx"] / 2.0) * vs)
@@ -378,23 +464,53 @@ def _project_relative(project_dir: Path, path: str) -> str:
         return path
 
 
-def load_tomo_picks(project_dir: Path, job_dir: Path, tomo_name: str) -> list[dict]:
-    """Picks already saved for this tomogram in THIS job -- same purpose as
-    load_spa_picks above."""
-    import starfile
+def load_tomo_picks_info(project_dir: Path, job_dir: Path, tomo_name: str,
+                         tomograms_star_path: str | None = None) -> dict:
+    """Picks already saved for this tomogram in THIS job, plus whether they
+    had to be moved onto a re-reconstructed volume.
+
+    If the annotation recorded the volume it was picked on and the tomogram
+    in `tomograms_star_path` is now a different size/voxel size, the picks
+    are re-centred onto the current volume (see _recentre_picks) and a
+    `notice` says so. Picks that land outside the new volume are KEPT (so
+    re-saving can never silently lose one) and counted in `n_outside`."""
+    import numpy as np
 
     ann_path = tomo_annotation_path(Path(job_dir), tomo_name)
+    result = {"picks": [], "rereferenced": False, "n_outside": 0, "notice": ""}
     if not ann_path.is_file():
-        return []
-    blocks = starfile.read(ann_path, always_dict=True)
-    df = blocks.get("") if "" in blocks else next(iter(blocks.values()), None)
+        return result
+    df, recorded = _read_annotation(ann_path)
     if df is None or "rlnCoordinateX" not in df.columns:
-        return []
-    return [
-        {"x": float(row["rlnCoordinateX"]), "y": float(row["rlnCoordinateY"]),
-         "z": float(row["rlnCoordinateZ"]), "class": 1}
-        for _, row in df.iterrows()
+        return result
+    xs = df["rlnCoordinateX"].to_numpy(dtype=float)
+    ys = df["rlnCoordinateY"].to_numpy(dtype=float)
+    zs = df["rlnCoordinateZ"].to_numpy(dtype=float)
+
+    current = _volume_for(project_dir, tomo_name, tomograms_star_path) if (recorded and tomograms_star_path) else None
+    if recorded and current and _geometry_differs(recorded, current):
+        xs, ys, zs = _recentre_picks(xs, ys, zs, recorded, current)
+        result["rereferenced"] = True
+        result["n_outside"] = _count_outside(xs, ys, zs, current)
+        dims = lambda g: "%d x %d x %d" % (round(g["nx"]), round(g["ny"]), round(g["nz"]))
+        result["notice"] = (
+            f"These picks were made on a {dims(recorded)} voxel volume; the tomogram is now "
+            f"{dims(current)}. They were moved onto it (centre held fixed)."
+            + (f" {result['n_outside']} now lie outside the volume." if result["n_outside"] else "")
+            + " Save to keep the moved positions."
+        )
+    result["picks"] = [
+        {"x": float(x), "y": float(y), "z": float(z), "class": 1}
+        for x, y, z in zip(xs, ys, zs)
     ]
+    return result
+
+
+def load_tomo_picks(project_dir: Path, job_dir: Path, tomo_name: str,
+                    tomograms_star_path: str | None = None) -> list[dict]:
+    """Just the picks from load_tomo_picks_info -- same purpose as
+    load_spa_picks above."""
+    return load_tomo_picks_info(project_dir, job_dir, tomo_name, tomograms_star_path)["picks"]
 
 
 def clear_tomo_picks(job_dir: Path) -> int:
