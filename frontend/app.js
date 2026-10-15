@@ -5882,7 +5882,7 @@ const PROGRESS_JOB_TYPES = new Set([
 // PROGRESS_JOB_TYPES above on purpose: these have no backend
 // progress.PROGRESS_JOBS counterpart at all, and never should (that
 // endpoint is RELION-iteration-STAR-specific).
-const ISONET_LOSS_JOB_TYPES = new Set(["IsonetDenoise", "IsonetRefine"]);
+const ISONET_LOSS_JOB_TYPES = new Set(["IsonetDenoise", "IsonetRefine", "DeepETPickerTrain"]);
 
 // The exact filenames IsoNet2 itself writes (IsoNet/models/train.py's
 // plot_metrics() call: loss_{split}.png, split="full" for Denoise's n2n,

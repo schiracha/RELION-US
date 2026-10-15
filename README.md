@@ -14,7 +14,7 @@ RELION-US reads RELION's own source (`pipeline_jobs.cpp`/`.h`,
 single-particle and tomography, then runs them through one consistent popup
 UI with **an editable command box you approve before anything runs**. It also
 adds four import bridges (IMOD, Warp/M, DeepETPicker, AreTomo2), six IsoNet2
-job types, and in-browser replacements for the three RELION steps that only
+job types, three DeepETPicker job types (prepare, train, predict), and in-browser replacements for the three RELION steps that only
 ship as a desktop GUI.
 
 It's a normal web page, so it's portable: run the backend on your workstation
@@ -397,8 +397,8 @@ out** item appears under **☰ Menu** once you're in.
 ### Jobs list (left sidebar)
 
 Every RELION job type grouped by RELION's own categories, with the import
-bridges tagged `(custom)` and IsoNet2 under its own **IsoNet (Beta)**
-category. An **All / SPA / Tomo** toggle filters the list; the app guesses
+bridges tagged `(custom)`, IsoNet2 under its own **IsoNet (Beta)** category
+and DeepETPicker under **DeepETPicker (Beta)**. An **All / SPA / Tomo** toggle filters the list; the app guesses
 which to preselect from the job types the project has actually run, but never
 gates what you can run.
 
@@ -443,8 +443,8 @@ was already open, rather than stacking windows).
   against RELION's real logic by eye.
 - **Command box** — pre-filled with the draft, fully editable. **Recompute
   draft** regenerates it from the current form values; or just hand-edit it.
-- **Run** — executes exactly the string in the command box (RELION and IsoNet2
-  jobs) or calls the converter directly (import bridges), streams output live
+- **Run** — executes exactly the string in the command box (RELION, IsoNet2
+  and DeepETPicker jobs) or calls the converter directly (import bridges), streams output live
   over a websocket, and keeps the full transcript if you close and reopen.
 
 Every run leaves `run.out`/`run.err` in its job directory, matching RELION's
@@ -534,6 +534,25 @@ environment (SLURM submission included), with folder browse buttons for their
 directory inputs and options cross-checked against IsoNet2's own GUI and
 tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss curve on
 their Progress tab; **Predict**'s output MRCs link straight into the viewer.
+
+**Three DeepETPicker job types** under **DeepETPicker (Beta)** — Prepare, Train
+and Predict, each one command of the `deepetpicker` command line from the
+[DeepETPicker](https://github.com/cbmi-group/DeepETPicker) checkout (install it
+into a conda environment with `pip install -e .`; Train and Predict also need
+PyTorch and pytorch-lightning 1.1.0). They work like the IsoNet2 jobs: a real
+subprocess in a conda environment, SLURM included, an editable command box, and
+every output written into the job's own directory so Outputs, Clean and Delete
+see it. Chaining is by project-relative path (Train points at a Prepare job
+directory, Predict at a Train job directory). Prepare standardizes the
+tomograms and paints the weak labels from known coordinates, given either as a
+RELION `particles.star` or a folder of `.coords`; Train gets a loss-curve
+Progress tab; Predict writes native `.coords` plus a `particles.star` rescaled
+by a factor you give (picking pixel size over RELION tomogram pixel size), which
+the viewer can overlay directly. I kept these separate from **Import from
+DeepETPicker**, which only converts a `.coords` file made elsewhere. The
+Prepare job's tomogram-file column default (`rlnTomoReconstructedTomogram`) has
+not been checked against every RELION-5 release; if it is wrong the job stops
+and lists the columns the file has.
 
 ### In-browser replacements for RELION's desktop-only steps
 
@@ -910,7 +929,7 @@ tab, and Analyze.
 
 ## SLURM cluster submission
 
-Every RELION and IsoNet2 job popup has a **Submit to SLURM cluster** checkbox
+Every RELION, IsoNet2 and DeepETPicker job popup has a **Submit to SLURM cluster** checkbox
 next to the command box. Check it and the same command that would otherwise run
 as a direct subprocess is wrapped into an sbatch script
 (`slurm/template_relion_job.sbatch` / `template_python_job.sbatch`, with

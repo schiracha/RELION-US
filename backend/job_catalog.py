@@ -31,6 +31,7 @@ from typing import Callable, Optional
 CATEGORIES = [
     "Import & Conversion",
     "IsoNet (Beta)",
+    "DeepETPicker (Beta)",
     "Motion Correction",
     "CTF",
     "Particle Picking",
@@ -299,6 +300,32 @@ CUSTOM_JOBS = {
         "category": "IsoNet (Beta)",
         "description": "Apply a trained IsoNet2 model to tomograms (missing-wedge correction / denoising)",
     },
+    # DeepETPicker (github.com/cbmi-group/DeepETPicker) -- three job types, one
+    # per `deepetpicker` command, run as real subprocesses like IsoNet2 (so
+    # local + SLURM), command-building in deepetpicker_jobs.py. Not to be
+    # confused with DeepETPickerImport above, which only converts a .coords
+    # file someone else made. Fabricated custom.* labels, for the same reason
+    # as IsoNet2's (no RELION class exists for them).
+    "DeepETPickerPrepare": {
+        "label_new": "custom.deepetpicker_prepare",
+        "display_name": "DeepETPicker – Prepare",
+        "category": "DeepETPicker (Beta)",
+        "description": "Standardize tomograms and generate weak labels and occupancy maps from known particle "
+                       "coordinates, as training data for DeepETPicker",
+    },
+    "DeepETPickerTrain": {
+        "label_new": "custom.deepetpicker_train",
+        "display_name": "DeepETPicker – Train",
+        "category": "DeepETPicker (Beta)",
+        "description": "Train the DeepETPicker network on the data of a DeepETPicker – Prepare job",
+    },
+    "DeepETPickerPredict": {
+        "label_new": "custom.deepetpicker_predict",
+        "display_name": "DeepETPicker – Predict",
+        "category": "DeepETPicker (Beta)",
+        "description": "Pick particles in tomograms with a trained DeepETPicker model; writes native .coords and "
+                       "a RELION particles.star",
+    },
 }
 
 # --------------------------------------------------------------------------
@@ -364,6 +391,7 @@ PIPELINE_TOMO_ONLY = {
     "ImodImport", "WarpImport", "DeepETPickerImport", "AreTomoImport",
     "IsonetPrepareStar", "IsonetDeconv", "IsonetMakeMask",
     "IsonetDenoise", "IsonetRefine", "IsonetPredict",
+    "DeepETPickerPrepare", "DeepETPickerTrain", "DeepETPickerPredict",
 }
 
 
@@ -458,6 +486,9 @@ JOB_DIRNAME = {
     "IsonetDenoise": "IsonetDenoise",
     "IsonetRefine": "IsonetRefine",
     "IsonetPredict": "IsonetPredict",
+    "DeepETPickerPrepare": "DeepETPickerPrepare",
+    "DeepETPickerTrain": "DeepETPickerTrain",
+    "DeepETPickerPredict": "DeepETPickerPredict",
 }
 
 assert set(JOB_DIRNAME) == _ALL_INTERNAL_NAMES, "JOB_DIRNAME must cover every job type"
