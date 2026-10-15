@@ -11,9 +11,11 @@ not through custom_jobs.py's in-process path. The pre-existing
 DeepETPickerImport bridge is a different job (converting someone else's
 .coords file) and is unchanged.
 
-The command line these build lives in the DeepETPicker repository
-(`python -m deepetpicker`, schiracha/DeepETPicker_Sc, see its
-docs/PLAN_relion_io_webgui.md). Its contract, which this module relies on:
+The command line these build exists only in the fork
+github.com/schiracha/DeepETPicker_Sc (`python -m deepetpicker`; see its
+docs/PLAN_relion_io_webgui.md), not in the original cbmi-group/DeepETPicker:
+Train and Predict also rely on its edited train.py/test.py (job-directory
+output, errors raised instead of swallowed). Its contract, which this module relies on:
 
 - every command takes --output_dir <JobDir>/jobNNN/ and writes only inside it
   (RELION-US creates that directory and owns numbering, run.out/run.err and
@@ -35,10 +37,10 @@ import shlex
 
 _ENV_OPTION = {
     "key": "conda_env", "field_type": "text", "label": "Conda environment name:", "default": "deepetpicker",
-    "help": "The conda environment DeepETPicker is installed in (`pip install -e .` from the DeepETPicker "
-            "checkout, which provides the `deepetpicker` command). The command is run as "
-            "`conda run -n <this> deepetpicker ...`. The environment needs PyTorch and pytorch-lightning "
-            "1.1.0 for Train and Predict; Prepare needs neither.",
+    "help": "The conda environment with the `deepetpicker` command: `pip install -e .` from a checkout of "
+            "github.com/schiracha/DeepETPicker_Sc (the original cbmi-group/DeepETPicker does not provide it). "
+            "The command is run as `conda run -n <this> deepetpicker ...`. The environment needs PyTorch and "
+            "pytorch-lightning 1.1.0 for Train and Predict; Prepare needs neither.",
 }
 
 _GPU_OPTION = {

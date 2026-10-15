@@ -536,23 +536,42 @@ tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss curve on
 their Progress tab; **Predict**'s output MRCs link straight into the viewer.
 
 **Three DeepETPicker job types** under **DeepETPicker (Beta)** — Prepare, Train
-and Predict, each one command of the `deepetpicker` command line from the
-[DeepETPicker](https://github.com/cbmi-group/DeepETPicker) checkout (install it
-into a conda environment with `pip install -e .`; Train and Predict also need
-PyTorch and pytorch-lightning 1.1.0). They work like the IsoNet2 jobs: a real
-subprocess in a conda environment, SLURM included, an editable command box, and
-every output written into the job's own directory so Outputs, Clean and Delete
-see it. Chaining is by project-relative path (Train points at a Prepare job
-directory, Predict at a Train job directory). Prepare standardizes the
-tomograms and paints the weak labels from known coordinates, given either as a
-RELION `particles.star` or a folder of `.coords`; Train gets a loss-curve
-Progress tab; Predict writes native `.coords` plus a `particles.star` rescaled
-by a factor you give (picking pixel size over RELION tomogram pixel size), which
-the viewer can overlay directly. I kept these separate from **Import from
-DeepETPicker**, which only converts a `.coords` file made elsewhere. The
-Prepare job's tomogram-file column default (`rlnTomoReconstructedTomogram`) has
-not been checked against every RELION-5 release; if it is wrong the job stops
-and lists the columns the file has.
+and Predict, each one command of the `deepetpicker` command line. That command
+line does not exist in the original
+[cbmi-group/DeepETPicker](https://github.com/cbmi-group/DeepETPicker); it comes
+from my fork, [schiracha/DeepETPicker_Sc](https://github.com/schiracha/DeepETPicker_Sc),
+which the jobs need as is. Install it with:
+
+```bash
+git clone https://github.com/schiracha/DeepETPicker_Sc
+cd DeepETPicker_Sc
+# Train and Predict need the original DeepETPicker README's environment first
+# (conda, Python 3.8, PyTorch 1.7.1 -- PyTorch is not in requirement.txt); then:
+pip install -r requirement.txt    # pytorch-lightning 1.1.0 and the rest
+pip install -e .     # provides the `deepetpicker` command
+```
+
+Prepare needs only `pip install -e .`. Train and Predict run the fork's
+`train.py` and `test.py` (from the same checkout, so keep it in place — the
+command finds them through the editable install), and they depend on edits I
+made there: output goes into the job's own directory, and a failed training
+run now exits non-zero. Stock `train.py` swallows its own errors and exits 0, so
+a crashed run would show up here as completed. The environment name goes in the
+job's first field (`deepetpicker` by default).
+
+They work like the IsoNet2 jobs: a real subprocess in a conda environment, SLURM
+included, an editable command box, and every output written into the job's own
+directory so Outputs, Clean and Delete see it. Chaining is by project-relative
+path (Train points at a Prepare job directory, Predict at a Train job
+directory). Prepare standardizes the tomograms and paints the weak labels from
+known coordinates, given either as a RELION `particles.star` or a folder of
+`.coords`; Train gets a loss-curve Progress tab; Predict writes native `.coords`
+plus a `particles.star` rescaled by a factor you give (picking pixel size over
+RELION tomogram pixel size), which the viewer can overlay directly. I kept these
+separate from **Import from DeepETPicker**, which only converts a `.coords` file
+made elsewhere. The Prepare job's tomogram-file column default
+(`rlnTomoReconstructedTomogram`) has not been checked against every RELION-5
+release; if it is wrong the job stops and lists the columns the file has.
 
 ### In-browser replacements for RELION's desktop-only steps
 
