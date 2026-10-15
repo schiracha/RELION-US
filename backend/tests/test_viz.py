@@ -232,3 +232,94 @@ def test_transpose_actually_transposes_the_pixels(tmp_path):
     assert plain.shape == (6, 8)      # rows z, cols y
     assert flipped.shape == (8, 6)    # rows y, cols z
     assert np.array_equal(flipped, plain.T)
+
+
+# --------------------------------------------------------------------------
+# Gaussian smoothing -- the old DeepETPicker viewer's "Gaussian filter" blurred
+# the whole volume in 3-D (skimage.filters.gaussian); the slice must match that,
+# not a 2-D blur of the one slice.
+# --------------------------------------------------------------------------
+
+
+def _decode(png: bytes):
+    import io
+    from PIL import Image
+    return np.array(Image.open(io.BytesIO(png)))
+
+
+@pytest.mark.parametrize("axis,index", [("z", 0), ("z", 9), ("z", 19), ("y", 29), ("y", 15), ("x", 24), ("x", 0)])
+@pytest.mark.parametrize("sigma", [0.5, 1.5, 3.0])
+def test_gaussian_slice_equals_filtering_the_whole_volume(axis, index, sigma):
+    from scipy import ndimage
+    vol = np.random.default_rng(0).normal(size=(20, 30, 25)).astype(np.float32)   # z, y, x
+    got = viz._gaussian_slice(vol, axis, index, sigma)
+    ref = ndimage.gaussian_filter(vol.astype(np.float64), sigma, mode="nearest", truncate=4.0)
+    ref = ref[index] if axis == "z" else ref[:, index] if axis == "y" else ref[:, :, index]
+    assert np.abs(got - ref).max() < 1e-4
+
+
+def test_gaussian_slice_matches_skimage_which_the_old_viewer_used():
+    skimage_filters = pytest.importorskip("skimage.filters")
+    vol = np.random.default_rng(1).normal(size=(16, 20, 18)).astype(np.float32)
+    ref = skimage_filters.gaussian(vol, 1.5)[8]
+    assert np.abs(viz._gaussian_slice(vol, "z", 8, 1.5) - ref).max() < 1e-4
+
+
+def test_sigma_zero_is_the_plain_slice(tmp_path):
+    _make_project(tmp_path)
+    assert viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 5, sigma=0.0) == \
+        viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 5)
+
+
+def test_smoothing_reduces_noise_and_keeps_the_slice_geometry(tmp_path):
+    _make_project(tmp_path)
+    plain = _decode(viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 15, lo=0, hi=100))
+    smooth = _decode(viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 15, lo=0, hi=100, sigma=2.0))
+    assert plain.shape == smooth.shape == (50, 40)
+    assert smooth.std() < plain.std() / 2
+
+
+def test_smoothing_reaches_across_slices(tmp_path):
+    """A bright slab one slice away must show up in this slice once blurred in 3-D;
+    a 2-D blur of the single slice would leave it untouched."""
+    (tmp_path / ".relion_us").mkdir()
+    vol = np.zeros((9, 16, 16), dtype=np.float32)
+    vol[5] = 100.0
+    with mrcfile.new(tmp_path / "slab.mrc", overwrite=True) as m:
+        m.set_data(vol)
+    flat = _decode(viz.render_slice_png(tmp_path, "slab.mrc", "z", 4, lo=0, hi=100))
+    blurred = _decode(viz.render_slice_png(tmp_path, "slab.mrc", "z", 4, lo=0, hi=100, sigma=1.0))
+    assert flat.max() == 0 and blurred.min() > 0
+
+
+def test_smoothing_keeps_nan_voxels_black_and_does_not_spread_them(tmp_path):
+    (tmp_path / ".relion_us").mkdir()
+    vol = (np.random.default_rng(2).random((8, 16, 16)) * 100).astype(np.float32)
+    vol[3, 4, 4] = np.nan
+    with mrcfile.new(tmp_path / "nan.mrc", overwrite=True) as m:
+        m.set_data(vol)
+    out = viz._gaussian_slice(vol, "z", 3, 1.5)
+    assert np.isnan(out[4, 4]) and np.isfinite(np.delete(out.ravel(), 4 * 16 + 4)).all()
+    assert viz.render_slice_png(tmp_path, "nan.mrc", "z", 3, sigma=1.5)[:4] == b"\x89PNG"
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), viz.MAX_GAUSSIAN_SIGMA + 0.1])
+def test_bad_sigma_is_rejected(tmp_path, bad):
+    _make_project(tmp_path)
+    with pytest.raises(viz.VizError, match="sigma"):
+        viz.render_slice_png(tmp_path, "TS_01.mrc", "z", 5, sigma=bad)
+
+
+def test_slice_endpoint_passes_sigma_and_rejects_bad_values(tmp_path, monkeypatch):
+    testclient = pytest.importorskip("fastapi.testclient")
+    import main
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    proj = tmp_path / "p"
+    proj.mkdir()
+    _make_project(proj)
+    main.run_manager.set_project_dir(proj)
+    c = testclient.TestClient(main.app)
+    q = "/api/viz/slice?mrc_path=TS_01.mrc&axis=z&index=5&lo=0&hi=100"
+    plain, smooth = c.get(q), c.get(q + "&sigma=2")
+    assert plain.status_code == smooth.status_code == 200 and plain.content != smooth.content
+    assert c.get(q + "&sigma=99").status_code == 400

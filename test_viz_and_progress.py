@@ -73,7 +73,8 @@ def make_viewer_fixtures():
             "rlnTomoName": ["TS_77"] * 3,
             "rlnCoordinateX": [32.0, 12.0, 50.0],
             "rlnCoordinateY": [24.0, 8.0, 40.0],
-            "rlnCoordinateZ": [12.0, 4.0, 20.0]})},
+            "rlnCoordinateZ": [12.0, 4.0, 20.0],
+            "rlnClassNumber": [1, 2, 9]})},
         d / "picks99.star", overwrite=True)
     return nx, ny, nz
 
@@ -278,6 +279,38 @@ def main():
             "c => { const d = c.getContext('2d').getImageData(0,0,c.width,c.height).data;"
             "       for (let i = 3; i < d.length; i += 4) if (d[i]) return true; return false; }")
         check("XY overlay has something drawn on it", painted)
+
+        # class legend: one swatch per class present, colours cycle after 8
+        legend = viz.locator('[data-role="viz-legend"]')
+        items = legend.locator(".viz-legend-item").all_inner_texts()
+        check(f"Legend lists the classes in the picks ({items})", items == ["Class 1", "Class 2", "Class 9"])
+        sw = legend.locator(".viz-legend-swatch").evaluate_all(
+            "els => els.map(e => getComputedStyle(e).backgroundColor)")
+        check(f"Classes 1 and 2 have different colours ({sw})", len(sw) == 3 and sw[0] != sw[1])
+        check("Class 9 reuses class 1's colour and the legend says colours repeat",
+              sw[2] == sw[0] and "repeat" in legend.inner_text())
+
+        # Gaussian smoothing: off by default; releasing the slider asks the server for sigma
+        check("Smoothing starts off", viz.locator('[data-role="viz-sigma-val"]').inner_text() == "off"
+              and "sigma=" not in viz.locator('[data-role="viz-img"]').get_attribute("src"))
+        viz.locator('[data-role="viz-sigma"]').fill("2")
+        page.wait_for_timeout(1200)
+        src = viz.locator('[data-role="viz-img"]').get_attribute("src")
+        check(f"Setting sigma refetches the slices with sigma ({src})", "sigma=2" in src)
+        check("All three panels carry sigma",
+              all("sigma=2" in (viz.locator(sel).get_attribute("src") or "")
+                  for sel in ('[data-role="viz-img"]', '[data-role="img-zy"]', '[data-role="img-xz"]')))
+        check("Contrast window is automatic while smoothing (no lo/hi sent)", "lo=" not in src and "hi=" not in src)
+        smoothed_ok = viz.locator(".viz-panel img").evaluate_all("els => els.every(e => e.naturalWidth > 0)")
+        check("Smoothed slices loaded", smoothed_ok)
+        viz.locator('[data-role="viz-lo"]').fill("10")
+        page.wait_for_timeout(900)
+        check("Moving Black/White sends the window again",
+              "lo=" in viz.locator('[data-role="viz-img"]').get_attribute("src"))
+        viz.locator('[data-role="viz-sigma"]').fill("0")
+        page.wait_for_timeout(1000)
+        check("Sigma back to 0 drops the parameter",
+              "sigma=" not in viz.locator('[data-role="viz-img"]').get_attribute("src"))
 
         # toggling the crosshair off clears it
         viz.locator('[data-role="viz-crosshair"]').uncheck()
