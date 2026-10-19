@@ -722,3 +722,25 @@ def test_rereference_options_are_on_both_voxel_importers():
         keys = {o["key"] for o in d["options"]}
         assert set(custom_jobs.REREF_FIELD_KEYS) <= keys
         assert any(g["name"] == custom_jobs.REREF_GROUP_NAME for g in d["standard_groups"])
+
+
+def test_tomo_manual_pick_job_accepts_a_denoise_jobs_tomograms_star(tmp_path):
+    starfile.write({"global": pd.DataFrame({
+        "rlnTomoName": ["TS_01", "TS_02"],
+        "rlnTomoReconstructedTomogramHalf1": ["a.mrc", "b.mrc"],
+        "rlnTomoReconstructedTomogramDenoised": ["d1.mrc", "d2.mrc"],
+    })}, tmp_path / "tomograms.star", overwrite=True)
+    job_dir = tmp_path / "Picks" / "job001"
+    job_dir.mkdir(parents=True)
+    summary = asyncio.run(custom_jobs.run_tomo_manual_pick(
+        tmp_path, {"in_tomoset": "tomograms.star"}, job_dir))
+    assert "Found 2 tomogram(s)" in summary and "denoised" in summary
+
+
+def test_tomo_manual_pick_job_fails_loudly_when_the_star_has_no_volumes(tmp_path):
+    starfile.write({"global": pd.DataFrame({"rlnTomoName": ["TS_01"]})},
+                   tmp_path / "tomograms.star", overwrite=True)
+    job_dir = tmp_path / "Picks" / "job001"
+    job_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match="No tomogram volumes found"):
+        asyncio.run(custom_jobs.run_tomo_manual_pick(tmp_path, {"in_tomoset": "tomograms.star"}, job_dir))

@@ -323,3 +323,89 @@ def test_slice_endpoint_passes_sigma_and_rejects_bad_values(tmp_path, monkeypatc
     plain, smooth = c.get(q), c.get(q + "&sigma=2")
     assert plain.status_code == smooth.status_code == 200 and plain.content != smooth.content
     assert c.get(q + "&sigma=99").status_code == 400
+
+
+# --------------------------------------------------------------------------
+# Which volume a tomograms.star names: denoised / reconstructed / half
+# (a Denoise job's output has only the Denoised + Half columns -- the plain
+# rlnTomoReconstructedTomogram the reader used to require is absent)
+# --------------------------------------------------------------------------
+
+
+def _tomograms_star(tmp_path, columns, names=("TS_01",), name="tomograms.star"):
+    data = {"rlnTomoName": list(names)}
+    for col, template in columns.items():
+        data[col] = [template.format(n=n) for n in names]
+    starfile.write({"global": pd.DataFrame(data)}, tmp_path / name, overwrite=True)
+    return name
+
+
+DENOISE_LAYOUT = {   # as written by Denoise/jobNNN/tomograms.star
+    "rlnTomoReconstructedTomogramHalf1": "Tomograms/job018/tomograms/rec_{n}_half1.mrc",
+    "rlnTomoReconstructedTomogramHalf2": "Tomograms/job018/tomograms/rec_{n}_half2.mrc",
+    "rlnTomoReconstructedTomogramDenoised": "Denoise/job027/tomograms/rec_{n}.mrc",
+}
+
+
+def test_a_denoise_jobs_tomograms_star_lists_the_denoised_volumes(tmp_path):
+    star = _tomograms_star(tmp_path, DENOISE_LAYOUT, names=("TS_01", "TS_02"))
+    info = viz.inspect(tmp_path, star)
+    assert info["kind"] == "tomograms"
+    assert [(t["name"], t["mrc_path"], t["volume"]) for t in info["tomograms"]] == [
+        ("TS_01", "Denoise/job027/tomograms/rec_TS_01.mrc", "denoised"),
+        ("TS_02", "Denoise/job027/tomograms/rec_TS_02.mrc", "denoised"),
+    ]
+    assert info["warnings"] == []
+
+
+def test_denoised_is_preferred_when_the_plain_column_is_also_there(tmp_path):
+    star = _tomograms_star(tmp_path, {
+        "rlnTomoReconstructedTomogram": "Tomograms/job018/tomograms/rec_{n}.mrc",
+        **DENOISE_LAYOUT,
+    })
+    assert viz.inspect(tmp_path, star)["tomograms"][0]["volume"] == "denoised"
+
+
+def test_a_plain_reconstruction_star_is_unchanged(tmp_path):
+    star = _tomograms_star(tmp_path, {"rlnTomoReconstructedTomogram": "Tomograms/job004/tomograms/rec_{n}.mrc"})
+    t = viz.inspect(tmp_path, star)["tomograms"][0]
+    assert (t["mrc_path"], t["volume"]) == ("Tomograms/job004/tomograms/rec_TS_01.mrc", "reconstructed")
+
+
+def test_a_halves_only_star_shows_half1_and_says_so(tmp_path):
+    """An even/odd Reconstruct job's tomograms.star has no full volume."""
+    star = _tomograms_star(tmp_path, {k: v for k, v in DENOISE_LAYOUT.items() if "Half" in k})
+    info = viz.inspect(tmp_path, star)
+    assert info["tomograms"][0]["volume"] == "half1"
+    assert info["tomograms"][0]["mrc_path"].endswith("_half1.mrc")
+    assert len(info["warnings"]) == 1 and "Half 1" in info["warnings"][0]
+
+
+def test_a_blank_denoised_cell_falls_back_to_the_next_column(tmp_path):
+    df = pd.DataFrame({
+        "rlnTomoName": ["TS_01", "TS_02"],
+        "rlnTomoReconstructedTomogramDenoised": ["Denoise/job027/tomograms/rec_TS_01.mrc", "None"],
+        "rlnTomoReconstructedTomogram": ["a.mrc", "b.mrc"],
+    })
+    starfile.write({"global": df}, tmp_path / "tomograms.star", overwrite=True)
+    tomos = {t["name"]: (t["mrc_path"], t["volume"]) for t in viz.inspect(tmp_path, "tomograms.star")["tomograms"]}
+    assert tomos == {"TS_01": ("Denoise/job027/tomograms/rec_TS_01.mrc", "denoised"),
+                     "TS_02": ("b.mrc", "reconstructed")}
+
+
+def test_a_star_with_no_volume_column_is_still_rejected(tmp_path):
+    star = _tomograms_star(tmp_path, {"rlnTomoTiltSeriesStarFile": "x/{n}.star"})
+    with pytest.raises(viz.VizError, match="couldn't find tomogram"):
+        viz.inspect(tmp_path, star)
+
+
+def test_an_optimisation_set_pointing_at_a_denoised_star_resolves_it(tmp_path):
+    star = _tomograms_star(tmp_path, DENOISE_LAYOUT)
+    starfile.write({"optimisation_set": pd.DataFrame({
+        "rlnTomoTomogramsFile": [star], "rlnTomoParticlesFile": ["particles.star"]})},
+        tmp_path / "optimisation_set.star", overwrite=True)
+    starfile.write({"particles": pd.DataFrame({
+        "rlnTomoName": ["TS_01"], "rlnCoordinateX": [1.0], "rlnCoordinateY": [1.0], "rlnCoordinateZ": [1.0]})},
+        tmp_path / "particles.star", overwrite=True)
+    info = viz.inspect(tmp_path, "optimisation_set.star")
+    assert info["kind"] == "optimisation_set" and info["tomograms"][0]["volume"] == "denoised"

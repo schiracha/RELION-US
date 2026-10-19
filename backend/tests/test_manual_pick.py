@@ -407,3 +407,29 @@ def test_legacy_annotation_without_geometry_behaves_as_before(tmp_path):
     assert info["rereferenced"] is False and info["picks"][0]["z"] == 15.0
     assert manual_pick._rebuild_tomo_job_star(project, job_dir, "tomograms.star") == 1
     assert _particles_angst(job_dir)[0] == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_picking_on_a_denoise_jobs_tomograms_star(tmp_path):
+    """Picking with a Denoise job's tomograms.star as input (only the
+    Denoised + Half columns, no plain reconstructed-tomogram column) used to
+    fail: the picker found no tomograms in it."""
+    (tmp_path / ".relion_us").mkdir(exist_ok=True)
+    (tmp_path / "Denoise" / "job027" / "tomograms").mkdir(parents=True)
+    vol = (np.random.rand(30, 50, 40) * 100).astype(np.float32)
+    with mrcfile.new(tmp_path / "Denoise/job027/tomograms/rec_TS_01.mrc", overwrite=True) as m:
+        m.set_data(vol)
+        m.voxel_size = 10.0
+    starfile.write({"global": pd.DataFrame({
+        "rlnTomoName": ["TS_01"],
+        "rlnTomoReconstructedTomogramHalf1": ["h1.mrc"], "rlnTomoReconstructedTomogramHalf2": ["h2.mrc"],
+        "rlnTomoReconstructedTomogramDenoised": ["Denoise/job027/tomograms/rec_TS_01.mrc"],
+    })}, tmp_path / "Denoise/job027/tomograms.star", overwrite=True)
+
+    job_dir = tmp_path / "Picks" / "job030"
+    result = manual_pick.save_tomo_picks(
+        tmp_path, job_dir, "TS_01", [{"x": 20.0, "y": 25.0, "z": 15.0}], "Denoise/job027/tomograms.star")
+    assert result["n_particles"] == 1
+    df = starfile.read(job_dir / "particles.star", always_dict=True)["particles"]
+    assert df["rlnCenteredCoordinateXAngst"].iloc[0] == pytest.approx(0.0)   # voxel centre of the denoised volume
+    g = starfile.read(result["annotation_path"], always_dict=True)[manual_pick.TOMO_GEOMETRY_BLOCK].iloc[0]
+    assert (g["rlnImageSizeX"], g["rlnImageSizeY"], g["rlnImageSizeZ"]) == (40, 50, 30)

@@ -486,10 +486,18 @@ async def run_tomo_manual_pick(project_dir: Path, values: dict, job_dir: Path) -
     def work():
         removed = manual_pick.clear_tomo_picks(job_dir)
         tomograms = viz._tomograms_from_star(project_dir, viz._safe(project_dir, in_tomoset))
+        if not tomograms:
+            raise ValueError(
+                f"No tomogram volumes found in {in_tomoset}: it needs rlnTomoName plus one of "
+                + ", ".join(col for col, _ in viz.VOLUME_COLUMNS) + ".")
         cleared_note = f"Cleared {removed} existing pick file(s) from a previous run.\n" if removed else ""
+        kinds = sorted({t["volume"] for t in tomograms})
+        shown = {"denoised": "denoised", "reconstructed": "reconstructed", "half1": "Half 1 (even/odd)"}
+        warnings = "".join(f"{w}\n" for w in viz._volume_warnings(tomograms))
         return (
             f"{cleared_note}"
-            f"Found {len(tomograms)} tomogram(s) in {in_tomoset}.\n"
+            f"Found {len(tomograms)} tomogram(s) in {in_tomoset} "
+            f"(showing the {' / '.join(shown[k] for k in kinds)} volume).\n{warnings}"
             f"Use the Picker button above to open the viewer and start picking "
             f"-- picks save into this job's own directory as you go, and this "
             f"job's outputs (particles.star + optimisation_set.star) stay valid "

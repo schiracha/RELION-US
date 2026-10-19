@@ -167,16 +167,19 @@ def _resolve_star(project_dir: Path, star_path: Path) -> dict:
                 warnings.append(f"Could not read the particles file it points at: {exc}")
         return {
             "kind": "optimisation_set", "tomograms": tomograms,
-            "particles_path": particles_path, "warnings": warnings,
+            "particles_path": particles_path,
+            "warnings": warnings + _volume_warnings(tomograms),
         }
 
     # 2) tomograms.star (has reconstructed tomogram paths)
-    tomo_df = _first_block_with(blocks, (TOMO_NAME_COL, "rlnTomoReconstructedTomogram"))
+    tomo_df = _first_tomogram_block(blocks)
     if tomo_df is not None:
+        tomograms = _tomograms_from_df(tomo_df)
         return {
             "kind": "tomograms",
-            "tomograms": _tomograms_from_df(tomo_df),
+            "tomograms": tomograms,
             "particles_path": None,
+            "warnings": _volume_warnings(tomograms),
         }
 
     # 3) particles.star / coords star
@@ -190,20 +193,69 @@ def _resolve_star(project_dir: Path, star_path: Path) -> dict:
     )
 
 
+# Which column of a tomograms.star names the volume to show, best first.
+# RELION's own tools know all of these (tomography_python_programs'
+# tilt_series_set.as_gui_model reads the plain and the Denoised column): a
+# Denoise job's output has rlnTomoReconstructedTomogramDenoised (alongside the
+# even/odd half tomograms it was trained from), and a Reconstruct job run with
+# even/odd output has only the two halves. Denoised comes first because
+# handing a denoise job's tomograms.star to the viewer/picker means "show me
+# the denoised tomograms"; a half is the last resort -- one noisy half of the
+# data -- and is flagged as such (see _volume_warnings).
+VOLUME_COLUMNS = (
+    ("rlnTomoReconstructedTomogramDenoised", "denoised"),
+    ("rlnTomoReconstructedTomogram", "reconstructed"),
+    ("rlnTomoReconstructedTomogramHalf1", "half1"),
+)
+_MISSING_PATH = ("", "nan", "none", "<na>")
+
+
+def _first_tomogram_block(blocks: dict) -> Optional["object"]:
+    """First block with rlnTomoName and at least one usable volume column."""
+    for df in blocks.values():
+        if (hasattr(df, "columns") and TOMO_NAME_COL in df.columns
+                and any(col in df.columns for col, _ in VOLUME_COLUMNS)):
+            return df
+    return None
+
+
+def _row_volume(row) -> tuple[Optional[str], Optional[str]]:
+    """(path, kind) of the best volume this row names; a blank/None cell falls
+    through to the next column rather than becoming the string "None"."""
+    for col, kind in VOLUME_COLUMNS:
+        if col in row.index:
+            value = str(row[col]).strip()
+            if value.lower() not in _MISSING_PATH:
+                return value, kind
+    return None, None
+
+
 def _tomograms_from_star(project_dir: Path, tomo_star: Path) -> list[dict]:
     blocks = _read_star_blocks(tomo_star)
-    df = _first_block_with(blocks, (TOMO_NAME_COL, "rlnTomoReconstructedTomogram"))
+    df = _first_tomogram_block(blocks)
     return _tomograms_from_df(df) if df is not None else []
 
 
 def _tomograms_from_df(df) -> list[dict]:
     out = []
     for _, row in df.iterrows():
-        out.append({
-            "name": str(row[TOMO_NAME_COL]),
-            "mrc_path": str(row["rlnTomoReconstructedTomogram"]),
-        })
+        path, kind = _row_volume(row)
+        if path is None:
+            continue
+        out.append({"name": str(row[TOMO_NAME_COL]), "mrc_path": path, "volume": kind})
     return out
+
+
+def _volume_warnings(tomograms: list[dict]) -> list[str]:
+    kinds = {t.get("volume") for t in tomograms}
+    if "half1" in kinds:
+        return [
+            "This tomograms.star only lists the even/odd half tomograms "
+            "(rlnTomoReconstructedTomogramHalf1/2), so Half 1 is shown -- one "
+            "noisier half of the data. Use a Denoise job's tomograms.star, or a "
+            "reconstruction without the even/odd split, for a cleaner view."
+        ]
+    return []
 
 
 def inspect(project_dir: Path, path: str, particles_path: Optional[str] = None) -> dict:
