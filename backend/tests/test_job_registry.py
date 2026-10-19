@@ -878,7 +878,7 @@ def test_motioncorr_float16_flag_is_emitted_when_checked():
     own recommended setting: the draft never wrote float16 output at all."""
     raw = job_registry.raw_job("Motioncorr")
     cmd, unmapped = job_registry._build_draft_command(
-        raw, {"do_float16": True}, "Motioncorr", "")
+        raw, {"do_float16": True, "do_own_motioncor": True}, "Motioncorr", "")
     assert "--float16" in cmd.split()
     assert "do_float16" not in unmapped
 
@@ -1966,11 +1966,12 @@ def test_gpu_mpi_and_helical_all_combine_in_one_command():
 @pytest.mark.parametrize("internal_name,fields", [
     # Autopick's GPU is only reachable in the Topaz branch (condition
     # contains a bare "else" -- genuinely mode-branched, not something this
-    # app tries to interpret) and Motioncorr's is gated on the *other*
-    # branch of "do_own_motioncor" (same "else" shape) -- both must stay
-    # honestly unmapped rather than silently guessed at.
+    # app tries to interpret), so it must stay honestly unmapped rather than
+    # silently guessed at. (Motioncorr's GPU, gated on the *other* branch of
+    # do_own_motioncor, used to be listed here too; it is now emitted
+    # together with the rest of the MotionCor2/3 branch -- see
+    # test_motioncor3_draft_selects_motioncor2_and_passes_exe_and_gpu.)
     ("Autopick", {"use_gpu": True, "gpu_ids": "0"}),
-    ("Motioncorr", {"gpu_ids": "0"}),
 ])
 def test_gpu_fields_needing_real_branch_logic_stay_unmapped(internal_name, fields):
     raw = job_registry.raw_job(internal_name)
@@ -2461,3 +2462,102 @@ def test_tomopick_spheres_mode_adds_spacing_angstroms_to_after_command():
     assert len(parts) == 2
     assert parts[0].startswith("`which relion_python_tomo_pick` spheres")
     assert "--spacing-angstroms 100.0" in parts[1]
+
+
+# --------------------------------------------------------------------------
+# Motion correction with UCSF MotionCor2 / MotionCor3 and even/odd (denoising)
+# output. Expected tokens are RELION's own getCommandsMotioncorrJob
+# (src/pipeline_jobs.cpp ~1513-1694) and motioncorr_runner.cpp.
+# --------------------------------------------------------------------------
+
+
+def _motioncorr_draft(internal_name="TomoMotioncorr", **overrides):
+    raw = job_registry.raw_job("Motioncorr")
+    values = dict(job_registry.build_job_definition(internal_name)["default_values"])
+    values["input_star_mics"] = "Import/job001/tilt_series.star"
+    values.update(overrides)
+    return job_registry._build_draft_command(raw, values, internal_name, "MotionCorr/job002/")
+
+
+MOTIONCOR3 = dict(
+    do_own_motioncor=False, fn_motioncor2_exe="/opt/MotionCor3/MotionCor3", gpu_ids="0",
+    do_even_odd_split=True, do_float16=False, do_save_ps=False,
+)
+
+
+def test_motioncor3_draft_selects_motioncor2_and_passes_exe_and_gpu():
+    """Unchecking "Use RELION's own implementation" used to leave out
+    --use_motioncor2/--motioncor2_exe/--gpu entirely, so relion_run_motioncorr
+    stopped with "You have to choose either UCSF MotionCor2 or RELION's own
+    implementation"."""
+    cmd, unmapped = _motioncorr_draft(**MOTIONCOR3)
+    assert "--use_motioncor2" in cmd
+    assert "--motioncor2_exe /opt/MotionCor3/MotionCor3" in cmd
+    assert "--gpu 0" in cmd
+    assert "--even_odd_split" in cmd
+    assert "--use_own" not in cmd and "--j " not in cmd
+    assert "fn_motioncor2_exe" not in unmapped and "gpu_ids" not in unmapped
+
+
+def test_motioncor3_other_args_keep_relions_leading_space():
+    cmd, _ = _motioncorr_draft(**MOTIONCOR3, other_motioncor2_args="-Serial 1")
+    assert "--other_motioncor2_args ' -Serial 1 '" in cmd
+
+
+def test_motioncor3_without_exe_leaves_it_to_the_environment_variable():
+    cmd, _ = _motioncorr_draft(**{**MOTIONCOR3, "fn_motioncor2_exe": ""})
+    assert "--use_motioncor2" in cmd and "--motioncor2_exe" not in cmd
+
+
+def test_motioncor3_exe_path_with_a_space_is_quoted():
+    cmd, _ = _motioncorr_draft(**{**MOTIONCOR3, "fn_motioncor2_exe": "/my apps/MotionCor3"})
+    assert "--motioncor2_exe '/my apps/MotionCor3'" in cmd
+
+
+def test_motioncor3_gpu_flag_is_always_present_even_when_empty():
+    cmd, _ = _motioncorr_draft(**{**MOTIONCOR3, "gpu_ids": ""})
+    assert "--gpu ''" in cmd
+
+
+def test_own_implementation_options_are_not_emitted_for_motioncor3():
+    """float16, power-spectrum grouping and --j are own-implementation only;
+    RELION's GUI refuses the first two with MotionCor2 and never sends --j."""
+    cmd, _ = _motioncorr_draft(**{**MOTIONCOR3, "do_float16": True, "do_save_ps": True})
+    assert "--float16" not in cmd and "--grouping_for_ps" not in cmd and "--j " not in cmd
+
+
+def test_own_implementation_draft_is_unchanged_by_the_motioncor3_branch():
+    cmd, _ = _motioncorr_draft(do_own_motioncor=True, do_save_ps=True, do_float16=True)
+    assert "--use_own" in cmd and "--j " in cmd and "--float16" in cmd and "--grouping_for_ps" in cmd
+    for absent in ("--use_motioncor2", "--motioncor2_exe", "--gpu", "--other_motioncor2_args"):
+        assert absent not in cmd
+
+
+def test_tomo_motioncorr_never_passes_dose_weighting_but_spa_still_does():
+    """RELION's GUI passes --dose_weighting only for SPA. For tomography it
+    both dose-weights every tilt with a default 1 e/A^2/frame and stops the
+    own implementation writing its even/odd sums."""
+    tomo_cmd, _ = _motioncorr_draft("TomoMotioncorr", do_dose_weighting=True)
+    spa_cmd, _ = _motioncorr_draft("Motioncorr", do_dose_weighting=True)
+    assert "--dose_weighting" not in tomo_cmd
+    assert "--dose_weighting" in spa_cmd
+
+
+def test_even_odd_with_own_implementation_is_not_blocked_by_dose_weighting():
+    """motioncorr_runner.cpp writes the _EVN/_ODD sums only when
+    `!do_dose_weighting || save_noDW`; the tomo draft must therefore not carry
+    --dose_weighting alongside --even_odd_split."""
+    cmd, _ = _motioncorr_draft(do_own_motioncor=True, do_even_odd_split=True, do_dose_weighting=True)
+    assert "--even_odd_split" in cmd and "--dose_weighting" not in cmd
+
+
+def test_draft_notes_explain_what_motioncor3_left_out():
+    import job_catalog
+
+    both = job_catalog.draft_notes("Motioncorr", {
+        **MOTIONCOR3, "do_float16": True, "do_save_ps": True, "is_tomo": True})
+    assert len(both) == 2
+    assert any("float16" in n for n in both) and any("power spectra" in n for n in both)
+    assert job_catalog.draft_notes("Motioncorr", {**MOTIONCOR3, "is_tomo": True}) == []
+    assert job_catalog.draft_notes("Motioncorr", {"do_own_motioncor": True, "do_float16": True}) == []
+    assert job_catalog.draft_notes("Ctffind", {}) == []

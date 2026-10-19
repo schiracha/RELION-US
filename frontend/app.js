@@ -771,6 +771,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         <button class="btn" data-role="recompute-btn" style="padding:2px 8px;">Recompute draft</button>
       </label>
       <textarea class="command-box" data-role="command-box"></textarea>
+      <div class="draft-notes" data-role="draft-notes" hidden></div>
       <div class="wait-row" data-role="wait-row">
         <label class="wait-toggle-label"><input type="checkbox" data-role="wait-toggle"> Wait for other job(s) before starting</label>
         <div class="wait-fields" data-role="wait-fields" hidden>
@@ -1058,6 +1059,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       ),
     });
     commandBox.value = resp.draft_command;
+    // Options the draft deliberately left out for these settings (e.g. float16
+    // with MotionCor2/3) -- said out loud rather than silently dropped.
+    const notesEl = body.querySelector('[data-role="draft-notes"]');
+    if (notesEl) {
+      notesEl.innerHTML = (resp.notes || []).map((n) => `<div>⚠ ${escapeHtml(n)}</div>`).join("");
+      notesEl.hidden = !(resp.notes && resp.notes.length);
+    }
     if (resp.output_subdir) popupOutputSubdir = resp.output_subdir;
     if (resp.unmapped_fields && resp.unmapped_fields.length) {
       commandBox.title = "Not auto-mapped to a flag (add manually if needed): " +

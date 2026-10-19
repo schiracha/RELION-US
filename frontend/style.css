@@ -661,6 +661,10 @@ html, body {
 .slurm-array-help code { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 .cc-array-progress { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
 
+/* Notes about options the draft left out (e.g. float16 with MotionCor2/3) */
+.draft-notes { font-size: 11px; color: var(--warn); margin: 4px 0 2px; }
+.draft-notes[hidden] { display: none; }
+
 /* Live Command Center indicator (issue #79) */
 .cc-live { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 .cc-live.live { color: var(--ok); }

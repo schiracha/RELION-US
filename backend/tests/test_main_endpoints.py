@@ -1136,3 +1136,17 @@ def test_events_websocket_refuses_connection_when_auth_enabled_without_session(c
                 pass
     finally:
         auth.disable()
+
+
+def test_draft_endpoint_returns_notes_for_dropped_motioncor3_options(client):
+    values = client.get("/api/jobs/TomoMotioncorr").json()["default_values"]
+    values.update({"do_own_motioncor": False, "fn_motioncor2_exe": "/opt/MotionCor3/MotionCor3",
+                   "do_float16": True, "do_save_ps": True, "input_star_mics": "x.star"})
+    resp = client.post("/api/jobs/TomoMotioncorr/draft", json={"field_values": values})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "--use_motioncor2" in body["draft_command"] and "--float16" not in body["draft_command"]
+    assert len(body["notes"]) == 2
+
+    values["do_own_motioncor"] = True
+    assert client.post("/api/jobs/TomoMotioncorr/draft", json={"field_values": values}).json()["notes"] == []

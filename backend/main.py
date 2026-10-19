@@ -533,7 +533,10 @@ def recompute_draft(internal_name: str, req: DraftRequest):
     draft, unmapped = job_registry._build_draft_command(
         raw, req.field_values, internal_name, output_subdir
     )
-    return {"draft_command": draft, "unmapped_fields": unmapped, "output_subdir": output_subdir}
+    base_name, is_tomo = job_registry._resolve_tomo_variant(internal_name)
+    notes = job_catalog.draft_notes(base_name, {**req.field_values, "is_tomo": is_tomo})
+    return {"draft_command": draft, "unmapped_fields": unmapped, "output_subdir": output_subdir,
+            "notes": notes}
 
 
 class StartRunRequest(BaseModel):

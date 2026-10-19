@@ -687,6 +687,12 @@ class JobDraftOverride:
     # second-command builder is the first user of it here too (it needs
     # output_subdir for -i/-o, which reuse the build step's own directory).
     extra_flags: Optional[Callable[[dict, str], list]] = None
+    # Human-readable notes about options the draft deliberately LEFT OUT for
+    # the current field values (e.g. a checked box RELION's own GUI would
+    # refuse in this combination), shown under the command box so a dropped
+    # flag is never silent. Takes the full field_values dict (with is_tomo
+    # set); returns [] when there is nothing to say.
+    draft_notes: Optional[Callable[[dict], list]] = None
     # A job whose real getCommands*Job() calls commands.push_back() MORE
     # THAN ONCE, where at least one extra command needs to run BEFORE the
     # primary one this table otherwise builds (e.g. Localres's ResMap mode,
@@ -1620,6 +1626,76 @@ def _motioncorr_grouping_for_ps_flags(field_values: dict, output_subdir: str) ->
     return ["--grouping_for_ps", str(grouping)]
 
 
+def _motioncorr_uses_motioncor2(field_values: dict) -> bool:
+    """True only when "Use RELION's own implementation?" is explicitly
+    unchecked, i.e. RELION's `else` branch (getCommandsMotioncorrJob
+    ~1576-1594): UCSF MotionCor2 -- or MotionCor3, which RELION drives
+    through the very same wrapper. A missing key means "not asked", not
+    "MotionCor2"."""
+    return "do_own_motioncor" in field_values and not field_values.get("do_own_motioncor")
+
+
+def _motioncorr_motioncor2_flags(field_values: dict) -> list:
+    """The MotionCor2/MotionCor3 branch (getCommandsMotioncorrJob
+    ~1576-1594), which the own-implementation flags in DRAFT_OVERRIDES
+    cannot express because it is a genuine two-way branch:
+
+        command += " --use_motioncor2 ";
+        command += " --motioncor2_exe " + fn_motioncor2_exe;
+        if (other_motioncor2_args.length() > 0)
+            command += " --other_motioncor2_args \" " + ... + " \"";
+        command += " --gpu \"" + gpu_ids + "\"";
+
+    Without --use_motioncor2 (or --use_own) relion_run_motioncorr refuses
+    to start ("You have to choose either UCSF MotionCor2 or RELION's own
+    implementation") -- which is exactly what the draft produced when the
+    box was unchecked and an executable given. An empty executable is left
+    off rather than emitted blank: the program then falls back on the
+    RELION_MOTIONCOR2_EXECUTABLE environment variable, as its own help says.
+    --gpu is always present (empty means automatic), as in RELION. The
+    other-args value keeps RELION's leading/trailing space so a value that
+    starts with "-" (e.g. "-SplitSum 1") isn't mistaken for an option."""
+    if not _motioncorr_uses_motioncor2(field_values):
+        return []
+    tokens = ["--use_motioncor2"]
+    exe = str(field_values.get("fn_motioncor2_exe") or "").strip()
+    if exe:
+        tokens += ["--motioncor2_exe", shlex.quote(exe)]
+    other = str(field_values.get("other_motioncor2_args") or "").strip()
+    if other:
+        tokens += ["--other_motioncor2_args", shlex.quote(f" {other} ")]
+    tokens += ["--gpu", shlex.quote(str(field_values.get("gpu_ids") or "").strip())]
+    return tokens
+
+
+def _motioncorr_notes(field_values: dict) -> list:
+    """What the MotionCor2/3 branch drops. RELION's GUI refuses both of
+    these outright (getCommandsMotioncorrJob ~1583 and ~1652); the draft
+    leaves them out instead, and says so."""
+    if not _motioncorr_uses_motioncor2(field_values):
+        return []
+    notes = []
+    if field_values.get("do_float16"):
+        notes.append(
+            "\"Write output in float16?\" is ticked but MotionCor2/3 cannot write float16, "
+            "so --float16 is left out (RELION's own GUI would refuse this combination).")
+    if field_values.get("do_save_ps"):
+        notes.append(
+            "\"Save sum of power spectra?\" is ticked but isn't available with MotionCor2/3, "
+            "so --grouping_for_ps is left out (RELION's own GUI would refuse this combination).")
+    return notes
+
+
+def _motioncorr_extra_flags(field_values: dict, output_subdir: str) -> list:
+    """Everything Motioncorr computes rather than reads off one option: the
+    MotionCor2/3 branch above, or -- own implementation only; RELION's GUI
+    refuses "Save sum of power spectra" with MotionCor2 -- the
+    --grouping_for_ps value."""
+    if _motioncorr_uses_motioncor2(field_values):
+        return _motioncorr_motioncor2_flags(field_values)
+    return _motioncorr_grouping_for_ps_flags(field_values, output_subdir)
+
+
 # Select is a 5-way mutually-exclusive branch (do_filaments /
 # do_remove_duplicates / do_select_values-or-do_discard-or-do_split /
 # do_class_ranker / interactive-fn_model-or-fn_mic-or-neither), each of
@@ -2463,15 +2539,13 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     #   do_dose_weighting (~1641, condition `!is_tomo && joboptions[
     #   "do_dose_weighting"].getBoolean()`) -- job_registry._self_guarded
     #   only inspects joboptions[...] references, so this condition's bare
-    #   `!is_tomo` term is invisible to it and the field is treated as
-    #   self-guarded regardless of SPA/Tomo (same as real RELION's GUI never
-    #   showing this JobOption at all in tomo mode -- see
-    #   initialiseMotioncorrJob's `if (!is_tomo) joboptions["do_dose_
-    #   weighting"] = ...`, ~1501 -- RELION-US shows one static field list
-    #   either way). Emitting --dose_weighting when checked in Tomo mode is
-    #   therefore still possible by leaving the box checked; low-risk since
-    #   its own RELION default is enabled and this mirrors the box's own
-    #   plain reading, not a change from before the toggle existed.
+    #   `!is_tomo` term is invisible to it; the override below therefore
+    #   carries "!is_tomo" explicitly. RELION-US shows one static field list
+    #   for both menu entries, so the box is visible (and defaults checked)
+    #   in tomo mode, but real RELION never creates it there
+    #   (initialiseMotioncorrJob's `if (!is_tomo) joboptions["do_dose_
+    #   weighting"] = ...`, ~1501) and never passes the flag -- so neither
+    #   do we. (An earlier version emitted it anyway; see the override.)
     #   do_own_motioncor (~1559-1580, found by actually running a
     #   Motioncorr job against RELION 5.0.1 -- it failed with "You have to
     #   choose either UCSF MotionCor2 or RELION's own implementation", the
@@ -2481,9 +2555,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     #   RELION's-own-implementation) branch is covered: the unchecked
     #   branch emits a DIFFERENT flag (--use_motioncor2, ~1580) plus
     #   requires fn_motioncor2_exe, a genuine two-way branch a single
-    #   FlagOverride can't express (same category as TomoImport's
-    #   do_coords branch) -- switching to UCSF MotionCor2 still needs
-    #   hand-editing the command box.
+    #   FlagOverride can't express -- covered by _motioncorr_motioncor2_flags
+    #   (extra_flags below), which emits that branch's whole flag set.
     #   do_even_odd_split (~1554, condition `is_tomo && joboptions[
     #   "do_even_odd_split"].getBoolean()`) -- real MotionCor2 denoising
     #   option, tomo-only. Its flag (--even_odd_split) doesn't spell out as
@@ -2501,8 +2574,22 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
     # textToInteger" (confirmed for real against RELION 5.0.1).
     "Motioncorr": JobDraftOverride(
         flags={
-            "do_dose_weighting": FlagOverride("--dose_weighting"),
+            # `if (!is_tomo && do_dose_weighting)` (~1641): RELION's own GUI
+            # never passes --dose_weighting for tomography (the option isn't
+            # even created in tomo mode), because tilt-series dose is handled
+            # later in the pipeline. Emitting it here anyway made
+            # relion_run_motioncorr dose-weight every tilt image with its own
+            # default of 1 e/A^2/frame (--dose_per_frame is also !is_tomo, so
+            # never sent) and, worse, suppressed the even/odd sums: those are
+            # only written when `!do_dose_weighting || save_noDW`
+            # (motioncorr_runner.cpp ~1769), and save_noDW is !is_tomo too.
+            "do_dose_weighting": FlagOverride("--dose_weighting", condition="!is_tomo"),
             "do_own_motioncor": FlagOverride("--use_own"),
+            # --j and --float16 are only added inside RELION's own-
+            # implementation branch (~1564-1574); the MotionCor2 branch
+            # instead errors on float16 ("MotionCor2 cannot write float16
+            # files").
+            "nr_threads": FlagOverride("--j", condition="do_own_motioncor"),
             "do_even_odd_split": FlagOverride("--even_odd_split", condition="is_tomo"),
             # `if (!is_tomo && do_dose_weighting) { command += "
             # --dose_weighting "; if (do_save_noDW) command += "
@@ -2521,7 +2608,7 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # output in float16?" checked (the tutorial's own recommended
             # setting): the draft silently never wrote float16 output at
             # all.
-            "do_float16": FlagOverride("--float16"),
+            "do_float16": FlagOverride("--float16", condition="do_own_motioncor"),
         },
         value_transforms={
             "gain_rot": {
@@ -2547,8 +2634,15 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # --grouping_for_ps above (there's no separate --group_for_ps flag
         # of its own), so it's suppressed here too rather than showing up
         # in unmapped_fields as if nothing used it.
-        suppress=frozenset({"do_save_ps", "group_for_ps"}),
-        extra_flags=_motioncorr_grouping_for_ps_flags,
+        # fn_motioncor2_exe/gpu_ids/other_motioncor2_args belong to the
+        # MotionCor2/3 branch, emitted together by _motioncorr_motioncor2_flags
+        # (own implementation: none of them appear in the command at all).
+        suppress=frozenset({
+            "do_save_ps", "group_for_ps",
+            "fn_motioncor2_exe", "gpu_ids", "other_motioncor2_args",
+        }),
+        extra_flags=_motioncorr_extra_flags,
+        draft_notes=_motioncorr_notes,
     ),
     "Ctffind": JobDraftOverride(
         # (~1809-1813, condition `else { if (joboptions["use_noDW"]
@@ -3200,6 +3294,15 @@ def draft_extra_flags(internal_name: str, field_values: dict, output_subdir: str
     if override is None or override.extra_flags is None:
         return []
     return override.extra_flags(field_values, output_subdir)
+
+
+def draft_notes(internal_name: str, field_values: dict) -> list:
+    """Notes about options the draft left out for these field values -- see
+    JobDraftOverride.draft_notes. [] if this job has none."""
+    override = _override(internal_name)
+    if override is None or override.draft_notes is None:
+        return []
+    return override.draft_notes(field_values)
 
 
 # --------------------------------------------------------------------------

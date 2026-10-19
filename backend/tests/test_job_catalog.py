@@ -81,14 +81,23 @@ def test_unmapped_key_on_an_overridden_job_still_gets_defaults():
 
 
 def test_plain_flag_override_has_no_condition_and_is_not_negated():
+    assert draft_flag_for("Motioncorr", "do_own_motioncor") == "--use_own"
+    assert draft_flag_condition_for("Motioncorr", "do_own_motioncor") is None
+    assert draft_flag_is_negated("Motioncorr", "do_own_motioncor") is False
+
+
+def test_motioncorr_dose_weighting_is_spa_only():
+    # RELION's getCommandsMotioncorrJob only passes --dose_weighting
+    # `if (!is_tomo && ...)`; emitting it for tomography dose-weights every
+    # tilt with the program's default 1 e/A^2/frame and suppresses the
+    # even/odd sums (see job_catalog.py's Motioncorr entry).
     assert draft_flag_for("Motioncorr", "do_dose_weighting") == "--dose_weighting"
-    assert draft_flag_condition_for("Motioncorr", "do_dose_weighting") is None
-    assert draft_flag_is_negated("Motioncorr", "do_dose_weighting") is False
+    assert draft_flag_condition_for("Motioncorr", "do_dose_weighting") == "!is_tomo"
 
 
 def test_ctffind_use_nodw_is_spa_only():
     # use_noDW is genuinely SPA-only in real RELION (initialiseCtffindJob
-    # only creates this JobOption `if (!is_tomo)`) -- unlike Motioncorr's
+    # only creates this JobOption `if (!is_tomo)`) -- like Motioncorr's
     # do_dose_weighting above, this override carries a real condition so it
     # stops being emitted once the SPA/Tomo toggle (frontend TOMO_TOGGLE_JOBS)
     # sends field_values["is_tomo"] = True. See job_catalog.py's Ctffind
