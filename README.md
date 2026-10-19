@@ -403,8 +403,9 @@ which to preselect from the job types the project has actually run, but never
 gates what you can run.
 
 Click a job to open it in its own popup — nearly window-filling with rounded
-corners, and only one open at a time (opening a different job closes whichever
-was already open, rather than stacking windows).
+corners. Popups are independent, so you can have several open at once: minimize
+them, or drag and resize them side by side to compare or copy parameters
+between jobs.
 
 ### Inside a job popup
 

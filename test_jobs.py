@@ -87,33 +87,38 @@ with sync_playwright() as p:
     n_jobs = page.locator(".job-item").count()
     print(f"Sidebar loaded with {n_jobs} job items")
 
-    # ==== job popups: open/close, standard fields, one-popup-at-a-time =====
+    # ==== job popups: open/close, standard fields, several popups at once ====
     page.locator(".job-item", has_text="Import Tomo Tilt Series").first.click()
     page.wait_for_selector(".winbox", timeout=5000)
     check("WinBox popup opened", page.locator(".winbox").count() == 1)
     page.wait_for_selector(".job-standard-form .field-label", timeout=5000)
     check("Standard fields rendered", page.locator(".job-standard-form .field-label").count() > 0)
 
-    # Opening a second job popup must close the first rather than stacking a
-    # second window. dispatch_event("click"): the popup is now near
-    # window-filling by design, so it visually covers the sidebar underneath
-    # -- a real user closes/collapses it before the sidebar is reachable
-    # again, and an actual mouse click can't reach through it (Playwright's
-    # own force=True still respects real DOM layering). dispatch_event fires
-    # the click event directly on the element, bypassing layering, so this
-    # still exercises openJobPopup's own auto-close logic.
+    # Opening a second job popup must leave the first one open (issue #74):
+    # each popup owns its own websocket/polling, so they can sit side by side
+    # to compare or copy parameters. dispatch_event("click"): the popup is
+    # near window-filling by design, so it visually covers the sidebar
+    # underneath -- a real user minimizes/moves it first, and an actual mouse
+    # click can't reach through it (Playwright's own force=True still respects
+    # real DOM layering). dispatch_event fires the click event directly on the
+    # element, bypassing layering.
     page.locator(".job-item", has_text="Import from DeepETPicker").first.dispatch_event("click")
-    page.wait_for_function(
-        "() => document.querySelector('.winbox .wb-title')"
-        "  && document.querySelector('.winbox .wb-title').textContent.includes('DeepETPicker')",
-        timeout=5000,
-    )
-    check("Exactly 1 job popup open at once", page.locator(".winbox").count() == 1)
+    page.wait_for_function("() => document.querySelectorAll('.winbox').length === 2", timeout=5000)
+    check("Two job popups open at once", page.locator(".winbox").count() == 2)
+    titles = page.locator(".winbox .wb-title").all_inner_texts()
+    check(f"Both popups are open ({titles})",
+          any("Import Tomo Tilt Series" in t for t in titles) and any("DeepETPicker" in t for t in titles))
+
+    # Closing one leaves the other untouched.
+    page.locator(".winbox", has_text="Import from DeepETPicker").locator(".wb-close").first.click()
+    page.wait_for_function("() => document.querySelectorAll('.winbox').length === 1", timeout=5000)
     remaining_title = page.locator(".winbox .wb-title").first.inner_text()
-    check(f"Second job's popup is the one left open ({remaining_title})", "DeepETPicker" in remaining_title)
+    check(f"Closing the second popup leaves the first open ({remaining_title})",
+          "Import Tomo Tilt Series" in remaining_title)
 
     page.locator(".winbox .wb-close").first.click()
-    page.wait_for_timeout(200)
+    page.wait_for_function("() => document.querySelectorAll('.winbox').length === 0", timeout=5000)
+    check("All popups closed", page.locator(".winbox").count() == 0)
 
     # --- sidebar hide toggle ---
     page.locator("#toggleSidebarBtn").click()

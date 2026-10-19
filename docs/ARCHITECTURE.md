@@ -119,12 +119,13 @@ relion_us/
 The frontend is a small vanilla JS app using WinBox.js for the popup window
 and a raw websocket per job run for live stdout/stderr.
 
-**Job popup sizing/rounding/single-instance.** `openJobPopup` (`app.js`)
-tracks the one open job popup in a module-level `currentJobWinbox`, closed
-(not just covered) right before the next one mounts, so its websocket and
-progress polling tear down instead of streaming into a hidden window — a
-`win.close()` from elsewhere (e.g. Overwrite's close-then-reopen) already
-clears it via `onclose`, so this never double-closes. `width`/`height` are
+**Job popup sizing/rounding/multiple instances.** Any number of job popups
+can be open at once (issue #74). Each `openJobPopup` call keeps its own
+websocket, progress-polling timer and drag-resize listeners as closure
+variables, and its `onclose` tears down exactly those — there is no
+module-level "current popup" (an earlier version closed the previous popup
+before mounting the next, which was only ever a guard against streaming into
+a hidden window, not protection for any shared state). `width`/`height` are
 percentage strings (`"94%"`/`"92%"`) — WinBox's own size parser (`V()` in the
 vendored bundle) accepts percentages natively, resolved against the viewport.
 Rounded corners are `border-radius` on `.job-popup-window.winbox` *and*
