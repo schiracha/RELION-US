@@ -1029,6 +1029,16 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
     units. The panels have to match to the pixel or the crosshair does not line
     up across their borders, and a side view stretched to fill its box would
     misrepresent the volume's aspect.
+  - **Gaussian smoothing is a 3-D blur computed per slice** (`viz._gaussian_slice`,
+    `sigma` on the slice endpoint). The old viewer ran
+    `skimage.filters.gaussian(volume, sigma)` over the whole array, so adjacent
+    slices contribute; a Gaussian is separable, so each in-plane section within
+    the kernel radius is blurred and the sections are summed with 1-D Gaussian
+    weights, edge sections replicated. The result equals filtering the full volume
+    (tested against `scipy.ndimage.gaussian_filter` and `skimage.filters.gaussian`
+    to 1e-4) without reading more than `2·radius+1` sections. The frontend omits
+    `lo`/`hi` while it is on, because raw-data windows no longer fit the smoothed
+    range, until the user moves the contrast sliders.
   - **The ZY panel is served transposed** (`GET /api/viz/slice?transpose=1`).
     The natural x-axis slice is `[z, y]`; the left-hand panel needs Y running
     vertically so it shares the main panel's vertical axis. Transposing the

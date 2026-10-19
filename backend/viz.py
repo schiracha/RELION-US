@@ -353,6 +353,66 @@ def _extract_slice(data, axis: str, index: int):
     raise VizError(f"bad axis: {axis!r} (expected x, y, or z)")
 
 
+# Largest Gaussian sigma (voxels) the viewer will filter with. The cost grows
+# with the kernel radius (one 2-D filter per plane inside it), so this keeps a
+# slider drag on a big tomogram from tying the server up.
+MAX_GAUSSIAN_SIGMA = 6.0
+# Same truncation as scipy.ndimage.gaussian_filter / skimage.filters.gaussian:
+# kernel radius = int(4 * sigma + 0.5) voxels.
+_GAUSSIAN_TRUNCATE = 4.0
+
+
+def _gaussian_slice(data, axis: str, index: int, sigma: float) -> np.ndarray:
+    """One slice of the volume after an isotropic 3-D Gaussian blur, without
+    blurring the volume.
+
+    The old DeepETPicker viewer's "Gaussian filter" ran
+    ``skimage.filters.gaussian(volume, sigma)`` over the whole 3-D array (its
+    "kernel size" box was read but never used), so the neighbouring slices
+    contribute. A Gaussian is separable: blur each in-plane section inside the
+    kernel radius, then take the weighted sum along the slicing axis. That is
+    the same result as filtering the full volume (edges replicate the nearest
+    voxel, scipy's ``mode='nearest'``, the skimage default), but only reads
+    2*radius+1 sections instead of the whole tomogram.
+
+    NaN voxels (real in cryo-ET) are replaced by the section mean for the blur,
+    and stay NaN in the result where the requested slice itself was NaN, so
+    they still render as the black point like unfiltered NaNs do.
+    """
+    from scipy import ndimage
+
+    if not np.isfinite(sigma) or sigma < 0 or sigma > MAX_GAUSSIAN_SIGMA:
+        raise VizError(f"sigma must be between 0 and {MAX_GAUSSIAN_SIGMA:g} voxels, got {sigma!r}")
+    centre = _extract_slice(data, axis, int(index))
+    if sigma == 0:
+        return centre
+    n = data.shape["zyx".index(axis)]
+    index = max(0, min(int(index), n - 1))
+    radius = int(_GAUSSIAN_TRUNCATE * sigma + 0.5)
+    offsets = np.arange(-radius, radius + 1)
+    weights = np.exp(-0.5 * (offsets / sigma) ** 2)
+    weights /= weights.sum()
+
+    # positions clamped to the volume (replicated edge); merge repeats so each
+    # section is blurred once
+    per_plane: dict[int, float] = {}
+    for off, w in zip(offsets, weights):
+        k = max(0, min(index + int(off), n - 1))
+        per_plane[k] = per_plane.get(k, 0.0) + float(w)
+
+    out = np.zeros(centre.shape, dtype=np.float32)
+    for k, w in per_plane.items():
+        plane = centre if k == index else _extract_slice(data, axis, k)
+        finite = np.isfinite(plane)
+        if not finite.all():
+            fill = float(plane[finite].mean()) if finite.any() else 0.0
+            plane = np.where(finite, plane, np.float32(fill))
+        out += np.float32(w) * ndimage.gaussian_filter(
+            plane, sigma, mode="nearest", truncate=_GAUSSIAN_TRUNCATE)
+    out[~np.isfinite(centre)] = np.nan
+    return out
+
+
 def render_slice_png(
     project_dir: Path,
     mrc_path: str,
@@ -362,9 +422,15 @@ def render_slice_png(
     hi: Optional[float] = None,
     max_dim: int = 1200,
     transpose: bool = False,
+    sigma: float = 0.0,
 ) -> bytes:
     """Memory-map the volume, extract one slice, contrast-stretch to 8-bit,
     downsample if larger than max_dim, and return PNG bytes.
+
+    `sigma` (voxels, 0 = off) smooths in 3-D first; see _gaussian_slice. The
+    caller's lo/hi are in raw-data units, and smoothing narrows the intensity
+    range, so a viewer that has not been given a window for the smoothed data
+    should leave lo/hi unset and take the per-slice percentile default.
 
     `transpose` swaps the returned image's rows and columns. The orthogonal
     viewer's left-hand panel needs the x-axis slice with Y running vertically
@@ -383,7 +449,7 @@ def render_slice_png(
         if raw is None:
             raise VizError(f"{p.name}: not a 2D image or 3D MRC volume")
         data = _as_3d(raw, p.name)
-        sl = _extract_slice(data, axis, int(index))
+        sl = _gaussian_slice(data, axis, int(index), float(sigma))
     if transpose:
         sl = np.ascontiguousarray(sl.T)
 

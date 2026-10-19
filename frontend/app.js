@@ -4711,6 +4711,18 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
         </div>
 
         <div class="viz-side-group">
+          <div class="viz-side-title">Smoothing</div>
+          <div class="viz-ctrl-row">
+            <span class="viz-ctrl-key">Gaussian σ</span>
+            <input type="range" data-role="viz-sigma" min="0" max="4" step="0.5" value="0"
+                   title="Gaussian blur radius in voxels, applied in 3-D (0 = off)" />
+            <span class="viz-ctrl-val" data-role="viz-sigma-val">off</span>
+          </div>
+          <div class="viz-hint">Blurs in all three directions, as DeepETPicker's own viewer did. While it is on,
+            contrast is set automatically for each slice until you move Black/White.</div>
+        </div>
+
+        <div class="viz-side-group">
           <div class="viz-side-title">Picks</div>
           <label class="viz-check"><input type="checkbox" data-role="viz-showpicks" checked /> Show picks</label>
           <label class="viz-check"><input type="checkbox" data-role="viz-crosshair" checked /> Show crosshair</label>
@@ -4724,6 +4736,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
             <input type="range" data-role="viz-width" min="1" max="6" value="2" />
             <span class="viz-ctrl-val" data-role="viz-width-val">2</span>
           </div>
+          <div class="viz-legend" data-role="viz-legend" hidden></div>
         </div>
       </div>
     </aside>
@@ -4738,6 +4751,11 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     x: 0, y: 0, z: 0,
     lo: null, hi: null, diameter: 16, width: 2,
     showPicks: true, showCrosshair: true,
+    // Gaussian smoothing in voxels (0 = off). lo/hi are in raw-data units and
+    // smoothing narrows the intensity range, so while it is on they are only
+    // sent once the user has moved the contrast sliders; until then the
+    // server picks a per-slice window.
+    sigma: 0, contrastEdited: false,
   };
 
   // Per-panel geometry. `axis`/`transpose` are what the slice endpoint needs;
@@ -4810,7 +4828,6 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     if (state.showPicks && state.picks.length) {
       const r = state.diameter / 2;
       const idx = state[p.normal];
-      const palette = ["#39d353", "#ff6ac1", "#f5a623", "#4aa3ff", "#e5484d"];
       ctx.lineWidth = state.width;
       for (const pk of state.picks) {
         // DeepETPicker's rule: a particle appears on every slice within
@@ -4821,7 +4838,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
         const rr = Math.sqrt(Math.max(0, r * r - d * d));
         ctx.beginPath();
         ctx.arc(pk[p.col] * sx, pk[p.row] * sy, Math.max(1, rr * sx), 0, 2 * Math.PI);
-        ctx.strokeStyle = palette[(pk.class || 0) % palette.length];
+        ctx.strokeStyle = pickClassColor(pk.class);
         ctx.stroke();
       }
     }
@@ -4840,7 +4857,36 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     }
   }
 
-  function drawOverlays() { Object.keys(PANELS).forEach(drawOverlay); }
+  function drawOverlays() { renderLegend(); Object.keys(PANELS).forEach(drawOverlay); }
+
+  // Class legend for the loaded picks: one swatch per class number present
+  // (class 0 -- no rlnClassNumber -- needs none). Rebuilt only when a new picks
+  // array arrives, not on every redraw.
+  let legendPicks = null;
+  function renderLegend() {
+    if (legendPicks === state.picks) return;
+    legendPicks = state.picks;
+    const el = q('[data-role="viz-legend"]');
+    const classes = Array.from(new Set(state.picks.map((pk) => pk.class | 0)))
+      .filter((c) => c > 0).sort((a, b) => a - b);
+    el.replaceChildren();
+    el.hidden = classes.length === 0;
+    for (const c of classes.slice(0, 40)) {
+      const item = document.createElement("span");
+      item.className = "viz-legend-item";
+      const sw = document.createElement("i");
+      sw.className = "viz-legend-swatch";
+      sw.style.background = pickClassColor(c);
+      item.append(sw, document.createTextNode(`Class ${c}`));
+      el.appendChild(item);
+    }
+    if (classes.length && classes[classes.length - 1] > CLASS_COLOURS.length) {
+      const note = document.createElement("div");
+      note.className = "viz-hint";
+      note.textContent = `Colours repeat after class ${CLASS_COLOURS.length}.`;
+      el.appendChild(note);
+    }
+  }
 
   // ---- slice fetching ----------------------------------------------------
   // Only panels whose own slice index actually moved are refetched: clicking
@@ -4869,8 +4915,11 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       mrc_path: state.mrc, axis: p.axis, index: String(index),
     });
     if (p.transpose) params.set("transpose", "true");
-    if (state.lo != null) params.set("lo", String(state.lo));
-    if (state.hi != null) params.set("hi", String(state.hi));
+    if (state.sigma > 0) params.set("sigma", String(state.sigma));
+    if (state.sigma === 0 || state.contrastEdited) {
+      if (state.lo != null) params.set("lo", String(state.lo));
+      if (state.hi != null) params.set("hi", String(state.hi));
+    }
     const img = q(p.img);
     img.onload = () => drawOverlay(key);
     img.src = `/api/viz/slice?${params.toString()}`;
@@ -4982,6 +5031,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       state.vinfo = info;
       state.lo = info.contrast_lo;
       state.hi = info.contrast_hi;
+      state.contrastEdited = false;
       const vmin = info.sample_min, span = (info.sample_max - info.sample_min) || 1;
       q('[data-role="viz-lo"]').value = String(Math.round(((state.lo - vmin) / span) * 100));
       q('[data-role="viz-hi"]').value = String(Math.round(((state.hi - vmin) / span) * 100));
@@ -5108,10 +5158,27 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     let hi = vmin + (parseInt(q('[data-role="viz-hi"]').value, 10) / 100) * span;
     if (hi <= lo) hi = lo + span * 0.01;
     state.lo = lo; state.hi = hi;
+    state.contrastEdited = true;
     requestPanels(Object.keys(PANELS));   // contrast affects all three
   }
   q('[data-role="viz-lo"]').addEventListener("input", contrastFromSliders);
   q('[data-role="viz-hi"]').addEventListener("input", contrastFromSliders);
+
+  // Gaussian smoothing: the label follows the drag, but the (server-side)
+  // filter only runs when the slider is released -- each change is one 2-D
+  // blur per plane inside the kernel on every panel.
+  const sigmaSlider = q('[data-role="viz-sigma"]');
+  const sigmaLabel = q('[data-role="viz-sigma-val"]');
+  const sigmaText = (v) => (v > 0 ? String(v) : "off");
+  sigmaSlider.addEventListener("input", () => { sigmaLabel.textContent = sigmaText(parseFloat(sigmaSlider.value)); });
+  sigmaSlider.addEventListener("change", () => {
+    const v = parseFloat(sigmaSlider.value) || 0;
+    if (v === state.sigma) return;
+    if ((v > 0) !== (state.sigma > 0)) state.contrastEdited = false;   // different intensity range
+    state.sigma = v;
+    sigmaLabel.textContent = sigmaText(v);
+    requestPanels(Object.keys(PANELS));
+  });
 
   const vizDiamSlider = q('[data-role="viz-diam"]');
   const vizDiamInput = q('[data-role="viz-diam-val"]');
@@ -5898,6 +5965,19 @@ const ISONET_LOSS_JOB_TYPES = new Set(["IsonetDenoise", "IsonetRefine"]);
 // IsoNet2's own source, not guessed. A job writes only the ones relevant
 // to its own method, so this is filtered against, not assumed complete.
 const ISONET_LOSS_FILES = new Set(["loss_full.png", "loss_top.png", "loss_bottom.png"]);
+
+// Colour of a pick circle in the orthogonal viewer, by RELION class number.
+// Classes 1..8 get distinct colours that read on a grey tomogram; later ones
+// repeat (the legend says so). Picks without a class column (0) keep the
+// original green. The first five are the colours the viewer always used for
+// classes 1-5, so existing projects look the same.
+const CLASS_COLOURS = ["#ff6ac1", "#f5a623", "#4aa3ff", "#e5484d", "#39d353", "#ffe14d", "#2fd6d0", "#b07cff"];
+const NO_CLASS_COLOUR = "#39d353";
+// (Not "classColor": that name is the Analyze charts' palette function further down.)
+function pickClassColor(c) {
+  c = c | 0;
+  return c > 0 ? CLASS_COLOURS[(c - 1) % CLASS_COLOURS.length] : NO_CLASS_COLOUR;
+}
 
 // Job types with an end-of-job CTF QC tab. Must match backend
 // ctf_qc.supports_ctf_qc (the backend is authoritative — see PROGRESS_JOB_TYPES

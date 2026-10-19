@@ -1688,10 +1688,13 @@ def viz_slice(
     # render_slice_png's full 1200px default and letting CSS scale it down
     # client-side.
     max_dim: int = Query(1200),
+    # Gaussian smoothing in voxels, applied in 3-D (0 = off); see viz._gaussian_slice.
+    sigma: float = Query(0.0),
 ):
     try:
         png = viz.render_slice_png(
-            run_manager.project_dir, mrc_path, axis, index, lo, hi, max_dim=max_dim, transpose=transpose
+            run_manager.project_dir, mrc_path, axis, index, lo, hi, max_dim=max_dim, transpose=transpose,
+            sigma=sigma,
         )
     except viz.VizError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
