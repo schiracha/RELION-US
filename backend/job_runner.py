@@ -1201,6 +1201,13 @@ class JobRunManager:
                     f"own GUI."
                 )
         cwd.mkdir(parents=True, exist_ok=True)
+        if overwrite_run_id is not None:
+            # RELION deletes the exit markers whenever a job (re)starts
+            # (pipeliner.cpp ~651-653). A marker left by the PREVIOUS attempt
+            # is otherwise read as this run's outcome: e.g. a stale
+            # RELION_JOB_EXIT_FAILURE makes `--check_job_completion` mark a
+            # still-running overwritten job Failed in RELION's pipeline.
+            self._delete_pipeline_control_files(cwd)
 
         detect_text = command + " " + " ".join(str(v) for v in (field_values or {}).values())
         run = JobRun(
@@ -2115,6 +2122,13 @@ class JobRunManager:
                     f"own job numbering instead -- the job itself is unaffected."
                 )
         cwd.mkdir(parents=True, exist_ok=True)
+        if overwrite_run_id is not None:
+            # RELION deletes the exit markers whenever a job (re)starts
+            # (pipeliner.cpp ~651-653). A marker left by the PREVIOUS attempt
+            # is otherwise read as this run's outcome: e.g. a stale
+            # RELION_JOB_EXIT_FAILURE makes `--check_job_completion` mark a
+            # still-running overwritten job Failed in RELION's pipeline.
+            self._delete_pipeline_control_files(cwd)
 
         detect_text = " ".join(str(v) for v in (field_values or {}).values())
         run = JobRun(

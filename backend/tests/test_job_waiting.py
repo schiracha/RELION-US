@@ -301,3 +301,42 @@ def test_a_live_waiting_job_is_not_reconciled_away(manager):
 
     listed = asyncio.run(go())
     assert listed["status"] == STATUS_QUEUED and listed["waiting"] is True
+
+
+# --------------------------------------------------------------------------
+# Overwrite must not inherit the previous attempt's exit markers
+# --------------------------------------------------------------------------
+
+MARKERS = ("RELION_JOB_EXIT_SUCCESS", "RELION_JOB_EXIT_FAILURE",
+           "RELION_JOB_EXIT_ABORTED", "RELION_JOB_ABORT_NOW")
+
+
+def test_overwrite_clears_exit_markers_left_by_the_previous_attempt(manager, tmp_path):
+    """A stale RELION_JOB_EXIT_FAILURE from a failed first attempt made RELION
+    treat the overwritten, still-running job as failed (it checks the marker
+    files of every Running process). RELION itself deletes them at start."""
+    async def go():
+        first = await start(manager, "exit 1")
+        assert await until(lambda: first.status in TERMINAL)
+        job_dir = Path(first.cwd)
+        for name in MARKERS:
+            (job_dir / name).touch()
+        second = await start(manager, "sleep 0.6", overwrite_run_id=first.run_id)
+        present_while_running = [n for n in MARKERS if (job_dir / n).exists()]
+        assert await until(lambda: second.status in TERMINAL)
+        return present_while_running
+
+    assert asyncio.run(go()) == []
+
+
+def test_a_fresh_run_does_not_touch_markers_of_other_jobs(manager, tmp_path):
+    async def go():
+        other = await start(manager, "true")
+        assert await until(lambda: other.status in TERMINAL)
+        marker = Path(other.cwd) / "RELION_JOB_EXIT_SUCCESS"
+        marker.touch()
+        fresh = await start(manager, "true")
+        assert await until(lambda: fresh.status in TERMINAL)
+        return marker.exists()
+
+    assert asyncio.run(go()) is True
