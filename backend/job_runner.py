@@ -127,6 +127,18 @@ _JOB_DIR_TOKEN_RE = re.compile(
 _LINE_SEP_RE = re.compile(rb"\r\n|\r|\n")
 
 
+# How often a running job's saved output files are read for the live view, and
+# how often an adopted job (see adopt_running_jobs) is checked for being alive.
+TAIL_POLL_S = 0.15
+ADOPT_POLL_S = 2.0
+
+# The command line is run through ONE extra shell that records the command's
+# exit status in a file (argv: $1 = the command exactly as the user sees it,
+# $2 = the file). A restarted RELION-US cannot wait() on a process it did not
+# start, so this file is the only way it can learn how an adopted job ended.
+_EXIT_CODE_WRAPPER = '/bin/sh -c "$1"; rc=$?; printf %s "$rc" > "$2"; exit "$rc"'
+
+
 class LogFollower:
     """Reads a job's saved output file (run.out / run.err in its job
     directory, which RELION-US tees every line into -- and RELION's own GUI
@@ -168,6 +180,20 @@ class LogFollower:
         if len(lines) > self.max_lines:
             lines, truncated = lines[-self.max_lines:], True
         return lines, truncated
+
+    def start_at_end(self) -> "LogFollower":
+        """Follow only what is written from now on (an Overwrite appends to the
+        same file, so earlier runs' output is not this run's)."""
+        try:
+            self.pos = self.path.stat().st_size
+        except OSError:
+            self.pos = 0
+        return self
+
+    def flush(self) -> Optional[str]:
+        """The unfinished last line, if any, once the writer is known to be done."""
+        rest, self._partial = self._partial, b""
+        return rest.decode("utf-8", errors="replace") if rest else None
 
     def new_lines(self) -> list[str]:
         """Complete lines appended since the last call; an unfinished last
@@ -402,6 +428,9 @@ class JobRun:
     wait_for: list[str] = field(default_factory=list)
     wait_mode: str = WAIT_MODE_SUCCESS
     waiting: bool = False
+    # True for a run taken back after a RELION-US restart (adopt_running_jobs):
+    # its process belongs to the previous backend, so there is no proc handle.
+    adopted: bool = field(default=False, repr=False, compare=False)
     # Set when Abort arrives before the subprocess handle exists (see
     # abort_run + _run_subprocess); the launcher honours it as soon as it
     # has a process to signal.
@@ -1476,30 +1505,44 @@ class JobRunManager:
             run.stderr_lines.append(run.pipeline_sync_error)
             await run.broadcast({"type": "stderr", "line": run.pipeline_sync_error})
 
+        # The job's stdout/stderr go straight into run.out / run.err in its
+        # job directory -- exactly what RELION's own GUI does with `>> run.out
+        # 2>> run.err` (RelionJob::prepareFinalCommand, src/pipeline_jobs.cpp
+        # ~760; append, so an Overwrite accumulates) -- and RELION-US follows
+        # those files for the live view. They used to be asyncio PIPEs owned by
+        # this backend, so restarting it killed every running job at its next
+        # write (the read end was gone: SIGPIPE / EPIPE). A file survives.
+        stdout_path, stderr_path = Path(run.cwd) / "run.out", Path(run.cwd) / "run.err"
+        exit_file = self._exit_file(run.project_dir, run.run_id)
         try:
-            proc = await asyncio.create_subprocess_shell(
-                run.command,
-                # Run from the PROJECT ROOT, exactly like RELION -- so
-                # project-root-relative input patterns (e.g. `frames/*.mrc`)
-                # and the `--o <JobDir>/jobNNN/` output path resolve the same
-                # way they do under RELION's own GUI. run.cwd remains the
-                # job's OWN output directory (used by the Outputs tab, clean,
-                # delete, download); only the process's working directory is
-                # the project root.
-                cwd=run.project_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                # New session (setsid) so this shell becomes its own process
-                # group leader -- real RELION commands are frequently a
-                # shell pipeline that spawns further children (MPI launchers,
-                # `` `which relion_run_x_mpi` `` substitutions, etc; see
-                # job_registry.py). Without this, terminate()/abort_run()
-                # below would only signal the /bin/sh wrapper itself and
-                # leave those children running orphaned -- verified this
-                # actually happens (a plain `sleep 30` child survived a
-                # terminate() of its parent shell) before adding this.
-                start_new_session=True,
-            )
+            exit_file.parent.mkdir(parents=True, exist_ok=True)
+            exit_file.unlink(missing_ok=True)
+            out_follow = LogFollower(stdout_path).start_at_end()
+            err_follow = LogFollower(stderr_path).start_at_end()
+            with open(stdout_path, "ab") as fout, open(stderr_path, "ab") as ferr:
+                proc = await asyncio.create_subprocess_exec(
+                    "/bin/sh", "-c", _EXIT_CODE_WRAPPER, "relion-us", run.command, str(exit_file),
+                    # Run from the PROJECT ROOT, exactly like RELION -- so
+                    # project-root-relative input patterns (e.g. `frames/*.mrc`)
+                    # and the `--o <JobDir>/jobNNN/` output path resolve the same
+                    # way they do under RELION's own GUI. run.cwd remains the
+                    # job's OWN output directory (used by the Outputs tab, clean,
+                    # delete, download); only the process's working directory is
+                    # the project root.
+                    cwd=run.project_dir,
+                    stdout=fout,
+                    stderr=ferr,
+                    # New session (setsid) so this shell becomes its own process
+                    # group leader -- real RELION commands are frequently a
+                    # shell pipeline that spawns further children (MPI launchers,
+                    # `` `which relion_run_x_mpi` `` substitutions, etc; see
+                    # job_registry.py). Without this, terminate()/abort_run()
+                    # below would only signal the /bin/sh wrapper itself and
+                    # leave those children running orphaned -- verified this
+                    # actually happens (a plain `sleep 30` child survived a
+                    # terminate() of its parent shell) before adding this.
+                    start_new_session=True,
+                )
         except Exception as exc:  # noqa: BLE001
             run.status = STATUS_FAILED
             run.ended_at = time.time()
@@ -1512,86 +1555,19 @@ class JobRunManager:
         run.proc = proc
         run.pid = proc.pid
         # Persisted immediately, not batched with a later write: if the
-        # backend dies moments from now, this PID is the only way
-        # abort_run() will ever be able to find and signal the real process
-        # again (see JobRun.pid's docstring).
+        # backend dies moments from now, this PID is how a restarted backend
+        # finds the still-running job again (adopt_running_jobs) and how
+        # abort_run() can signal it (see JobRun.pid's docstring).
         self._persist(run)
         if run.abort_requested:
             # Abort arrived while this process was still being spawned.
             self._terminate_process_group(run)
 
-        # RELION's own GUI always tees each job's stdout/stderr into
-        # run.out/run.err inside the job's output directory -- it's not
-        # something relion_refine (etc.) writes itself, it's shell
-        # redirection RELION's GUI appends to the command before running it
-        # (RelionJob::prepareFinalCommand, src/pipeline_jobs.cpp ~line 760:
-        # `one_command += " >> " + outputname + "run.out 2>> " + outputname
-        # + "run.err";`, unconditional whenever the command doesn't already
-        # contain a redirect). RELION-US instead streams stdout/stderr live
-        # over the websocket via asyncio PIPEs -- shell-redirecting the
-        # command itself would swallow that live view -- so mirror the same
-        # convention here by teeing each line to a file as it's read, in
-        # append mode (">>"), matching RELION's own append (relevant for
-        # Overwrite: a re-run's output accumulates, it doesn't replace).
-        # Best-effort: a logging failure must never take down the job.
-        def _open_log(name: str):
-            try:
-                return open(Path(run.cwd) / name, "a", buffering=1, errors="replace")
-            except OSError:
-                return None
-
-        stdout_log = _open_log("run.out")
-        stderr_log = _open_log("run.err")
-
-        async def pump(stream, sink: list[str], msg_type: str, logfile):
-            # Chunk-based, not stream.readline(): readline() raises
-            # ValueError once a single line exceeds its 64 KiB limit, which
-            # RELION's own in-place progress-bar animation (`~~(,_,"> yum!`,
-            # printed via bare \r with no real \n between updates -- seen in
-            # the run.out of literally every job this session) can and does
-            # exceed on a long-running step. The old code caught that
-            # exception and stopped THIS pump() coroutine cleanly, but nothing
-            # else was left draining the pipe -- once the OS pipe's own
-            # buffer then filled, the child's next write() call blocked
-            # forever, silently hanging the whole job (not just logging)
-            # with the run stuck in "running" permanently. Confirmed for
-            # real: a Class2D job hung 17+ minutes at ~0% CPU, its only
-            # threads parked on blocked write/futex syscalls, immediately
-            # after this exact "[RELION-US] output stream error: Separator
-            # is not found, and chunk exceed the limit" appeared in its
-            # Errors tab. stream.read(n) has no such per-line limit --
-            # \r is treated as a line terminator alongside \n (matching how
-            # a real terminal would render the animation) so a single
-            # in-place-updating spinner still surfaces as many short lines
-            # instead of one unbounded one.
-            buf = b""
-            while True:
-                chunk = await stream.read(65536)
-                if not chunk:
-                    break
-                buf += chunk
-                while True:
-                    m = _LINE_SEP_RE.search(buf)
-                    if m is None:
-                        break
-                    raw_line, buf = buf[:m.start()], buf[m.end():]
-                    decoded = raw_line.decode(errors="replace")
-                    sink.append(decoded)
-                    if logfile is not None:
-                        try:
-                            logfile.write(decoded + "\n")
-                        except OSError:
-                            pass
-                    await run.broadcast({"type": msg_type, "line": decoded})
-            if buf:
-                decoded = buf.decode(errors="replace")
-                sink.append(decoded)
-                if logfile is not None:
-                    try:
-                        logfile.write(decoded + "\n")
-                    except OSError:
-                        pass
-                await run.broadcast({"type": msg_type, "line": decoded})
+        stop = asyncio.Event()
+        tails = [
+            asyncio.create_task(self._tail_into_run(run, out_follow, run.stdout_lines, "stdout", stop)),
+            asyncio.create_task(self._tail_into_run(run, err_follow, run.stderr_lines, "stderr", stop)),
+        ]
 
         # try/finally so the run ALWAYS reaches a terminal status and is
         # persisted -- otherwise an unexpected error here leaves the Command
@@ -1604,21 +1580,16 @@ class JobRunManager:
         # False and finalizes normally.
         abandon_still_running = False
         try:
-            await asyncio.gather(
-                pump(proc.stdout, run.stdout_lines, "stdout", stdout_log),
-                pump(proc.stderr, run.stderr_lines, "stderr", stderr_log),
-            )
             exit_code = await proc.wait()
         except asyncio.CancelledError:
             # This TASK being cancelled is not the same thing as the real
             # child process having died -- e.g. confirmed for real: a
             # TestClient synchronous call's own event-loop portal can
             # cancel this fire-and-forget task on teardown even though the
-            # real subprocess had already exited cleanly (its stdout/
-            # stderr fully captured). Distinguish via the process's own
-            # liveness rather than assuming cancellation always means
-            # "abandon in place" (issue #57 -- a previous fix attempt did
-            # exactly that unconditionally and broke 7 TestClient-based
+            # real subprocess had already exited cleanly. Distinguish via the
+            # process's own liveness rather than assuming cancellation always
+            # means "abandon in place" (issue #57 -- a previous fix attempt
+            # did exactly that unconditionally and broke 7 TestClient-based
             # tests whose jobs had, in fact, already finished).
             #
             # A synchronous `proc.returncode is not None` check here is NOT
@@ -1627,66 +1598,40 @@ class JobRunManager:
             # exact cancellation can fire before that loop gets a chance to
             # run it even for a process (e.g. `echo hello`) that already
             # exited microseconds ago. Just await proc.wait() again instead
-            # -- genuinely no different from what the uncancelled path
-            # above was already doing, so a job that's about to finish
-            # (however long that legitimately takes -- confirmed for real:
-            # a `conda run` job's own multi-second environment-resolution
-            # overhead) still gets a real chance to. Only a SECOND
-            # cancellation arriving while we wait here (rare, but
-            # TestClient's own teardown can be aggressive) means "abandon
-            # in place" -- see that branch below. An artificial short
-            # timeout was tried here first and rejected: it wrongly
-            # abandoned that exact conda job (which legitimately took
-            # longer than the bound to finish, not because it was stuck).
+            # -- a job that's about to finish (however long that legitimately
+            # takes -- confirmed for real: a `conda run` job's own
+            # multi-second environment-resolution overhead) still gets a real
+            # chance to. Only a SECOND cancellation arriving while we wait
+            # here means "abandon in place" -- see that branch below. An
+            # artificial short timeout was tried here first and rejected: it
+            # wrongly abandoned that exact conda job.
             try:
                 exit_code = await proc.wait()
             except asyncio.CancelledError:
                 # A second cancellation before the process could even be
                 # confirmed done. Finalizing now with no real exit code
                 # would incorrectly mark a live job as failed. Leave
-                # run.status/run.proc exactly as they are, close the log
-                # files (below, via finally -- it always runs, re-raise or
-                # not), and let this task end cancelled -- a later
-                # abort_run() (including its persisted-history restart-
-                # recovery path, keyed on run.pid) can still act on the
-                # real process correctly. Mirrors _run_slurm_job's own
-                # CancelledError handling exactly (bare `raise`, no
-                # finalize call).
+                # run.status/run.proc exactly as they are (the finally below
+                # stops the tails), and let this task end cancelled -- the
+                # process keeps writing to its files, and a restarted backend
+                # picks the job up again (adopt_running_jobs). Mirrors
+                # _run_slurm_job's own CancelledError handling exactly (bare
+                # `raise`, no finalize call).
                 abandon_still_running = True
                 raise
-            # Already exited -- but this task's own cancellation and the
-            # child's exit are separate events, so the asyncio.gather(pump,
-            # pump) above may have been interrupted before draining
-            # everything already sitting in its stdout/stderr pipes. Finish
-            # that drain (should return near-instantly: the process is
-            # already dead, so its pipes will EOF quickly) before
-            # finalizing below -- otherwise real output the job already
-            # produced is silently dropped (confirmed for real: this exact
-            # scenario, on an `echo hello` job under TestClient's own
-            # portal, left stdout_lines empty and the run stuck at
-            # STATUS_RUNNING even though the job had genuinely finished).
-            # Best-effort: a second cancellation here (rare, but
-            # TestClient's teardown can be aggressive) must not crash
-            # finalization either.
-            try:
-                await asyncio.gather(
-                    pump(proc.stdout, run.stdout_lines, "stdout", stdout_log),
-                    pump(proc.stderr, run.stderr_lines, "stderr", stderr_log),
-                )
-            except Exception:  # noqa: BLE001
-                pass
         except Exception as exc:  # noqa: BLE001
-            msg = f"[RELION-US] error while streaming output: {type(exc).__name__}: {exc}"
+            msg = f"[RELION-US] error while waiting for the job: {type(exc).__name__}: {exc}"
             run.stderr_lines.append(msg)
             await run.broadcast({"type": "stderr", "line": msg})
         finally:
-            for logfile in (stdout_log, stderr_log):
-                if logfile is not None:
-                    try:
-                        logfile.close()
-                    except OSError:
-                        pass
-            if not abandon_still_running:
+            if abandon_still_running:
+                for task in tails:
+                    task.cancel()
+            else:
+                # The process is done: let the tails read everything it wrote
+                # (including an unfinished last line) before finalizing.
+                stop.set()
+                await asyncio.gather(*tails, return_exceptions=True)
                 if exit_code is None:
                     # never got a clean wait() -- make sure the child is reaped
                     try:
@@ -1695,6 +1640,124 @@ class JobRunManager:
                         exit_code = proc.returncode
                 run.proc = None
                 await self._finalize_run(run, exit_code)
+
+    # --- Taking running jobs back after a restart ------------------------
+
+    def _run_from_entry(self, entry: dict) -> JobRun:
+        return JobRun(
+            run_id=entry["run_id"], internal_name=entry.get("internal_name", ""),
+            display_name=entry.get("display_name", ""), command=entry.get("command", ""),
+            cwd=entry["cwd"], project_dir=entry["project_dir"], job_number=entry.get("job_number"),
+            status=entry.get("status", STATUS_RUNNING), alias=entry.get("alias", ""),
+            note=entry.get("note", ""), field_values=entry.get("field_values"),
+            detected_inputs=entry.get("detected_inputs", []), exit_code=entry.get("exit_code"),
+            pid=entry.get("pid"), started_at=entry.get("started_at"), ended_at=entry.get("ended_at"),
+            pipeline_registered=entry.get("pipeline_registered", False),
+        )
+
+    async def adopt_running_jobs(self, project_dir: Optional[Path] = None) -> list[str]:
+        """Take back local jobs a previous backend started and that are still
+        in the history as running. Their processes keep going across a restart
+        (their output goes to files -- see _run_subprocess), but nothing was
+        left watching them: no live output, no abort, and the status would
+        stay "running" for ever. Each is rebuilt as an in-memory run and
+        watched until its process ends; its real outcome comes from the exit
+        status file the launcher's wrapper wrote (or RELION's own exit
+        markers), so Command Center ends up showing what really happened.
+        Returns the run_ids taken back. Safe to call repeatedly."""
+        pd = Path(project_dir) if project_dir is not None else self.project_dir
+        taken = []
+        for entry in project_manager.load_history(pd):
+            run_id = entry.get("run_id")
+            if (not run_id or run_id in self.runs
+                    or entry.get("status") not in (STATUS_RUNNING, STATUS_PENDING)
+                    or not entry.get("pid") or entry.get("slurm_job_id") is not None
+                    or str(entry.get("command", "")).startswith(IN_PROCESS_COMMAND_PREFIX)
+                    or not entry.get("cwd") or not entry.get("project_dir")):
+                continue
+            run = self._run_from_entry(entry)
+            run.adopted = True
+            self.runs[run_id] = run
+            run.task = asyncio.create_task(self._watch_adopted(run))
+            taken.append(run_id)
+        return taken
+
+    def _adopted_alive(self, run: JobRun) -> bool:
+        return JobRunManager._pid_matches_persisted_run(run.pid, run.to_summary())
+
+    async def _watch_adopted(self, run: JobRun) -> None:
+        """Replay the tail of an adopted job's saved output into its buffers,
+        follow the files while its process lives, then record how it ended."""
+        followers = (LogFollower(Path(run.cwd) / "run.out"), LogFollower(Path(run.cwd) / "run.err"))
+        for follower, sink in zip(followers, (run.stdout_lines, run.stderr_lines)):
+            lines, truncated = follower.initial()
+            if truncated:
+                sink.append(f"[RELION-US] Earlier output left out -- showing the last {len(lines)} lines; "
+                            f"the whole file is in the job's directory.")
+            sink.extend(lines)
+        note = ("[RELION-US] RELION-US was restarted while this job ran; it is being watched again "
+                "and its output is followed from the saved run.out / run.err.")
+        run.stdout_lines.append(note)
+        stop = asyncio.Event()
+        tails = [asyncio.create_task(self._tail_into_run(run, f, sink, kind, stop))
+                 for f, sink, kind in zip(followers, (run.stdout_lines, run.stderr_lines), ("stdout", "stderr"))]
+        try:
+            while self._adopted_alive(run):
+                await asyncio.sleep(ADOPT_POLL_S)
+        except asyncio.CancelledError:
+            for task in tails:
+                task.cancel()
+            raise
+        stop.set()
+        await asyncio.gather(*tails, return_exceptions=True)
+        exit_code = self._read_exit_file(run.project_dir, run.run_id)
+        if exit_code is None:
+            cwd = Path(run.cwd)
+            if (cwd / "RELION_JOB_EXIT_SUCCESS").exists():
+                exit_code = 0
+            elif (cwd / "RELION_JOB_EXIT_FAILURE").exists():
+                exit_code = 1
+            elif run.status != STATUS_ABORTED:
+                msg = ("[RELION-US] This job's process ended while RELION-US was not running and left no "
+                       "exit status, so it is recorded as failed. Check its output to see how far it got.")
+                run.stderr_lines.append(msg)
+                await run.broadcast({"type": "stderr", "line": msg})
+        run.proc = None
+        await self._finalize_run(run, exit_code)
+
+    @staticmethod
+    def _exit_file(project_dir, run_id: str) -> Path:
+        """Where the launcher's wrapper records a job's exit status. Under the
+        project's own .relion_us/ folder, not the job directory, so it never
+        shows up among a job's outputs."""
+        return Path(project_dir) / project_manager.MARKER_DIRNAME / "exit" / run_id
+
+    @staticmethod
+    def _read_exit_file(project_dir, run_id: str) -> Optional[int]:
+        try:
+            return int(JobRunManager._exit_file(project_dir, run_id).read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    async def _tail_into_run(self, run: JobRun, follower: LogFollower, sink: list[str],
+                             msg_type: str, stop: asyncio.Event) -> None:
+        """Follow one of a running job's output files, feeding each new line to
+        the run's buffer and its live subscribers, until `stop` is set; then one
+        last read so nothing the process wrote just before it exited is lost.
+        Lines split on \\r as well as \\n (LogFollower), so RELION's in-place
+        progress animation survives and no single line can grow without bound."""
+        while True:
+            finished = stop.is_set()
+            for line in follower.new_lines():
+                sink.append(line)
+                await run.broadcast({"type": msg_type, "line": line})
+            if finished:
+                rest = follower.flush()
+                if rest is not None:
+                    sink.append(rest)
+                    await run.broadcast({"type": msg_type, "line": rest})
+                return
+            await asyncio.sleep(TAIL_POLL_S)
 
     async def _finalize_run(self, run: JobRun, exit_code: Optional[int]) -> None:
         """
@@ -2435,6 +2498,13 @@ class JobRunManager:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
         except OSError:
             return False
+        # A job started by the current launcher carries its own exit-status
+        # file path in the wrapper's command line (see _EXIT_CODE_WRAPPER):
+        # unique per run, and present even for a hand-written command that never
+        # mentions the job directory. Older jobs fall back on the directory.
+        run_id = entry.get("run_id")
+        if run_id and str(JobRunManager._exit_file(project_dir, run_id)) in cmdline:
+            return True
         return subdir in cmdline
 
     async def abort_run(self, run_id: str) -> bool:
@@ -2528,6 +2598,11 @@ class JobRunManager:
                 await run.broadcast({"type": "stderr", "line": msg})
         elif run.proc is not None:
             self._terminate_process_group(run)
+        elif run.adopted and run.pid:
+            # A job taken back after a restart: no proc handle, but the pid
+            # (verified by _adopted_alive's own check) names its session.
+            if self._adopted_alive(run):
+                self._kill_session(run.pid, signal.SIGTERM)
         elif run.is_custom_job:
             # In-process converter job: the task IS the work, so cancelling it
             # is the abort.
@@ -2826,6 +2901,10 @@ class JobRunManager:
 
         self.runs.pop(run_id, None)
         target_dir = Path(project_dir) if project_dir else self.project_dir
+        try:
+            self._exit_file(target_dir, run_id).unlink(missing_ok=True)
+        except OSError:
+            pass
         try:
             history = project_manager.load_history(target_dir)
             project_manager.save_history(

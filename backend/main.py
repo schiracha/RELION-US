@@ -147,6 +147,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import tempfile
 import time
@@ -221,7 +222,30 @@ def _initial_project_dir() -> Path:
 
 PROJECT_DIR = _initial_project_dir()
 
-app = FastAPI(title="RELION-US")
+ADOPT_INTERVAL_S = 5.0
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Keep taking back local jobs a previous backend left running (see
+    JobRunManager.adopt_running_jobs): once at startup, then every few seconds
+    so a job in a project switched to later is picked up too."""
+    async def adopt_loop() -> None:
+        while True:
+            try:
+                await run_manager.adopt_running_jobs()
+            except Exception:  # noqa: BLE001 - never let this loop die
+                pass
+            await asyncio.sleep(ADOPT_INTERVAL_S)
+
+    task = asyncio.create_task(adopt_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="RELION-US", lifespan=_lifespan)
 
 # NO CORS middleware, deliberately. The frontend this app serves is same-origin
 # (every fetch in frontend/app.js is a relative path; both websockets are built

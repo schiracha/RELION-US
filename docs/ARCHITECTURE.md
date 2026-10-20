@@ -682,13 +682,29 @@ binaries write themselves, but shell redirection RELION's GUI appends to the
 command before running it (`RelionJob::prepareFinalCommand`,
 `src/pipeline_jobs.cpp` ~line 760: `one_command += " >> " + outputname +
 "run.out 2>> " + outputname + "run.err";`, unconditional whenever the command
-doesn't already contain a redirect). RELION-US streams stdout/stderr live
-over a websocket via asyncio pipes instead of shell-redirecting the command
-itself (which would swallow that live view) — `job_runner._run_subprocess()`
-now tees each line to `run.out`/`run.err` as it's read, in append mode to
-match RELION's own `>>` (so an Overwrite's output accumulates on top of the
-previous attempt's, not replaces it). Best-effort: a logging failure never
-takes down the job itself.
+doesn't already contain a redirect). RELION-US does the same: `job_runner.
+_run_subprocess()` spawns the job with its stdout/stderr file descriptors
+opened on `run.out`/`run.err` (append, so an Overwrite accumulates on top of
+the previous attempt's), and the live view is a tail of those files
+(`LogFollower`, `_tail_into_run`) feeding the run's buffers and websocket
+subscribers. It used to read asyncio pipes instead; the read end died with the
+backend, so a restart killed every running job at its next write (SIGPIPE).
+A file outlives the backend.
+
+The command runs through one extra `/bin/sh` that records its exit status in
+`<project>/.relion_us/exit/<run_id>` (`_EXIT_CODE_WRAPPER`): a restarted
+backend can't `wait()` on a process it did not start. At startup, and every few
+seconds after (`main._lifespan`), `adopt_running_jobs()` rebuilds each history
+entry still marked running whose process is alive as an in-memory run
+(`adopted=True`, no `proc` handle) and `_watch_adopted()` replays and follows
+its files until the process ends, then reads the exit file (or RELION's
+`RELION_JOB_EXIT_*` markers) and finalizes it like any other run; a process that
+vanished without leaving either is recorded failed with an explanation. Abort
+signals the adopted run's session by pid. A process is recognised as the run's
+by its command line (the per-run exit-file path, or for older jobs the job
+directory). SLURM runs and in-process custom jobs are not adopted. For a run
+that is neither live nor adopted, the run websocket replays the tail of its
+saved files (`main._stream_saved_run`).
 
 **A synced job used to appear twice in the Command Center.** `list_runs()`
 merges three sources — RELION's own `default_pipeline.star` (read-only

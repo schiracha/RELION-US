@@ -448,9 +448,11 @@ between jobs.
   and DeepETPicker jobs) or calls the converter directly (import bridges), streams output live
   over a websocket, and keeps the full transcript if you close and reopen.
 
-Every run leaves `run.out`/`run.err` in its job directory, matching RELION's
-own GUI convention, even though RELION-US streams output live rather than
-shell-redirecting it.
+Every run's output goes straight into `run.out`/`run.err` in its job directory
+(RELION's own GUI convention), and RELION-US follows those files for the live
+view. Jobs therefore keep running if you restart RELION-US: the restarted
+backend takes them back, picks the live output up again, and records how they
+really ended.
 
 There's no in-app page-scale control — use your browser's own zoom.
 
@@ -1046,10 +1048,12 @@ gaps introduced by a new RELION release show up as failures.
   operation on the same project, a registration can wait that long before the
   run starts.
 - Job history persists run *summaries* (command, status, timestamps) per
-  project, not full stdout/stderr transcripts. Reopening a job from history
-  after the backend restarted shows its last known status, not its old live
-  output — though `run.out`/`run.err` are still in the job directory, and the
-  Outputs tab will show them. Runs from the current session stream normally.
+  project, not full stdout/stderr transcripts. Reopening a job from before a
+  backend restart replays the tail of its `run.out`/`run.err` (the last 1000
+  lines of each; the files hold everything). Local jobs still running at the
+  restart are taken back and followed live; ones that were started by an older
+  version of RELION-US, which wrote through pipes the restart closed, are
+  recorded as failed. SLURM jobs are not taken back this way.
 - SLURM submission is verified against stub scheduler binaries in this
   project's own tests, not a real cluster — the array and dependency paths in
   particular are worth a careful first run before relying on them. Still on the
