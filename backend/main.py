@@ -177,6 +177,21 @@ import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
 from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command
+from deepetpicker_jobs import (
+    DEEPETPICKER_JOB_DEFINITIONS, build_deepetpicker_command, validate_deepetpicker_fields,
+)
+
+# Job types that run an external deep-learning command line as a real
+# subprocess (local or SLURM) through start_subprocess_job, with an editable
+# draft command: IsoNet2 and DeepETPicker. Everything below that used to be
+# keyed on ISONET_JOB_DEFINITIONS alone is keyed on this.
+EXTERNAL_COMMAND_JOBS = {**ISONET_JOB_DEFINITIONS, **DEEPETPICKER_JOB_DEFINITIONS}
+
+
+def build_external_command(internal_name: str, field_values: dict, output_subdir: str) -> str:
+    if internal_name in DEEPETPICKER_JOB_DEFINITIONS:
+        return build_deepetpicker_command(internal_name, field_values, output_subdir)
+    return build_isonet_command(internal_name, field_values, output_subdir)
 from job_runner import MANUALLY_SETTABLE_STATUSES, WAIT_MODES, JobRunManager
 
 APP_DIR = Path(__file__).resolve().parent
@@ -402,11 +417,11 @@ def _isonet_job_definition(internal_name: str, output_subdir: str) -> dict:
     isonet_jobs.build_isonet_command, shown/editable exactly like a real
     RELION job's) -- included here too so the popup can render it
     immediately on open, before the user has changed any field."""
-    definition = dict(ISONET_JOB_DEFINITIONS[internal_name])
+    definition = dict(EXTERNAL_COMMAND_JOBS[internal_name])
     definition["default_values"] = {
         opt["key"]: opt.get("default", "") for opt in definition.get("options", [])
     }
-    definition["draft_command"] = build_isonet_command(
+    definition["draft_command"] = build_external_command(
         internal_name, definition["default_values"], output_subdir)
     definition["output_subdir"] = output_subdir
     return definition
@@ -416,7 +431,7 @@ def _isonet_job_definition(internal_name: str, output_subdir: str) -> dict:
 def get_job_definition(internal_name: str):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         return _custom_job_definition(internal_name)
-    if internal_name in ISONET_JOB_DEFINITIONS:
+    if internal_name in EXTERNAL_COMMAND_JOBS:
         output_subdir = run_manager.prospective_subdir(internal_name)
         return _isonet_job_definition(internal_name, output_subdir)
     try:
@@ -463,11 +478,11 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
                        "program — it has no extra CLI options.",
             "options": [],
         }
-    if internal_name in ISONET_JOB_DEFINITIONS:
+    if internal_name in EXTERNAL_COMMAND_JOBS:
         return {
             "available": False,
-            "reason": "isonet_job",
-            "message": "Every isonet.py flag for this module is already exposed as a field above "
+            "reason": "isonet_job" if internal_name in ISONET_JOB_DEFINITIONS else "deepetpicker_job",
+            "message": "Every command-line flag for this job is already exposed as a field above "
                        "— there's no separate Advanced section to discover here.",
             "options": [],
         }
@@ -497,7 +512,7 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
 def recompute_draft(internal_name: str, req: DraftRequest):
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         raise HTTPException(status_code=400, detail="Custom jobs don't use draft commands")
-    if internal_name in ISONET_JOB_DEFINITIONS:
+    if internal_name in EXTERNAL_COMMAND_JOBS:
         if req.overwrite_run_id:
             try:
                 output_subdir = run_manager.overwrite_target_subdir(req.overwrite_run_id)
@@ -505,7 +520,7 @@ def recompute_draft(internal_name: str, req: DraftRequest):
                 raise HTTPException(status_code=409, detail=str(exc))
         else:
             output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
-        draft = build_isonet_command(internal_name, req.field_values, output_subdir)
+        draft = build_external_command(internal_name, req.field_values, output_subdir)
         return {"draft_command": draft, "unmapped_fields": [], "output_subdir": output_subdir}
     try:
         # raw_job() (not _load_raw()[internal_name] directly) resolves a
@@ -578,7 +593,7 @@ async def start_run(req: StartRunRequest):
         ):
             raise HTTPException(
                 status_code=400,
-                detail="Only RELION and IsoNet command jobs can wait for another job; "
+                detail="Only RELION, IsoNet and DeepETPicker command jobs can wait for another job; "
                        "in-app converters and pickers start immediately.")
 
     if req.overwrite_run_id and not run_manager.pipeline_sync_enabled():
@@ -661,16 +676,30 @@ async def start_run(req: StartRunRequest):
             raise HTTPException(status_code=409, detail=str(exc))
         return run.to_summary()
 
-    if req.internal_name in ISONET_JOB_DEFINITIONS:
-        # An IsoNet2 job runs through the SAME execution primitive a real
+    if req.internal_name in DEEPETPICKER_JOB_DEFINITIONS:
+        # The popup always sends the command box content along with the fields,
+        # so "no command" is not the signal. Validate the fields when the
+        # command is still one this app drafted (for the current fields, or for
+        # the untouched defaults); a hand-edited command is the user's
+        # responsibility, exactly as for every other job type.
+        draft_subdir = req.subdir or run_manager.prospective_subdir(req.internal_name)
+        drafted = {build_external_command(req.internal_name, req.field_values or {}, draft_subdir),
+                   build_external_command(req.internal_name, {}, draft_subdir)}
+        if not req.command or req.command in drafted:
+            problems = validate_deepetpicker_fields(req.internal_name, req.field_values or {})
+            if problems:
+                raise HTTPException(status_code=400, detail=" ".join(problems))
+
+    if req.internal_name in EXTERNAL_COMMAND_JOBS:
+        # An IsoNet2 / DeepETPicker job runs through the SAME execution primitive a real
         # RELION job does (start_subprocess_job -- local or SLURM,
         # identically), just with isonet_jobs.build_isonet_command in place
         # of job_registry._build_draft_command. req.command is the user's
         # (possibly hand-edited) command box content, same as a real job --
         # only fall back to rebuilding it here if it's somehow missing.
-        display_name = ISONET_JOB_DEFINITIONS[req.internal_name]["display_name"]
+        display_name = EXTERNAL_COMMAND_JOBS[req.internal_name]["display_name"]
         subdir = req.subdir or run_manager.prospective_subdir(req.internal_name)
-        command = req.command or build_isonet_command(req.internal_name, req.field_values or {}, subdir)
+        command = req.command or build_external_command(req.internal_name, req.field_values or {}, subdir)
         try:
             run = await run_manager.start_subprocess_job(
                 req.internal_name, display_name, command,
