@@ -12,7 +12,7 @@ DeepETPickerImport bridge is a different job (converting someone else's
 .coords file) and is unchanged.
 
 The command line these build exists only in the fork
-github.com/schiracha/DeepETPicker_Sc (`python -m deepetpicker`; see its
+github.com/schiracha/DeepETPicker-US (`python -m deepetpicker`; see its
 docs/PLAN_relion_io_webgui.md), not in the original cbmi-group/DeepETPicker:
 Train and Predict also rely on its edited train.py/test.py (job-directory
 output, errors raised instead of swallowed). Its contract, which this module relies on:
@@ -40,7 +40,7 @@ from pathlib import Path
 _ENV_OPTION = {
     "key": "conda_env", "field_type": "text", "label": "Conda environment name:", "default": "deepetpicker",
     "help": "The conda environment with the `deepetpicker` command: `pip install -e .` from a checkout of "
-            "github.com/schiracha/DeepETPicker_Sc (the original cbmi-group/DeepETPicker does not provide it). "
+            "github.com/schiracha/DeepETPicker-US (the original cbmi-group/DeepETPicker does not provide it). "
             "The command is run as `conda run -n <this> deepetpicker ...`. The environment needs PyTorch and "
             "pytorch-lightning 1.1.0 for Train and Predict; Prepare needs neither.",
 }
