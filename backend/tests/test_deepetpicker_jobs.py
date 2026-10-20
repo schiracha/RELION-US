@@ -2,7 +2,7 @@
 Tests for deepetpicker_jobs.py and its wiring into job_catalog.py/main.py.
 
 The three job types run the `deepetpicker` command line from the DeepETPicker
-repository (schiracha/DeepETPicker_Sc) as a subprocess, like the IsoNet2 jobs.
+repository (schiracha/DeepETPicker-US) as a subprocess, like the IsoNet2 jobs.
 EXPECTED_FLAGS below is that command line's argparse surface, copied from
 `deepetpicker.cli.build_parser()`; the DeepETPicker repo's own test suite and
 this one meet at that list.

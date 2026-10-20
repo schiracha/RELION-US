@@ -540,12 +540,12 @@ their Progress tab; **Predict**'s output MRCs link straight into the viewer.
 and Predict, each one command of the `deepetpicker` command line. That command
 line does not exist in the original
 [cbmi-group/DeepETPicker](https://github.com/cbmi-group/DeepETPicker); it comes
-from my fork, [schiracha/DeepETPicker_Sc](https://github.com/schiracha/DeepETPicker_Sc),
+from my fork, [schiracha/DeepETPicker-US](https://github.com/schiracha/DeepETPicker-US),
 which the jobs need as is. Install it with:
 
 ```bash
-git clone https://github.com/schiracha/DeepETPicker_Sc
-cd DeepETPicker_Sc
+git clone https://github.com/schiracha/DeepETPicker-US
+cd DeepETPicker-US
 # Train and Predict need the original DeepETPicker README's environment first
 # (conda, Python 3.8, PyTorch 1.7.1 -- PyTorch is not in requirement.txt); then:
 pip install -r requirement.txt    # pytorch-lightning 1.1.0 and the rest
