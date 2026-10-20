@@ -1150,3 +1150,106 @@ def test_draft_endpoint_returns_notes_for_dropped_motioncor3_options(client):
 
     values["do_own_motioncor"] = True
     assert client.post("/api/jobs/TomoMotioncorr/draft", json={"field_values": values}).json()["notes"] == []
+
+
+# ---------------------------------------------------------------------------
+# Live output / errors for a run the backend is NOT holding in memory (one
+# started before a restart). The socket used to answer a bare "Unknown run_id",
+# which the popup printed into the Errors tab and live output of every
+# reopened job.
+# ---------------------------------------------------------------------------
+
+
+def _saved_run(project, job_number=7, status="completed", pid=None, out="", err=""):
+    job_dir = project / "Train" / f"job{job_number:03d}"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "run.out").write_text(out)
+    (job_dir / "run.err").write_text(err)
+    project_manager.save_history(project, [{
+        "run_id": f"saved{job_number}", "internal_name": "Import", "display_name": "Import",
+        "command": "x", "status": status, "exit_code": 0 if status == "completed" else None,
+        "job_number": job_number, "job_name": f"job{job_number:03d}", "cwd": str(job_dir),
+        "project_dir": str(project), "pid": pid, "started_at": 1.0,
+    }])
+    return job_dir
+
+
+def _drain(ws, limit=200):
+    msgs = []
+    for _ in range(limit):
+        try:
+            msgs.append(ws.receive_json())
+        except Exception:  # noqa: BLE001 - socket closed by the server
+            break
+    return msgs
+
+
+def test_a_finished_run_from_before_a_restart_replays_its_saved_output(client):
+    project = main.run_manager.project_dir
+    _saved_run(project, out="epoch 1\nepoch 2\n", err="warning: something\n")
+    with client.websocket_connect("/ws/runs/saved7") as ws:
+        msgs = _drain(ws)
+    assert [m["line"] for m in msgs if m["type"] == "stdout"] == ["epoch 1", "epoch 2"]
+    assert [m["line"] for m in msgs if m["type"] == "stderr"] == ["warning: something"]
+    assert msgs[-1] == {"type": "status", "status": "completed", "exit_code": 0}
+    assert not any(m["type"] == "error" for m in msgs)       # no more "Unknown run_id"
+
+
+def test_a_truly_unknown_run_id_still_reports_it(client):
+    with client.websocket_connect("/ws/runs/doesnotexist") as ws:
+        assert ws.receive_json() == {"type": "error", "line": "Unknown run_id"}
+
+
+def test_a_long_saved_log_is_cut_to_its_tail_with_a_note(client):
+    project = main.run_manager.project_dir
+    _saved_run(project, out="".join(f"line {i}\n" for i in range(2500)))
+    with client.websocket_connect("/ws/runs/saved7") as ws:
+        out = [m["line"] for m in _drain(ws, limit=5000) if m["type"] == "stdout"]
+    assert out[0].startswith("[RELION-US] Earlier output left out")
+    assert out[-1] == "line 2499" and len(out) == 1001
+
+
+def test_get_run_for_a_run_from_before_a_restart_returns_its_record_and_output(client):
+    project = main.run_manager.project_dir
+    _saved_run(project, out="hello\n", err="oops\n")
+    body = client.get("/api/runs/saved7").json()
+    assert body["run_id"] == "saved7" and body["stdout_lines"] == ["hello"] and body["stderr_lines"] == ["oops"]
+    assert client.get("/api/runs/nope").status_code == 404
+
+
+def test_a_still_running_job_is_followed_after_a_restart(client, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(main, "FOLLOW_SAVED_POLL_S", 0.1)
+    project = main.run_manager.project_dir
+    # a process whose command line carries the job's own directory, as a real job's does
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "Train/job007/"])
+    try:
+        job_dir = _saved_run(project, status="running", pid=proc.pid, out="first\n")
+        with client.websocket_connect("/ws/runs/saved7") as ws:
+            first = []
+            while not any(m["type"] == "stdout" and "not tracked live" in m["line"] for m in first):
+                first.append(ws.receive_json())
+            assert [m["line"] for m in first if m["type"] == "stdout"][0] == "first"
+            assert {"type": "status", "status": "running", "exit_code": None} in first
+            with open(job_dir / "run.out", "a") as f:
+                f.write("second\n")
+            with open(job_dir / "run.err", "a") as f:
+                f.write("late error\n")
+            got = {ws.receive_json()["line"], ws.receive_json()["line"]}
+            assert got == {"second", "late error"}
+            proc.kill()
+            proc.wait()
+            ended = ws.receive_json()
+            assert ended["type"] == "stdout" and "process has ended" in ended["line"]
+    finally:
+        proc.kill()
+
+
+def test_a_running_entry_whose_process_is_gone_says_so_instead_of_following(client):
+    project = main.run_manager.project_dir
+    _saved_run(project, status="running", pid=2_000_000_000, out="last words\n")
+    with client.websocket_connect("/ws/runs/saved7") as ws:
+        msgs = _drain(ws)
+    lines = [m["line"] for m in msgs if m["type"] == "stdout"]
+    assert lines[0] == "last words" and "no longer running" in lines[-1]

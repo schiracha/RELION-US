@@ -193,7 +193,10 @@ def build_external_command(internal_name: str, field_values: dict, output_subdir
     if internal_name in DEEPETPICKER_JOB_DEFINITIONS:
         return build_deepetpicker_command(internal_name, field_values, output_subdir, project_dir)
     return build_isonet_command(internal_name, field_values, output_subdir)
-from job_runner import MANUALLY_SETTABLE_STATUSES, WAIT_MODES, JobRunManager
+from job_runner import (
+    MANUALLY_SETTABLE_STATUSES, STATUS_PENDING, STATUS_QUEUED, STATUS_RUNNING, WAIT_MODES,
+    JobRunManager, LogFollower,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PROJECT_DIR = APP_DIR.parent / "relion_project"
@@ -1291,12 +1294,36 @@ def get_run(run_id: str):
         return {**detail, "stdout_lines": [], "stderr_lines": []}
     run = run_manager.get(run_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Unknown run_id")
+        # Not live in this backend (started before a restart): the persisted
+        # record plus whatever its run.out / run.err still hold.
+        record = run_manager._resolve_run_record(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Unknown run_id")
+        out, err = _saved_output(record)
+        return {**record, "stdout_lines": out, "stderr_lines": err}
     return {
         **run.to_summary(),
         "stdout_lines": run.stdout_lines,
         "stderr_lines": run.stderr_lines,
     }
+
+
+def _log_followers(record: dict) -> tuple[LogFollower, LogFollower]:
+    cwd = Path(record["cwd"]) if record.get("cwd") else Path("/nonexistent")
+    return LogFollower(cwd / "run.out"), LogFollower(cwd / "run.err")
+
+
+def _saved_output(record: dict) -> tuple[list[str], list[str]]:
+    """The tail of a job's saved stdout/stderr (see LogFollower), with a first
+    line saying so when earlier output was left out."""
+    result = []
+    for name, follower in zip(("run.out", "run.err"), _log_followers(record)):
+        lines, truncated = follower.initial()
+        if truncated:
+            lines.insert(0, f"[RELION-US] Earlier output left out -- showing the last {len(lines)} lines "
+                            f"of {name}; the whole file is in the job's directory.")
+        result.append(lines)
+    return result[0], result[1]
 
 
 @app.websocket("/ws/events")
@@ -1359,8 +1386,7 @@ async def run_websocket(websocket: WebSocket, run_id: str):
     await websocket.accept()
     run = run_manager.get(run_id)
     if run is None:
-        await websocket.send_json({"type": "error", "line": "Unknown run_id"})
-        await websocket.close()
+        await _stream_saved_run(websocket, run_id)
         return
 
     # Replay what's already happened so a popup opened after the run
@@ -1402,6 +1428,88 @@ async def run_websocket(websocket: WebSocket, run_id: str):
         reader.cancel()
         if queue in run.subscribers:
             run.subscribers.remove(queue)
+
+
+FOLLOW_SAVED_POLL_S = 1.0
+
+
+async def _stream_saved_run(websocket: WebSocket, run_id: str) -> None:
+    """The live-output socket for a run this backend does not hold -- one
+    started before the backend was last restarted (every job in the history
+    after a restart), or one RELION itself ran. There is no in-memory stream
+    to join, but every job's output is also in run.out / run.err in its job
+    directory, so replay the tail of those and, if the job is still going,
+    keep following them. (This used to answer a bare "Unknown run_id", which
+    the popup then printed into the Errors tab and live output of every
+    reopened job.)"""
+    record = run_manager._resolve_run_record(run_id)
+    if record is None:
+        await websocket.send_json({"type": "error", "line": "Unknown run_id"})
+        await websocket.close()
+        return
+
+    async def watch_for_disconnect() -> None:
+        try:
+            while True:
+                await websocket.receive_text()
+        except Exception:  # noqa: BLE001 - any disconnect/protocol error ends it
+            pass
+
+    reader = asyncio.create_task(watch_for_disconnect())
+    try:
+        out_follow, err_follow = _log_followers(record)
+        for follower, kind, name in ((out_follow, "stdout", "run.out"), (err_follow, "stderr", "run.err")):
+            lines, truncated = follower.initial()
+            if truncated:
+                await websocket.send_json({"type": kind, "line": (
+                    f"[RELION-US] Earlier output left out -- showing the last {len(lines)} lines of {name}; "
+                    f"the whole file is in the job's directory.")})
+            for line in lines:
+                await websocket.send_json({"type": kind, "line": line})
+
+        status = record.get("status")
+        await websocket.send_json({"type": "status", "status": status, "exit_code": record.get("exit_code")})
+        if status not in (STATUS_RUNNING, STATUS_QUEUED, STATUS_PENDING):
+            return
+
+        pid = record.get("pid")
+        if pid and not JobRunManager._pid_matches_persisted_run(pid, record):
+            await websocket.send_json({"type": "stdout", "line": (
+                "[RELION-US] This job's process is no longer running. RELION-US was not running when it "
+                "ended (restarting RELION-US can stop a running job), so its final status was never recorded. "
+                "Abort it to clear the stale \"running\" state.")})
+            return
+        await websocket.send_json({"type": "stdout", "line": (
+            "[RELION-US] This job was started before RELION-US was last restarted, so it is not tracked "
+            "live. Its saved output (run.out / run.err) is shown and followed here while the job runs.")})
+
+        while not reader.done():
+            await asyncio.wait({reader}, timeout=FOLLOW_SAVED_POLL_S)
+            if reader.done():
+                break
+            for follower, kind in ((out_follow, "stdout"), (err_follow, "stderr")):
+                for line in follower.new_lines():
+                    await websocket.send_json({"type": kind, "line": line})
+            latest = run_manager._resolve_run_record(run_id) or record
+            if latest.get("status") != status:
+                status = latest.get("status")
+                await websocket.send_json({"type": "status", "status": status, "exit_code": latest.get("exit_code")})
+            if status not in (STATUS_RUNNING, STATUS_QUEUED, STATUS_PENDING):
+                break
+            if pid and not JobRunManager._pid_matches_persisted_run(pid, latest):
+                await websocket.send_json({"type": "stdout", "line": (
+                    "[RELION-US] This job's process has ended. Its final status was not recorded (RELION-US "
+                    "was restarted while it ran, which can stop a running job); Abort clears the stale "
+                    "\"running\" state.")})
+                break
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        reader.cancel()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
 
 
 @app.websocket("/ws/terminal")

@@ -340,3 +340,53 @@ def test_a_fresh_run_does_not_touch_markers_of_other_jobs(manager, tmp_path):
         return marker.exists()
 
     assert asyncio.run(go()) is True
+
+
+# --------------------------------------------------------------------------
+# LogFollower: tailing a job's saved run.out / run.err
+# --------------------------------------------------------------------------
+
+from job_runner import LogFollower  # noqa: E402
+
+
+def test_log_follower_missing_file_is_empty(tmp_path):
+    f = LogFollower(tmp_path / "nope.out")
+    assert f.initial() == ([], False) and f.new_lines() == []
+
+
+def test_log_follower_returns_the_whole_small_file_then_only_new_lines(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_text("a\nb\n")
+    f = LogFollower(p)
+    assert f.initial() == (["a", "b"], False)
+    assert f.new_lines() == []
+    with open(p, "a") as fh:
+        fh.write("c\nd")
+    assert f.new_lines() == ["c"]            # "d" is unfinished: held back
+    with open(p, "a") as fh:
+        fh.write("\n")
+    assert f.new_lines() == ["d"]
+
+
+def test_log_follower_splits_progress_bar_carriage_returns(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_bytes(b"1/200\r2/200\r3/200\rdone\n")
+    assert LogFollower(p).initial()[0] == ["1/200", "2/200", "3/200", "done"]
+
+
+def test_log_follower_keeps_only_the_tail_of_a_big_file(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_text("".join(f"line {i}\n" for i in range(5000)))
+    lines, truncated = LogFollower(p, max_lines=100).initial()
+    assert truncated and len(lines) == 100 and lines[-1] == "line 4999"
+    lines, truncated = LogFollower(p, max_lines=10_000, max_bytes=2000).initial()
+    assert truncated and lines[-1] == "line 4999" and lines[0].startswith("line ")   # no cut-off fragment
+
+
+def test_log_follower_restarts_when_the_file_is_replaced(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_text("old old old old\n")
+    f = LogFollower(p)
+    f.initial()
+    p.write_text("new\n")                    # shorter than before: an Overwrite started over
+    assert f.new_lines() == ["new"]

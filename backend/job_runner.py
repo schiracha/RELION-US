@@ -127,6 +127,69 @@ _JOB_DIR_TOKEN_RE = re.compile(
 _LINE_SEP_RE = re.compile(rb"\r\n|\r|\n")
 
 
+class LogFollower:
+    """Reads a job's saved output file (run.out / run.err in its job
+    directory, which RELION-US tees every line into -- and RELION's own GUI
+    writes the same files) for a run this backend no longer holds in memory,
+    e.g. one started before a restart. initial() gives the tail already there;
+    new_lines() gives what has been appended since, to follow a job whose
+    process is still going. Lines split the way the live stream splits them
+    (_LINE_SEP_RE: \\r counts, so progress-bar output survives)."""
+
+    def __init__(self, path, max_lines: int = 1000, max_bytes: int = 1_000_000):
+        self.path = Path(path)
+        self.max_lines = max_lines
+        self.max_bytes = max_bytes
+        self.pos = 0
+        self._partial = b""
+
+    def _split(self, data: bytes) -> list[str]:
+        return [chunk.decode("utf-8", errors="replace") for chunk in _LINE_SEP_RE.split(data)]
+
+    def initial(self) -> tuple[list[str], bool]:
+        """(last lines, truncated). truncated is True when earlier output was
+        left out (file larger than the byte cap or more than max_lines)."""
+        try:
+            size = self.path.stat().st_size
+            with open(self.path, "rb") as f:
+                start = max(0, size - self.max_bytes)
+                f.seek(start)
+                data = f.read(size - start)
+        except OSError:
+            return [], False
+        truncated = start > 0
+        if truncated:
+            m = _LINE_SEP_RE.search(data)          # drop the cut-off first line
+            data = data[m.end():] if m else b""
+        self.pos = size
+        lines = self._split(data)
+        if lines and lines[-1] == "":
+            lines.pop()                             # trailing separator, not a line
+        if len(lines) > self.max_lines:
+            lines, truncated = lines[-self.max_lines:], True
+        return lines, truncated
+
+    def new_lines(self) -> list[str]:
+        """Complete lines appended since the last call; an unfinished last
+        line is held back until its terminator arrives."""
+        try:
+            size = self.path.stat().st_size
+            if size < self.pos:                     # file replaced/truncated (an Overwrite)
+                self.pos, self._partial = 0, b""
+            if size == self.pos:
+                return []
+            with open(self.path, "rb") as f:
+                f.seek(self.pos)
+                data = f.read(size - self.pos)
+            self.pos = size
+        except OSError:
+            return []
+        buf = self._partial + data
+        parts = _LINE_SEP_RE.split(buf)
+        self._partial = parts.pop()                 # text after the last separator
+        return [p.decode("utf-8", errors="replace") for p in parts]
+
+
 def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) -> list[str]:
     """Best-effort, NOT ground truth: scans `text` (a run's command string,
     or its field_values joined together for custom jobs) for path-like
