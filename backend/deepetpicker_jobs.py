@@ -34,6 +34,8 @@ when false, because DeepETPicker's argparse flags are `store_true`.
 from __future__ import annotations
 
 import shlex
+import sys
+from pathlib import Path
 
 _ENV_OPTION = {
     "key": "conda_env", "field_type": "text", "label": "Conda environment name:", "default": "deepetpicker",
@@ -57,8 +59,10 @@ _TOMO_INPUTS = [
      "help": "Folder of .mrc tomograms, named <tomogram name>.mrc."},
     {"key": "tomo_column", "field_type": "text", "label": "STAR column with tomogram file names:",
      "default": "rlnTomoReconstructedTomogram",
-     "help": "Only used with a tomograms STAR file. This default has not been checked against every RELION-5 "
-             "release; if it is wrong the job stops and lists the columns the file does have."},
+     "help": "Only used with a tomograms STAR file. A Denoise job's tomograms.star keeps the plain column for the "
+             "un-denoised volumes: use rlnTomoReconstructedTomogramDenoised there to train on the denoised ones. "
+             "This default has not been checked against every RELION-5 release; if it is wrong the job stops and "
+             "lists the columns the file does have."},
 ]
 
 DEEPETPICKER_JOB_DEFINITIONS = {
@@ -76,7 +80,9 @@ DEEPETPICKER_JOB_DEFINITIONS = {
             {"key": "coords_star", "field_type": "inputnode", "label": "Training particles STAR file:",
              "default": "", "pattern": "*.star",
              "help": "particles.star with rlnTomoName and rlnCoordinateX/Y/Z in pixels (rlnClassNumber is "
-                     "the class, default 1). Give this OR a coordinates folder below."},
+                     "the class, default 1). A particles.star in centred Angstrom (rlnCenteredCoordinate*Angst, "
+                     "what RELION's pick jobs and this app's picker write) is converted to voxels first, by a "
+                     "step you can see at the start of the command. Give this OR a coordinates folder below."},
             {"key": "coords_dir", "field_type": "directory", "label": "OR coordinates folder:", "default": "",
              "help": "Folder of <tomogram name>.coords files, columns `class x y z` in voxels (a bare `x y z` "
                      "file is class 1)."},
@@ -225,16 +231,63 @@ def _is_default(option: dict, value) -> bool:
     return _blank(value) or str(value) == str(option.get("default"))
 
 
-def build_deepetpicker_command(internal_name: str, field_values: dict, output_subdir: str) -> str:
+CONVERTER_SCRIPT = Path(__file__).resolve().parent / "converters" / "centered_to_voxels.py"
+CONVERTED_COORDS_NAME = "coords_voxels.star"
+
+
+def _needs_voxel_conversion(internal_name: str, field_values: dict, project_dir) -> bool:
+    """True when this Prepare job's particles STAR is in centred Angstrom
+    (what RELION's pick jobs and RELION-US's picker write). `deepetpicker
+    prepare` only takes voxel coordinates and refuses these ("Only pixel
+    coordinates ... are supported"), so the draft converts them first. Checked
+    against the file itself; anything unreadable means "no" and the command is
+    left exactly as the user's fields describe it."""
+    if internal_name != "DeepETPickerPrepare":
+        return False
+    star = str((field_values or {}).get("coords_star") or "").strip()
+    if not star:
+        return False
+    from converters import centered_to_voxels
+
+    path = Path(star)
+    if not path.is_absolute() and project_dir is not None:
+        path = Path(project_dir) / path
+    return centered_to_voxels.is_centered_angstrom_star(path)
+
+
+def _conversion_prefix(field_values: dict, subdir: str) -> list:
+    """The visible first half of the command: convert the picks onto the very
+    tomograms Prepare will read (same STAR + column, or same folder), writing
+    <JobDir>/coords_voxels.star, which the real command then takes."""
+    parts = [shlex.quote(sys.executable), shlex.quote(str(CONVERTER_SCRIPT)),
+             "--star", shlex.quote(str(field_values["coords_star"]).strip())]
+    if not _blank(field_values.get("tomo_star")):
+        parts += ["--tomo_star", shlex.quote(str(field_values["tomo_star"]).strip())]
+        column = str(field_values.get("tomo_column") or "").strip()
+        if column:
+            parts += ["--tomo_column", shlex.quote(column)]
+    elif not _blank(field_values.get("tomo_dir")):
+        parts += ["--tomo_dir", shlex.quote(str(field_values["tomo_dir"]).strip())]
+    parts += ["--out", shlex.quote(subdir + CONVERTED_COORDS_NAME)]
+    return parts
+
+
+def build_deepetpicker_command(internal_name: str, field_values: dict, output_subdir: str,
+                               project_dir=None) -> str:
     """The full, editable shell command for one DeepETPicker job:
     `conda run -n <env> deepetpicker <subcommand> --output_dir <JobDir>/jobNNN/ ...`.
 
     Options equal to their declared default (or blank) are left off, as for
     IsoNet2; DeepETPicker records every effective parameter in the job's
     job_params.json regardless.
+
+    project_dir (optional) lets a Prepare job look inside its particles STAR:
+    one in centred Angstrom gets a conversion step in front, joined with `&&`
+    like RELION's own multi-command jobs (see _needs_voxel_conversion).
     """
     definition = DEEPETPICKER_JOB_DEFINITIONS[internal_name]
     field_values = field_values or {}
+    convert = _needs_voxel_conversion(internal_name, field_values, project_dir)
     env = str(field_values.get("conda_env") or "deepetpicker").strip() or "deepetpicker"
     subdir = output_subdir if output_subdir.endswith("/") else output_subdir + "/"
     parts = ["conda", "run", "--no-capture-output", "-n", shlex.quote(env), "deepetpicker",
@@ -248,13 +301,19 @@ def build_deepetpicker_command(internal_name: str, field_values: dict, output_su
             if value is True or str(value).lower() == "true":
                 parts.append(f"--{key}")
             continue
+        if convert and key == "coords_star":
+            parts.extend(["--coords_star", shlex.quote(subdir + CONVERTED_COORDS_NAME)])
+            continue
         if _is_default(option, value):
             continue
         parts.extend([f"--{key}", shlex.quote(str(value).strip())])
-    return " ".join(parts)
+    command = " ".join(parts)
+    if convert:
+        command = " ".join(_conversion_prefix(field_values, subdir)) + " && " + command
+    return command
 
 
-def validate_deepetpicker_fields(internal_name: str, field_values: dict) -> list[str]:
+def validate_deepetpicker_fields(internal_name: str, field_values: dict, project_dir=None) -> list[str]:
     """Problems that would make the command fail at once, found before the
     job directory is created. The command line re-checks everything; this is
     only so the popup can say so immediately."""
@@ -266,6 +325,15 @@ def validate_deepetpicker_fields(internal_name: str, field_values: dict) -> list
             problems.append("Give exactly one of a tomograms STAR file or a tomograms folder.")
         if has("coords_star") == has("coords_dir"):
             problems.append("Give exactly one of a particles STAR file or a coordinates folder.")
+        if has("coords_star") and has("coords_scale") and _needs_voxel_conversion(internal_name, v, project_dir):
+            try:
+                scaled = abs(float(str(v["coords_scale"]).strip()) - 1.0) > 1e-9
+            except ValueError:
+                scaled = False      # a ratio like 10.5/6.3 -- the command line judges that one
+            if scaled or "/" in str(v["coords_scale"]):
+                problems.append(
+                    "Leave the coordinate scale factor at 1.0: picks in centred Angstrom are converted straight "
+                    "onto the voxel grid of the tomograms above, so scaling them again would misplace them.")
         if not ((has("label_diameter") and has("ocp_diameter")) or (has("pixel_size") and has("particle_diameter_A"))):
             problems.append("Give both diameters (in voxels), or the pixel size and particle diameter (in Å).")
         for k in ("label_diameter",):

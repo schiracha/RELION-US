@@ -188,9 +188,10 @@ from deepetpicker_jobs import (
 EXTERNAL_COMMAND_JOBS = {**ISONET_JOB_DEFINITIONS, **DEEPETPICKER_JOB_DEFINITIONS}
 
 
-def build_external_command(internal_name: str, field_values: dict, output_subdir: str) -> str:
+def build_external_command(internal_name: str, field_values: dict, output_subdir: str,
+                           project_dir=None) -> str:
     if internal_name in DEEPETPICKER_JOB_DEFINITIONS:
-        return build_deepetpicker_command(internal_name, field_values, output_subdir)
+        return build_deepetpicker_command(internal_name, field_values, output_subdir, project_dir)
     return build_isonet_command(internal_name, field_values, output_subdir)
 from job_runner import MANUALLY_SETTABLE_STATUSES, WAIT_MODES, JobRunManager
 
@@ -520,7 +521,7 @@ def recompute_draft(internal_name: str, req: DraftRequest):
                 raise HTTPException(status_code=409, detail=str(exc))
         else:
             output_subdir = req.output_subdir or run_manager.prospective_subdir(internal_name)
-        draft = build_external_command(internal_name, req.field_values, output_subdir)
+        draft = build_external_command(internal_name, req.field_values, output_subdir, run_manager.project_dir)
         return {"draft_command": draft, "unmapped_fields": [], "output_subdir": output_subdir}
     try:
         # raw_job() (not _load_raw()[internal_name] directly) resolves a
@@ -683,10 +684,12 @@ async def start_run(req: StartRunRequest):
         # the untouched defaults); a hand-edited command is the user's
         # responsibility, exactly as for every other job type.
         draft_subdir = req.subdir or run_manager.prospective_subdir(req.internal_name)
-        drafted = {build_external_command(req.internal_name, req.field_values or {}, draft_subdir),
+        drafted = {build_external_command(req.internal_name, req.field_values or {}, draft_subdir,
+                                          run_manager.project_dir),
                    build_external_command(req.internal_name, {}, draft_subdir)}
         if not req.command or req.command in drafted:
-            problems = validate_deepetpicker_fields(req.internal_name, req.field_values or {})
+            problems = validate_deepetpicker_fields(
+                req.internal_name, req.field_values or {}, run_manager.project_dir)
             if problems:
                 raise HTTPException(status_code=400, detail=" ".join(problems))
 
@@ -699,7 +702,8 @@ async def start_run(req: StartRunRequest):
         # only fall back to rebuilding it here if it's somehow missing.
         display_name = EXTERNAL_COMMAND_JOBS[req.internal_name]["display_name"]
         subdir = req.subdir or run_manager.prospective_subdir(req.internal_name)
-        command = req.command or build_external_command(req.internal_name, req.field_values or {}, subdir)
+        command = req.command or build_external_command(
+            req.internal_name, req.field_values or {}, subdir, run_manager.project_dir)
         try:
             run = await run_manager.start_subprocess_job(
                 req.internal_name, display_name, command,
