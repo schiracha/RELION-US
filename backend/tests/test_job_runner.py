@@ -920,3 +920,120 @@ def test_backfill_with_nothing_missing_is_a_noop(tmp_path):
     ])
     manager = JobRunManager(tmp_path)
     assert manager.backfill_missing_timestamps() == []
+
+
+# --------------------------------------------------------------------------
+# Inputs that are whole earlier JOB DIRECTORIES (DeepETPicker Train's
+# --prepare_job, Predict's --train_job, a --tomo_dir inside a job). They have no
+# file extension, so detection used to miss them and these jobs sat unconnected
+# in the timeline/network views.
+# --------------------------------------------------------------------------
+
+from job_runner import _detect_inputs  # noqa: E402
+
+
+def _job_dir(project, rel):
+    d = project / rel
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_a_job_directory_argument_is_detected_as_an_input(tmp_path):
+    prep = _job_dir(tmp_path, "DeepETPickerPrepare/job028")
+    own = _job_dir(tmp_path, "DeepETPickerTrain/job030")
+    cmd = ("conda run -n x deepetpicker train --output_dir DeepETPickerTrain/job030/ "
+           "--prepare_job DeepETPickerPrepare/job028 --val_tomo TS_01")
+    assert _detect_inputs(cmd, tmp_path, own) == ["DeepETPickerPrepare/job028"]
+
+
+def test_a_folder_inside_an_earlier_job_is_detected(tmp_path):
+    _job_dir(tmp_path, "DeepETPickerPrepare/job028/tomograms_std")
+    own = _job_dir(tmp_path, "DeepETPickerPredict/job031")
+    cmd = "deepetpicker predict --output_dir DeepETPickerPredict/job031/ --tomo_dir DeepETPickerPrepare/job028/tomograms_std/"
+    assert _detect_inputs(cmd, tmp_path, own) == ["DeepETPickerPrepare/job028/tomograms_std"]
+
+
+def test_own_directory_and_nonexistent_directories_are_not_inputs(tmp_path):
+    own = _job_dir(tmp_path, "DeepETPickerTrain/job030")
+    cmd = "x --output_dir DeepETPickerTrain/job030/ --prepare_job DeepETPickerPrepare/job099"
+    assert _detect_inputs(cmd, tmp_path, own) == []
+
+
+def test_files_and_job_directories_are_both_found_without_duplicates(tmp_path):
+    _job_dir(tmp_path, "Denoise/job027")
+    (tmp_path / "Denoise/job027/tomograms.star").write_text("x")
+    _job_dir(tmp_path, "DeepETPickerPrepare/job028")
+    own = _job_dir(tmp_path, "Next/job040")
+    cmd = "x --tomo_star Denoise/job027/tomograms.star --prepare_job DeepETPickerPrepare/job028 --o Next/job040/"
+    assert _detect_inputs(cmd, tmp_path, own) == ["Denoise/job027/tomograms.star", "DeepETPickerPrepare/job028"]
+
+
+def test_an_absolute_job_directory_inside_the_project_is_shown_project_relative(tmp_path):
+    prep = _job_dir(tmp_path, "DeepETPickerPrepare/job028")
+    own = _job_dir(tmp_path, "DeepETPickerTrain/job030")
+    assert _detect_inputs(f"x --prepare_job {prep}", tmp_path, own) == ["DeepETPickerPrepare/job028"]
+
+
+def _run_entry(project, name, job_number, command, cwd, **extra):
+    return {"run_id": f"r{job_number}", "internal_name": name, "display_name": name, "job_number": job_number,
+            "job_name": f"job{job_number:03d}", "command": command, "cwd": str(cwd), "status": "completed",
+            "project_dir": str(project), "detected_inputs": [], **extra}
+
+
+def test_prepare_train_predict_chain_is_linked_in_the_network_data(tmp_path):
+    """Your DeepETPicker chain: Train takes --prepare_job <Prepare job dir>,
+    Predict takes --train_job <Train job dir> and --tomo_dir inside the Prepare
+    job. Recorded with no inputs, they must still come out linked."""
+    project_manager.init_new_project(tmp_path)
+    prep = _job_dir(tmp_path, "DeepETPickerPrepare/job028")
+    train = _job_dir(tmp_path, "DeepETPickerTrain/job030")
+    pred = _job_dir(tmp_path, "DeepETPickerPredict/job031")
+    _job_dir(tmp_path, "DeepETPickerPrepare/job028/tomograms_std")
+    (tmp_path / "Denoise/job027").mkdir(parents=True)
+    (tmp_path / "Denoise/job027/tomograms.star").write_text("x")
+    _job_dir(tmp_path, "Denoise/job027")
+    project_manager.save_history(tmp_path, [
+        _run_entry(tmp_path, "Denoise", 27, "x --o Denoise/job027/", tmp_path / "Denoise/job027"),
+        _run_entry(tmp_path, "DeepETPickerPrepare", 28,
+                   "x --output_dir DeepETPickerPrepare/job028/ --tomo_star Denoise/job027/tomograms.star", prep),
+        _run_entry(tmp_path, "DeepETPickerTrain", 30,
+                   "x train --output_dir DeepETPickerTrain/job030/ --prepare_job DeepETPickerPrepare/job028", train),
+        _run_entry(tmp_path, "DeepETPickerPredict", 31,
+                   "x predict --output_dir DeepETPickerPredict/job031/ --train_job DeepETPickerTrain/job030 "
+                   "--tomo_dir DeepETPickerPrepare/job028/tomograms_std", pred),
+    ])
+    runs = {r["job_number"]: r for r in JobRunManager(tmp_path).list_runs()}
+    producers = lambda n: {link["run_id"] for link in runs[n].get("input_links", [])}  # noqa: E731
+    assert producers(28) == {"r27"}
+    assert producers(30) == {"r28"}
+    assert producers(31) == {"r30", "r28"}
+    assert runs[30]["detected_inputs"] == ["DeepETPickerPrepare/job028"]
+
+
+def test_input_lineage_does_not_rewrite_the_persisted_history(tmp_path):
+    project_manager.init_new_project(tmp_path)
+    prep = _job_dir(tmp_path, "P/job001")
+    train = _job_dir(tmp_path, "T/job002")
+    project_manager.save_history(tmp_path, [
+        _run_entry(tmp_path, "P", 1, "x --output_dir P/job001/", prep),
+        _run_entry(tmp_path, "T", 2, "x --output_dir T/job002/ --prepare_job P/job001", train),
+    ])
+    JobRunManager(tmp_path).list_runs()
+    assert all(h["detected_inputs"] == [] for h in project_manager.load_history(tmp_path))
+
+
+def test_a_new_run_records_a_job_directory_input_at_start(tmp_path):
+    project_manager.init_new_project(tmp_path)
+    _job_dir(tmp_path, "DeepETPickerPrepare/job001")
+    manager = JobRunManager(tmp_path)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", "echo --prepare_job DeepETPickerPrepare/job001", subdir="Import/job002")
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if run.status in (STATUS_COMPLETED, STATUS_FAILED):
+                break
+        return run
+
+    assert asyncio.run(go()).detected_inputs == ["DeepETPickerPrepare/job001"]

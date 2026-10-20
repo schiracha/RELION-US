@@ -106,6 +106,17 @@ _PATH_TOKEN_RE = re.compile(
     r"[\w][\w\-./]*\.(?:star|mrc|mrcs|tomostar|mdoc|xf|tlt|mod)\b"
 )
 
+# A job DIRECTORY named in a command, in RELION's own <Category>/jobNNN
+# layout (optionally with a sub-path inside it, e.g. a job's tomograms/
+# folder). Some jobs take a whole earlier job as input rather than a file --
+# DeepETPicker Train's --prepare_job, Predict's --train_job, a --tomo_dir
+# inside a job -- and a directory has no extension for _PATH_TOKEN_RE to hang
+# on, so without this those jobs showed no inputs at all and sat unconnected
+# in the Command Center's timeline/network views.
+_JOB_DIR_TOKEN_RE = re.compile(
+    r"(?<![\w/.\-])/?(?:[\w.\-]+/)*[A-Za-z][\w\-]*/job\d+(?:/[\w\-.]+)*"
+)
+
 # \r\n listed before the bare \r/\n alternatives so a genuine CRLF pair
 # (matched leftmost-first by re) consumes both bytes as ONE separator --
 # splitting on \r and \n independently instead treats every \r\n pair as
@@ -141,28 +152,37 @@ def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) 
     """
     own_cwd_resolved = own_cwd.resolve()
     seen: list[str] = []
-    for match in _PATH_TOKEN_RE.finditer(text):
-        token = match.group(0)
+
+    def consider(token: str, want_dir: bool) -> None:
         candidate = Path(token)
         if not candidate.is_absolute():
             candidate = project_dir / candidate
         try:
             resolved = candidate.resolve()
         except OSError:
-            continue
-        if not resolved.is_file():
-            continue
+            return
+        if not (resolved.is_dir() if want_dir else resolved.is_file()):
+            return
         if resolved == own_cwd_resolved or own_cwd_resolved in resolved.parents:
-            continue  # inside this job's own output dir -> an output, not an input
+            return  # inside this job's own output dir -> an output, not an input
         try:
             display = str(resolved.relative_to(project_dir.resolve()))
         except ValueError:
             display = str(resolved)
         if display not in seen:
             seen.append(display)
+
+    for match in _PATH_TOKEN_RE.finditer(text):
+        consider(match.group(0), want_dir=False)
+        if len(seen) >= limit:
+            return seen
+    # Job directories after files, so a command's explicit file inputs keep
+    # their place when the limit bites.
+    for match in _JOB_DIR_TOKEN_RE.finditer(text):
+        consider(match.group(0), want_dir=True)
         if len(seen) >= limit:
             break
-    return seen
+    return seen[:limit]
 
 
 def _extract_output_subdir(command: str) -> Optional[str]:
@@ -723,17 +743,30 @@ class JobRunManager:
                 continue
             by_dir[rel] = r
         for r in runs:
+            # Runs recorded before directory inputs were detected (DeepETPicker
+            # Train/Predict name whole earlier jobs) have an empty list although
+            # their command plainly names one -- work it out from the command
+            # now. Display only, never written back.
+            if not r.get("detected_inputs") and r.get("source") != "relion" and r.get("command") and r.get("cwd"):
+                text = r["command"] + " " + " ".join(str(v) for v in (r.get("field_values") or {}).values())
+                try:
+                    r["detected_inputs"] = _detect_inputs(text, project_dir, Path(r["cwd"]))
+                except OSError:
+                    pass
             links = []
             for inp in r.get("detected_inputs", []) or []:
-                # walk up the input path's parents to find a producing job dir
+                # Find the producing job dir: the input itself when it IS a job
+                # directory, else walk up its parents.
                 producer = None
                 parent = Path(inp)
-                while parent != parent.parent:
-                    parent = parent.parent
+                while True:
                     key = str(parent)
                     if key in by_dir and by_dir[key].get("run_id") != r.get("run_id"):
                         producer = by_dir[key]
                         break
+                    if parent == parent.parent:
+                        break
+                    parent = parent.parent
                 if producer is not None:
                     links.append({
                         "path": inp,
