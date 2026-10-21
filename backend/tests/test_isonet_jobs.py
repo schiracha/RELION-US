@@ -9,6 +9,7 @@ stripping the leading `--` before isonet.py ever sees them. See
 build_isonet_command's own docstring. These tests assert on that exact
 space-separated shape, not the `=` form isonet.py's own `--help` documents.
 """
+import json
 import os
 import sys
 import time
@@ -370,3 +371,27 @@ def test_detected_install_runs_isonet_under_conda_with_a_bare_server_env(tmp_pat
     path, pythonpath = out.split("|")
     assert path.startswith(f"{root}/IsoNet/bin:") and "/usr/bin" in path
     assert pythonpath == str(root)
+
+
+def test_install_found_from_the_isoapp_gui_config(tmp_path, monkeypatch):
+    """The reported case: the server's environment has nothing, but IsoNet's
+    GUI saved its install path in ~/.config/isoapp/environment.json."""
+    root = _fake_isonet_install(tmp_path)
+    cfg = tmp_path / "cfg" / "isoapp"
+    cfg.mkdir(parents=True)
+    (cfg / "environment.json").write_text(json.dumps({"condaEnv": "x", "IsoNetPath": str(root)}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    from isonet_jobs import find_isonet_dir
+    assert find_isonet_dir() == str(root)
+    cmd = build_isonet_command("IsonetPrepareStar", {}, "IsonetPrepareStar/job001")
+    assert f"PYTHONPATH={root}" in cmd
+
+
+def test_a_stale_or_garbled_isoapp_config_is_ignored(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg" / "isoapp"
+    cfg.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    from isonet_jobs import find_isonet_dir
+    for text in ("not json", json.dumps({"IsoNetPath": "/nonexistent"}), json.dumps({"IsoNetPath": ""}), "[]"):
+        (cfg / "environment.json").write_text(text)
+        assert find_isonet_dir() is None

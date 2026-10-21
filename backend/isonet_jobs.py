@@ -51,6 +51,7 @@ output path -- identical to how DynaMight/ModelAngelo already do this.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from pathlib import Path
@@ -58,8 +59,9 @@ from pathlib import Path
 
 def find_isonet_dir() -> str | None:
     """The IsoNet2 install directory (the one holding IsoNet/bin/isonet.py),
-    found the way IsoNet's own isonet2.bashrc leaves it: $ISONET_DIR, a PATH
-    entry with isonet.py in it, or a PYTHONPATH entry with IsoNet/bin in it.
+    found the way IsoNet leaves it: $ISONET_DIR, the "IsoNetPath" its GUI
+    saves in ~/.config/isoapp/environment.json, a PATH entry with isonet.py
+    in it (isonet2.bashrc), or a PYTHONPATH entry with IsoNet/bin in it.
     None when nothing points at an install."""
     def ok(d: Path) -> bool:
         return (d / "IsoNet" / "bin" / "isonet.py").is_file()
@@ -67,6 +69,14 @@ def find_isonet_dir() -> str | None:
     env = os.environ.get("ISONET_DIR", "").strip()
     if env and ok(Path(env).expanduser()):
         return str(Path(env).expanduser())
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    try:
+        saved = json.loads((Path(config_home) / "isoapp" / "environment.json").read_text())
+        gui_dir = Path(str(saved.get("IsoNetPath") or "")).expanduser()
+        if str(gui_dir) != "." and ok(gui_dir):
+            return str(gui_dir)
+    except (OSError, ValueError, AttributeError):
+        pass
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         if entry and (Path(entry) / "isonet.py").is_file():
             root = Path(entry).resolve().parent.parent
