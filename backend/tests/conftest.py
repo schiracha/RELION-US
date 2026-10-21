@@ -69,3 +69,17 @@ def _no_real_relion_pipeliner_on_path(monkeypatch):
     real_dir = os.path.dirname(real)
     parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p != real_dir]
     monkeypatch.setenv("PATH", os.pathsep.join(parts))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_isonet_install_on_path(monkeypatch):
+    """Hide any real IsoNet2 install from the isonet_jobs command builder, so
+    the exact commands the tests assert on don't change with whether this
+    developer sourced isonet2.bashrc. Tests of the detection itself set
+    ISONET_DIR (or PATH/PYTHONPATH) to a fake install of their own."""
+    monkeypatch.delenv("ISONET_DIR", raising=False)
+    for var in ("PATH", "PYTHONPATH"):
+        parts = [p for p in os.environ.get(var, "").split(os.pathsep)
+                 if p and not os.path.isfile(os.path.join(p, "isonet.py"))
+                 and not os.path.isfile(os.path.join(p, "IsoNet", "bin", "isonet.py"))]
+        monkeypatch.setenv(var, os.pathsep.join(parts))

@@ -51,7 +51,43 @@ output path -- identical to how DynaMight/ModelAngelo already do this.
 """
 from __future__ import annotations
 
+import os
 import shlex
+from pathlib import Path
+
+
+def find_isonet_dir() -> str | None:
+    """The IsoNet2 install directory (the one holding IsoNet/bin/isonet.py),
+    found the way IsoNet's own isonet2.bashrc leaves it: $ISONET_DIR, a PATH
+    entry with isonet.py in it, or a PYTHONPATH entry with IsoNet/bin in it.
+    None when nothing points at an install."""
+    def ok(d: Path) -> bool:
+        return (d / "IsoNet" / "bin" / "isonet.py").is_file()
+
+    env = os.environ.get("ISONET_DIR", "").strip()
+    if env and ok(Path(env).expanduser()):
+        return str(Path(env).expanduser())
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry and (Path(entry) / "isonet.py").is_file():
+            root = Path(entry).resolve().parent.parent
+            if ok(root):
+                return str(root)
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry and ok(Path(entry)):
+            return entry
+    return None
+
+
+def _isonet_env_assignments() -> list[str]:
+    """`PATH=... PYTHONPATH=...` for the one conda command, replaying what
+    isonet2.bashrc does. isonet.py needs both -- PATH to be found, PYTHONPATH
+    so its own `import IsoNet` works inside the conda env -- and a RELION-US
+    server started without that bashrc sourced has neither."""
+    root = find_isonet_dir()
+    if not root:
+        return []
+    return [f'PATH={shlex.quote(str(Path(root) / "IsoNet" / "bin"))}:"$PATH"',
+            f'PYTHONPATH={shlex.quote(root)}${{PYTHONPATH:+:$PYTHONPATH}}']
 
 
 def _isonet_flag(key: str, value) -> list[str]:
@@ -144,7 +180,7 @@ def build_isonet_command(internal_name: str, field_values: dict, output_subdir: 
     if source_star:
         prefix = ["cp", shlex.quote(source_star), shlex.quote(job_star), "&&"]
 
-    parts = prefix + [
+    parts = prefix + _isonet_env_assignments() + [
         "conda", "run", "--no-capture-output", "-n", shlex.quote(env),
         "isonet.py", definition["subcommand"],
     ]

@@ -9,6 +9,7 @@ stripping the leading `--` before isonet.py ever sees them. See
 build_isonet_command's own docstring. These tests assert on that exact
 space-separated shape, not the `=` form isonet.py's own `--help` documents.
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -307,3 +308,65 @@ def test_start_run_over_http_builds_the_real_command_when_none_is_given(client):
     run = resp.json()
     assert run["command"].split()[6] == "prepare_star"
     _wait_for_status(client, run["run_id"], {"completed", "failed"})
+
+
+# ---------------------------------------------------------------------------
+# IsoNet install detection: isonet.py needs PATH *and* PYTHONPATH (what
+# isonet2.bashrc sets); a server started without it has neither.
+# ---------------------------------------------------------------------------
+
+def _fake_isonet_install(tmp_path):
+    root = tmp_path / "IsoNet2"
+    (root / "IsoNet" / "bin").mkdir(parents=True)
+    (root / "IsoNet" / "bin" / "isonet.py").write_text("#!/usr/bin/env python3\n")
+    return root
+
+
+def test_no_isonet_install_leaves_the_command_unprefixed():
+    cmd = build_isonet_command("IsonetPrepareStar", {}, "IsonetPrepareStar/job001")
+    assert cmd.startswith("conda run ")
+
+
+def test_isonet_dir_env_var_adds_path_and_pythonpath(tmp_path, monkeypatch):
+    root = _fake_isonet_install(tmp_path)
+    monkeypatch.setenv("ISONET_DIR", str(root))
+    cmd = build_isonet_command("IsonetPrepareStar", {}, "IsonetPrepareStar/job001")
+    assert cmd.startswith(f'PATH={root}/IsoNet/bin:"$PATH" PYTHONPATH={root}${{PYTHONPATH:+:$PYTHONPATH}} conda run ')
+
+
+def test_install_found_from_a_path_entry_like_the_users_bashrc(tmp_path, monkeypatch):
+    """The reported case: only IsoNet/bin was exported, no PYTHONPATH --
+    PYTHONPATH is derived from it so `import IsoNet` works."""
+    root = _fake_isonet_install(tmp_path)
+    monkeypatch.setenv("PATH", f"{root}/IsoNet/bin/{os.pathsep}{os.environ['PATH']}")
+    from isonet_jobs import find_isonet_dir
+    assert find_isonet_dir() == str(root)
+
+
+def test_install_found_from_pythonpath(tmp_path, monkeypatch):
+    root = _fake_isonet_install(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    from isonet_jobs import find_isonet_dir
+    assert find_isonet_dir() == str(root)
+
+
+def test_prefix_goes_after_the_input_copy_and_applies_to_conda_only(tmp_path, monkeypatch):
+    root = _fake_isonet_install(tmp_path)
+    monkeypatch.setenv("ISONET_DIR", str(root))
+    cmd = build_isonet_command("IsonetDeconv", {"star_file": "A/job001/tomograms.star"}, "IsonetDeconv/job002")
+    assert cmd.startswith("cp A/job001/tomograms.star IsonetDeconv/job002/tomograms.star && PATH=")
+
+
+def test_detected_install_runs_isonet_under_conda_with_a_bare_server_env(tmp_path, monkeypatch):
+    """The command works when the SERVER env has neither variable set: the
+    `VAR=... cmd` form must actually reach the child (sh semantics)."""
+    import subprocess
+    root = _fake_isonet_install(tmp_path)
+    monkeypatch.setenv("ISONET_DIR", str(root))
+    from isonet_jobs import _isonet_env_assignments
+    probe = " ".join(_isonet_env_assignments()) + ' sh -c \'echo "$PATH|$PYTHONPATH"\''
+    out = subprocess.run(["/bin/sh", "-c", probe], capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin"}).stdout.strip()
+    path, pythonpath = out.split("|")
+    assert path.startswith(f"{root}/IsoNet/bin:") and "/usr/bin" in path
+    assert pythonpath == str(root)
