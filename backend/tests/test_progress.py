@@ -261,13 +261,14 @@ def test_read_iteration_half_set_naming_is_resolved(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _write_data_star(job_dir: Path, it: int, angles: list[tuple[float, float]]):
+def _write_data_star(job_dir: Path, it: int, angles: list[tuple[float, float]], psi: float = 17.0):
     """angles: [(rot, tilt), ...] in degrees, RELION's own ranges
-    (rot -180..180, tilt 0..180)."""
+    (rot -180..180, tilt 0..180). psi defaults to a real (non-zero) value:
+    rot = tilt = psi = 0 is RELION's "not assigned yet" placeholder."""
     particles = pd.DataFrame({
         "rlnAngleRot": [a[0] for a in angles],
         "rlnAngleTilt": [a[1] for a in angles],
-        "rlnAnglePsi": [0.0] * len(angles),
+        "rlnAnglePsi": [psi] * len(angles),
     })
     starfile.write({"particles": particles}, job_dir / f"run_it{it:03d}_data.star", overwrite=True)
 
@@ -315,3 +316,42 @@ def test_orientation_distribution_missing_angle_columns_is_not_available(tmp_pat
     out = progress.read_orientation_distribution(tmp_path)
     assert out["available"] is False
     assert out["iteration"] == 1
+
+
+def test_orientation_distribution_leaves_out_unassigned_particles(tmp_path):
+    """Particles with the rot = tilt = psi = 0 placeholder (iteration 0, or a
+    VDAM subset iteration that hasn't visited them) would otherwise pile into
+    the (0, 0) cell and swamp the plot."""
+    _write_data_star(tmp_path, 2, [(10.0, 20.0), (-90.0, 90.0)])
+    star = starfile.read(tmp_path / "run_it002_data.star", always_dict=True)["particles"]
+    pad = pd.DataFrame({"rlnAngleRot": [0.0] * 50, "rlnAngleTilt": [0.0] * 50, "rlnAnglePsi": [0.0] * 50})
+    starfile.write({"particles": pd.concat([star, pad], ignore_index=True)},
+                   tmp_path / "run_it002_data.star", overwrite=True)
+    out = progress.read_orientation_distribution(tmp_path)
+    assert out["available"] is True
+    assert out["n_particles"] == 2
+    assert out["n_unassigned"] == 50
+    assert sum(sum(row) for row in out["counts"]) == 2
+    assert out["counts"][0][18] == 0
+
+
+def test_orientation_distribution_psi_nonzero_keeps_a_zero_rot_tilt_view(tmp_path):
+    """A real view straight down the axis (rot = tilt = 0) with a real psi is
+    an assigned particle, not a placeholder."""
+    _write_data_star(tmp_path, 1, [(0.0, 0.0)], psi=45.0)
+    out = progress.read_orientation_distribution(tmp_path)
+    assert out["n_particles"] == 1 and out["n_unassigned"] == 0
+
+
+def test_orientation_distribution_all_unassigned_is_not_available(tmp_path):
+    _write_data_star(tmp_path, 0, [(0.0, 0.0)] * 5, psi=0.0)
+    out = progress.read_orientation_distribution(tmp_path)
+    assert out["available"] is False
+    assert out["iteration"] == 0 and out["n_unassigned"] == 5
+
+
+def test_orientation_distribution_without_a_psi_column_uses_rot_and_tilt(tmp_path):
+    particles = pd.DataFrame({"rlnAngleRot": [0.0, 30.0], "rlnAngleTilt": [0.0, 60.0]})
+    starfile.write({"particles": particles}, tmp_path / "run_it001_data.star", overwrite=True)
+    out = progress.read_orientation_distribution(tmp_path)
+    assert out["n_particles"] == 1 and out["n_unassigned"] == 1

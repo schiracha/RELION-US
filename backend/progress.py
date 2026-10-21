@@ -465,10 +465,12 @@ def read_orientation_distribution(
     n_particles, n_rot_bins, n_tilt_bins, counts} where counts is a
     n_tilt_bins x n_rot_bins grid of particle counts (row-major, tilt then
     rot) -- fixed-size regardless of how many particles the run has.
-    `available` is False (not an error) when there's no data.star yet, or
-    the iteration found has no orientation columns (e.g. Class2D, which
-    this function should not even be called for -- see
-    supports_orientation_distribution)."""
+    Particles not yet assigned an orientation (rot = tilt = psi = 0) are left
+    out of the grid and counted in `n_unassigned`. `available` is False (not
+    an error) when there's no data.star yet, the iteration found has no
+    orientation columns (e.g. Class2D, which this function should not even
+    be called for -- see supports_orientation_distribution), or no particle
+    in it has been assigned yet (then `n_unassigned` says how many)."""
     files = _data_files(job_dir)
     if not files:
         return {"available": False, "iteration": None}
@@ -489,6 +491,19 @@ def read_orientation_distribution(
     rot = particles["rlnAngleRot"].to_numpy(dtype=float)
     tilt = particles["rlnAngleTilt"].to_numpy(dtype=float)
     valid = np.isfinite(rot) & np.isfinite(tilt)
+    # Particles RELION hasn't assigned an orientation yet (iteration 0, or the
+    # ones a subset-based run -- VDAM -- hasn't visited) still carry the
+    # placeholder rot = tilt = psi = 0. Exactly zero in all three can't be a
+    # real estimate, and left in they pile up in the (0, 0) cell and swamp
+    # the rest of the plot. Psi is only checked when the file has it.
+    unassigned = valid & (rot == 0.0) & (tilt == 0.0)
+    if "rlnAnglePsi" in particles.columns:
+        psi = particles["rlnAnglePsi"].to_numpy(dtype=float)
+        unassigned &= np.nan_to_num(psi, nan=1.0) == 0.0
+    n_unassigned = int(unassigned.sum())
+    valid &= ~unassigned
+    if not valid.any():
+        return {"available": False, "iteration": iteration, "n_unassigned": n_unassigned}
     rot, tilt = rot[valid], tilt[valid]
 
     rot_idx = np.clip(((rot + 180.0) / 360.0 * n_rot_bins).astype(np.int64), 0, n_rot_bins - 1)
@@ -500,6 +515,7 @@ def read_orientation_distribution(
         "available": True,
         "iteration": iteration,
         "n_particles": int(valid.sum()),
+        "n_unassigned": n_unassigned,
         "n_rot_bins": n_rot_bins,
         "n_tilt_bins": n_tilt_bins,
         "counts": grid.tolist(),

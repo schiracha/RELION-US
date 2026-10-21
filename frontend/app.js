@@ -2112,12 +2112,10 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   function renderOrientationPlot(body, statusEl, data) {
     if (!data.available) {
       statusEl.textContent = "";
-      body.innerHTML = data.iteration != null
-        ? `<div class="progress-empty">Iteration ${data.iteration}'s data.star has no orientation columns yet.</div>`
-        : '<div class="progress-empty">No completed iteration to read yet.</div>';
+      body.innerHTML = orientationUnavailableHtml(data);
       return;
     }
-    statusEl.textContent = `iteration ${data.iteration} · ${data.n_particles.toLocaleString()} particles`;
+    statusEl.textContent = orientationStatusText(data);
     drawOrientationHeatmap(body, data);
   }
 
@@ -4209,12 +4207,10 @@ async function renderAnalyzeClassificationTab(content, { jobType, showDistributi
           const data = await api(`/api/runs/${encodeURIComponent(runId)}/orientation-distribution`);
           if (!data.available) {
             orientStatus.textContent = "";
-            orientBody.innerHTML = data.iteration != null
-              ? `<div class="progress-empty">Iteration ${data.iteration}'s data.star has no orientation columns yet.</div>`
-              : '<div class="progress-empty">No completed iteration to read yet.</div>';
+            orientBody.innerHTML = orientationUnavailableHtml(data);
             return;
           }
-          orientStatus.textContent = `iteration ${data.iteration} · ${data.n_particles.toLocaleString()} particles`;
+          orientStatus.textContent = orientationStatusText(data);
           drawOrientationHeatmap(orientBody, data);
         } catch (err) {
           orientStatus.textContent = "";
@@ -6678,6 +6674,24 @@ function drawHistogramChart(host, values, { unit = "", color = "s1" } = {}) {
 // of the poles looking stretched (the same tradeoff an equirectangular map
 // makes) -- an acceptable one for spotting a missing wedge of orientations,
 // which is what this plot is actually for.
+// Status line / empty state shared by the Progress tab and the 3D popup.
+// Particles RELION hasn't assigned an orientation yet (rot = tilt = psi = 0)
+// are left out of the plot server-side; say so rather than silently dropping.
+function orientationStatusText(data) {
+  const unassigned = data.n_unassigned
+    ? ` (${data.n_unassigned.toLocaleString()} not yet assigned, not shown)` : "";
+  return `iteration ${data.iteration} · ${data.n_particles.toLocaleString()} particles${unassigned}`;
+}
+
+function orientationUnavailableHtml(data) {
+  if (data.n_unassigned) {
+    return `<div class="progress-empty">Iteration ${data.iteration}: none of its ${data.n_unassigned.toLocaleString()} particles has been assigned an orientation yet.</div>`;
+  }
+  return data.iteration != null
+    ? `<div class="progress-empty">Iteration ${data.iteration}'s data.star has no orientation columns yet.</div>`
+    : '<div class="progress-empty">No completed iteration to read yet.</div>';
+}
+
 function drawOrientationHeatmap(host, data) {
   host.innerHTML = "";
   const { counts, n_rot_bins: nRot, n_tilt_bins: nTilt } = data;
