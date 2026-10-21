@@ -839,13 +839,21 @@ transcript itself isn't persisted — only the summary.
 Each popup's toolbar mirrors RELION's own "Job actions" menu: collapse, close,
 rename (RELION's *Alias*), edit note, **Overwrite** (re-runs into the same job
 directory and number, so it stays one entry — matching how RELION reuses a job
-slot), **Abort** (kills the whole process group, not just the shell), Mark
+slot — after first deleting everything in the directory except `job.star`,
+`note.txt` and the pipeline files, so nothing from the old run, such as a
+higher-numbered iteration, can be mistaken for the new one), **Abort** (kills the whole process group, not just the shell), Mark
 finished / Mark failed, **Delete**, and **Clean** / **Harsh Clean**.
 
 Clean is a *review* flow, not a silent sweep: it lists every file with its
-size, pre-checks a suggestion, and deletes only what you confirm. RELION's own
-cleanup uses per-job-type glob patterns defined in its C++ source; this uses its
-own review-based suggestion rather than mirroring them.
+size, pre-checks a suggestion (hover a row for why), and deletes only what you
+confirm. For iterative jobs (Class2D/3D, Refine3D, InitialModel, MultiBody) both
+Clean and Harsh Clean pre-check every iteration's files except the last one's,
+as RELION's own cleanup does, sparing any iteration another job's command reads;
+Clean also pre-checks log and temporary files, and Harsh Clean additionally
+files over 100 MB. Job bookkeeping (`job.star`, `note.txt`, the pipeline files)
+is never pre-checked. RELION's cleanup has further per-job-type glob patterns in
+its C++ source (a MotionCorr movies folder, a Polish `_shiny.mrcs`, …) that this
+does not mirror.
 
 ## Tomogram / particle-pick viewer
 

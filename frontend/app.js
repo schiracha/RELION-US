@@ -1567,7 +1567,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     if (!currentRun) return;
     const cmdToRun = commandBox ? commandBox.value : "";
     const ok = await confirmDialog(
-      `Overwrite "${currentRun.job_name}"? This re-runs into the SAME output directory (${currentRun.cwd}), overwriting its files:\n\n${cmdToRun || "(custom job — reruns with the current field values)"}`,
+      `Overwrite "${currentRun.job_name}"? This first DELETES everything in its output directory (${currentRun.cwd}) `
+      + `— results, iterations, logs, sub-folders — except job.star, note.txt and the pipeline files, then re-runs into it:\n\n`
+      + `${cmdToRun || "(custom job — reruns with the current field values)"}`,
       { confirmLabel: "Run (overwrite)", danger: true }
     );
     if (!ok) return;
@@ -1640,7 +1642,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     return `<div class="outputs-list">${files.map((f) => {
       const kind = previewKindFor(f.path);
       return `
-      <div class="outputs-row" data-path="${escapeHtml(f.path)}" ${kind ? `data-preview-kind="${kind}"` : ""}>
+      <div class="outputs-row" data-path="${escapeHtml(f.path)}" ${kind ? `data-preview-kind="${kind}"` : ""}
+           ${f.reason ? `title="Pre-checked: ${escapeHtml(f.reason)}"` : ""}>
         <input type="checkbox" data-role="file-check" ${f.suggested ? "checked" : ""} />
         <span class="out-path${kind ? " out-path-previewable" : ""}"
               ${kind ? `data-role="preview" title="${PREVIEW_TITLES[kind]}"` : ""}

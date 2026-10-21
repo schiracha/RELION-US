@@ -102,7 +102,7 @@ def test_the_exit_status_is_recorded_for_a_restarted_backend(project):
     assert JobRunManager._read_exit_file(project, run.run_id) == 7
 
 
-def test_overwrite_appends_to_the_files_and_streams_only_its_own_output(project):
+def test_overwrite_starts_the_files_afresh_and_streams_only_its_own_output(project):
     manager = JobRunManager(project)
 
     async def go():
@@ -114,8 +114,8 @@ def test_overwrite_appends_to_the_files_and_streams_only_its_own_output(project)
         return second
 
     run = asyncio.run(go())
-    assert (Path(run.cwd) / "run.out").read_text().splitlines() == ["first", "second"]
-    assert run.stdout_lines == ["second"]
+    assert (Path(run.cwd) / "run.out").read_text().splitlines() == ["second"]    # the Overwrite cleared "first"
+    assert [line for line in run.stdout_lines if not line.startswith("[RELION-US]")] == ["second"]
 
 
 def test_a_job_keeps_running_when_its_backend_dies_and_is_taken_back(project):

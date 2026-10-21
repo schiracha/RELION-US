@@ -431,6 +431,11 @@ class JobRun:
     # True for a run taken back after a RELION-US restart (adopt_running_jobs):
     # its process belongs to the previous backend, so there is no proc handle.
     adopted: bool = field(default=False, repr=False, compare=False)
+    # True for an Overwrite: the job directory is cleared out right before the
+    # run starts (see _clear_job_dir_for_overwrite), so nothing from the
+    # previous attempt -- an old iteration the Progress tab would take for the
+    # latest, a stale output -- survives into this one.
+    clean_on_start: bool = field(default=False, repr=False, compare=False)
     # Set when Abort arrives before the subprocess handle exists (see
     # abort_run + _run_subprocess); the launcher honours it as soon as it
     # has a process to signal.
@@ -1351,6 +1356,7 @@ class JobRunManager:
         )
         run.rewrite_note = rewrite_note
         run.pipeline_sync_error = pipeline_sync_error
+        run.clean_on_start = overwrite_run_id is not None
         if wait_for:
             run.wait_for, run.wait_mode = wait_for, wait_mode
             run.waiting = True
@@ -1414,10 +1420,72 @@ class JobRunManager:
 
     async def _launch_when_ready(self, run: JobRun, work) -> None:
         """Run `work()` (the real execution coroutine) -- after first waiting
-        for this run's dependencies, if it has any."""
+        for this run's dependencies, if it has any, and (for an Overwrite)
+        clearing out the previous attempt's files."""
         if run.wait_for and not await self._wait_for_dependencies(run):
             return
+        if run.clean_on_start and not run.abort_requested:
+            await self._clean_for_overwrite(run)
         await work()
+
+    # What an Overwrite leaves in the job directory: RELION's own bookkeeping
+    # (the job's settings and note, and its local copies of the pipeline).
+    # Everything else -- outputs, iterations, logs, sub-folders -- goes.
+    OVERWRITE_KEEP = ("job.star", "job_pipeline.star", "default_pipeline.star", "note.txt")
+
+    async def _clean_for_overwrite(self, run: JobRun) -> None:
+        summary = await asyncio.to_thread(self._clear_job_dir_for_overwrite, run)
+        if summary:
+            run.stdout_lines.append(summary)
+            await run.broadcast({"type": "stdout", "line": summary})
+
+    def _clear_job_dir_for_overwrite(self, run: JobRun) -> str:
+        """Empty this run's job directory before an Overwrite starts, keeping
+        only OVERWRITE_KEEP. Strictly scoped: the directory must be a
+        <Category>/jobNNN folder directly inside this run's project, and
+        symbolic links are removed, never followed. Returns the line to show in
+        the job's output (empty if there was nothing to clear)."""
+        cwd, project = Path(run.cwd), Path(run.project_dir)
+        try:
+            rel = cwd.resolve().relative_to(project.resolve())
+        except (ValueError, OSError):
+            return f"[RELION-US] Overwrite: {cwd} is outside the project, so it was NOT cleared."
+        if cwd.is_symlink() or len(rel.parts) != 2 or not re.fullmatch(r"job\d+", rel.parts[1]):
+            return f"[RELION-US] Overwrite: {rel} is not a <Category>/jobNNN folder, so it was NOT cleared."
+        files = folders = size = 0
+        failed = []
+        try:
+            entries = list(os.scandir(cwd))
+        except OSError as exc:
+            return f"[RELION-US] Overwrite: could not read {rel} to clear it ({exc})."
+        for entry in entries:
+            if entry.name in self.OVERWRITE_KEEP:
+                continue
+            try:
+                if entry.is_symlink() or entry.is_file(follow_symlinks=False):
+                    size += entry.stat(follow_symlinks=False).st_size
+                    os.unlink(entry.path)
+                    files += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    for root, _dirs, names in os.walk(entry.path):
+                        for n in names:
+                            try:
+                                size += os.lstat(os.path.join(root, n)).st_size
+                                files += 1
+                            except OSError:
+                                pass
+                    shutil.rmtree(entry.path)
+                    folders += 1
+            except OSError as exc:
+                failed.append(f"{entry.name} ({exc})")
+        if not (files or folders or failed):
+            return ""
+        mb = size / (1024 * 1024)
+        line = (f"[RELION-US] Overwrite: cleared {files} file(s) and {folders} folder(s) "
+                f"({mb:.1f} MB) from {rel}/ before re-running; kept {', '.join(self.OVERWRITE_KEEP)}.")
+        if failed:
+            line += " Could not remove: " + "; ".join(failed) + "."
+        return line
 
     async def _wait_for_dependencies(self, run: JobRun) -> bool:
         """Block until this run's dependencies allow it to start. Returns
@@ -2305,6 +2373,7 @@ class JobRunManager:
             detected_inputs=_detect_inputs(detect_text, project_dir, cwd),
             pipeline_registered=bool(registered),
         )
+        run.clean_on_start = overwrite_run_id is not None
         self.runs[run_id] = run
         self._persist(run)
         run.task = asyncio.create_task(
@@ -2323,6 +2392,8 @@ class JobRunManager:
         # Off the event loop: this may wait on the pipeline lock -- see
         # _mark_pipeline_running's own docstring.
         await asyncio.to_thread(self._mark_pipeline_running, run)
+        if run.clean_on_start:
+            await self._clean_for_overwrite(run)
         if run.pipeline_sync_error:
             run.stderr_lines.append(run.pipeline_sync_error)
             await run.broadcast({"type": "stderr", "line": run.pipeline_sync_error})
@@ -3132,22 +3203,87 @@ class JobRunManager:
     # patterns -- still just a suggestion, reviewed before deletion.
     _HARSH_SIZE_THRESHOLD_DEFAULT = 100 * 1024 * 1024  # 100 MB
 
+    # An iterative RELION job (Class2D/3D, Refine3D, InitialModel, MultiBody)
+    # writes a whole family of files per iteration -- run_it025_data.star,
+    # _model.star, _optimiser.star, _classNNN.mrc, ... -- and run_ctN_itNNN_*
+    # when continued. RELION's own cleanup (PipeLine::cleanupJob,
+    # pipeliner.cpp ~1540-1580, gentle AND harsh) deletes every iteration's
+    # files except the LAST one's, sparing any iteration another job uses as
+    # an input; the last is kept so e.g. a MultiBody refinement can still run.
+    _ITERATION_RE = re.compile(r"^run(?:_ct(?P<ct>\d+))?_it(?P<it>\d{3})(?=[_.])")
+    # Job bookkeeping, never suggested for removal.
+    _CLEAN_NEVER = ("job.star", "job_pipeline.star", "default_pipeline.star", "note.txt")
+
+    @classmethod
+    def _iteration_key(cls, relative_path: str):
+        """(continue-number, iteration) of a top-level iteration file, else
+        None. A plain run_itNNN sorts before every run_ctN_itNNN, as in
+        RELION's own ordering."""
+        if "/" in relative_path:
+            return None
+        m = cls._ITERATION_RE.match(relative_path)
+        if m is None:
+            return None
+        return (int(m.group("ct")) if m.group("ct") is not None else -1, int(m.group("it")))
+
+    def _paths_used_by_other_runs(self, run_id: str, cwd: Path, files: list[dict]) -> set[str]:
+        """Which of this job's files another job's command or fields names --
+        RELION spares those (they are nodes in its pipeline graph); deleting
+        one would break the job that reads it."""
+        try:
+            rel_dir = str(cwd.resolve().relative_to(self.project_dir.resolve()))
+        except (ValueError, OSError):
+            return set()
+        texts = []
+        seen = set()
+        for r in list(self.runs.values()) + [None]:
+            entries = [r.to_summary()] if r is not None else project_manager.load_history(self.project_dir)
+            for e in entries:
+                if e.get("run_id") in seen or e.get("run_id") == run_id:
+                    continue
+                seen.add(e.get("run_id"))
+                texts.append((e.get("command") or "") + " " + " ".join(
+                    str(v) for v in (e.get("field_values") or {}).values()) + " " + " ".join(e.get("detected_inputs") or []))
+        blob = "\n".join(texts)
+        return {f["path"] for f in files if f"{rel_dir}/{f['path']}" in blob}
+
     def cleanup_candidates(
         self, run_id: str, harsh: bool, harsh_size_threshold: int = _HARSH_SIZE_THRESHOLD_DEFAULT
     ) -> Optional[list[dict]]:
-        """Returns list_output_files() output with a `suggested` bool added
-        per file -- pre-checked for the Clean ("gentle") or Harsh Clean
-        review list. See the class-level docstring above this method for
-        why this is a generic size/extension suggestion rather than a port
-        of RELION's own per-job-type cleanup dispatch table."""
+        """Returns list_output_files() output with a `suggested` bool (and a
+        `reason`) added per file -- pre-checked for the Clean ("gentle") or
+        Harsh Clean review list. Not a port of RELION's per-job-type dispatch
+        table (see the class-level comment above), but it follows RELION's
+        rule for iterative jobs: every iteration except the last is removed,
+        by Clean and Harsh Clean alike. Harsh adds large files (over
+        `harsh_size_threshold`). Never suggested: job bookkeeping files, the
+        last iteration's files, and files another job's command names.
+        Everything is still only a pre-checked suggestion the user reviews."""
         files = self.list_output_files(run_id)
         if files is None:
             return None
+        cwd = self._resolve_run_cwd(run_id)
+        keys = {f["path"]: self._iteration_key(f["path"]) for f in files}
+        iterations = {k for k in keys.values() if k is not None}
+        last = max(iterations) if iterations else None
+        in_use = self._paths_used_by_other_runs(run_id, cwd, files) if cwd is not None and iterations else set()
         for f in files:
-            suggested = f["path"].endswith(self._GENTLE_CLEAN_SUFFIXES)
-            if harsh:
-                suggested = suggested or f["size"] >= harsh_size_threshold
-            f["suggested"] = suggested
+            path = f["path"]
+            reason = None
+            if path in self._CLEAN_NEVER:
+                pass
+            elif keys[path] is not None and keys[path] == last:
+                pass                                   # the last iteration is kept
+            elif path in in_use:
+                reason = None                          # another job reads it
+            elif keys[path] is not None:
+                reason = "an earlier iteration"
+            elif path.endswith(self._GENTLE_CLEAN_SUFFIXES):
+                reason = "a log or temporary file"
+            elif harsh and f["size"] >= harsh_size_threshold:
+                reason = "a large file"
+            f["suggested"] = reason is not None
+            f["reason"] = reason
         return files
 
     @staticmethod

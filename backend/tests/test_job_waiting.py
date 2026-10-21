@@ -390,3 +390,174 @@ def test_log_follower_restarts_when_the_file_is_replaced(tmp_path):
     f.initial()
     p.write_text("new\n")                    # shorter than before: an Overwrite started over
     assert f.new_lines() == ["new"]
+
+
+# --------------------------------------------------------------------------
+# Overwrite clears the job directory; Clean / Harsh Clean know about iterations
+# --------------------------------------------------------------------------
+
+import os  # noqa: E402
+
+
+def _populate(job_dir, names, size=10):
+    for n in names:
+        p = job_dir / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * size)
+
+
+def test_overwrite_empties_the_job_directory_but_keeps_the_bookkeeping(manager, tmp_path):
+    async def go():
+        first = await start(manager, "true")
+        assert await until(lambda: first.status in TERMINAL)
+        job_dir = Path(first.cwd)
+        _populate(job_dir, ["job.star", "note.txt", "job_pipeline.star", "default_pipeline.star",
+                            "run_it010_data.star", "run_it010_class001.mrc", "run.err", "result.mrc",
+                            "sub/deep/old.mrc", "other/thing.txt"])
+        second = await start(manager, "ls", overwrite_run_id=first.run_id)
+        assert await until(lambda: second.status in TERMINAL)
+        return job_dir, second
+
+    job_dir, run = asyncio.run(go())
+    left = {p.name for p in job_dir.iterdir() if not p.name.startswith("RELION_JOB_")}
+    assert left == {"job.star", "note.txt", "job_pipeline.star", "default_pipeline.star", "run.out", "run.err"}
+    assert not (job_dir / "run_it010_data.star").exists() and not (job_dir / "sub").exists()
+    # run_it010 x2, run.err, result.mrc, sub/deep/old.mrc, other/thing.txt and the first attempt's run.out
+    note = next(line for line in run.stdout_lines if "Overwrite: cleared" in line)
+    assert "cleared 7 file(s) and 2 folder(s)" in note and "kept job.star" in note
+    # run.out/run.err hold only the new attempt: the old run.err contents are gone
+    assert (job_dir / "run.err").read_text() == ""
+
+
+def test_the_old_iterations_are_gone_before_the_new_run_starts(manager, tmp_path):
+    """The Progress tab reads the highest run_itNNN it finds; a leftover from
+    the previous attempt must not be there for it to find."""
+    async def go():
+        first = await start(manager, "true")
+        assert await until(lambda: first.status in TERMINAL)
+        job_dir = Path(first.cwd)
+        _populate(job_dir, [f"run_it{i:03d}_{k}" for i in (1, 25) for k in ("data.star", "model.star")])
+        second = await start(manager, "sleep 0.4; touch run_it001_model.star", overwrite_run_id=first.run_id)
+        # while it runs, nothing of the old run is left to be taken for the latest iteration
+        assert await until(lambda: second.status == "running")
+        seen = sorted(p.name for p in job_dir.glob("run_it*"))
+        assert await until(lambda: second.status in TERMINAL)
+        return seen
+
+    assert asyncio.run(go()) == []
+
+
+def test_overwrite_never_follows_a_symlink_out_of_the_job_directory(manager, tmp_path):
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("do not delete")
+
+    async def go():
+        first = await start(manager, "true")
+        assert await until(lambda: first.status in TERMINAL)
+        job_dir = Path(first.cwd)
+        os.symlink(outside, job_dir / "linked")
+        os.symlink(outside / "keep.txt", job_dir / "linkedfile")
+        second = await start(manager, "true", overwrite_run_id=first.run_id)
+        assert await until(lambda: second.status in TERMINAL)
+        return job_dir
+
+    job_dir = asyncio.run(go())
+    assert (outside / "keep.txt").read_text() == "do not delete"
+    assert not (job_dir / "linked").exists() and not (job_dir / "linkedfile").is_symlink()
+
+
+def test_overwrite_refuses_to_clear_a_directory_that_is_not_a_job_folder(manager, tmp_path):
+    run = job_runner.JobRun(run_id="x", internal_name="Import", display_name="Import", command="true",
+                            cwd=str(tmp_path / "Data"), project_dir=str(tmp_path), job_number=1)
+    (tmp_path / "Data").mkdir()
+    (tmp_path / "Data" / "precious.txt").write_text("keep")
+    assert "NOT cleared" in manager._clear_job_dir_for_overwrite(run)
+    outside = job_runner.JobRun(run_id="y", internal_name="Import", display_name="Import", command="true",
+                                cwd=str(tmp_path.parent), project_dir=str(tmp_path), job_number=1)
+    assert "outside the project" in manager._clear_job_dir_for_overwrite(outside)
+    assert (tmp_path / "Data" / "precious.txt").exists()
+
+
+def test_a_fresh_run_and_an_ordinary_rerun_do_not_clear_anything(manager, tmp_path):
+    async def go():
+        a = await start(manager, "true")
+        assert await until(lambda: a.status in TERMINAL)
+        (Path(a.cwd) / "keepme.txt").write_text("x")
+        b = await start(manager, "true")             # a different, new job
+        assert await until(lambda: b.status in TERMINAL)
+        return a
+
+    assert (Path(asyncio.run(go()).cwd) / "keepme.txt").exists()
+
+
+def _finished_job(manager):
+    async def go():
+        run = await start(manager, "true")
+        assert await until(lambda: run.status in TERMINAL)
+        return run
+
+    return asyncio.run(go())
+
+
+def _suggested(manager, run, harsh):
+    return {f["path"] for f in manager.cleanup_candidates(run.run_id, harsh=harsh) if f["suggested"]}
+
+
+def test_clean_removes_every_iteration_but_the_last_like_relion(manager):
+    run = _finished_job(manager)
+    job_dir = Path(run.cwd)
+    _populate(job_dir, [f"run_it{i:03d}_{k}" for i in (0, 1, 2, 3) for k in ("data.star", "model.star", "class001.mrc")]
+              + ["run_data.star", "run_class001.mrc", "job.star", "note.txt"])
+    for harsh in (False, True):
+        got = _suggested(manager, run, harsh)
+        assert {f"run_it{i:03d}_{k}" for i in (0, 1, 2) for k in ("data.star", "model.star", "class001.mrc")} <= got
+        assert not any(p.startswith("run_it003") for p in got)          # the last iteration stays
+        assert not got & {"run_data.star", "run_class001.mrc", "job.star", "note.txt"}
+
+
+def test_continued_runs_keep_only_the_last_continue_iteration(manager):
+    run = _finished_job(manager)
+    _populate(Path(run.cwd), ["run_it010_data.star", "run_ct1_it011_data.star", "run_ct2_it012_data.star",
+                              "run_ct2_it013_data.star", "run_ct2_it013_model.star"])
+    got = {p for p in _suggested(manager, run, harsh=False) if p.startswith("run_")}
+    assert got == {"run_it010_data.star", "run_ct1_it011_data.star", "run_ct2_it012_data.star"}
+
+
+def test_an_iteration_another_job_uses_is_spared(manager):
+    async def go():
+        a = await start(manager, "true")
+        assert await until(lambda: a.status in TERMINAL)
+        _populate(Path(a.cwd), [f"run_it{i:03d}_optimiser.star" for i in (1, 2, 3)])
+        rel = Path(a.cwd).relative_to(manager.project_dir)
+        b = await start(manager, f"echo --ios {rel}/run_it002_optimiser.star")     # a later job reads iteration 2
+        assert await until(lambda: b.status in TERMINAL)
+        return a
+
+    run = asyncio.run(go())
+    assert {p for p in _suggested(manager, run, harsh=True) if p.startswith("run_it")} == {"run_it001_optimiser.star"}
+
+
+def test_harsh_adds_large_files_but_gentle_does_not(manager):
+    run = _finished_job(manager)
+    _populate(Path(run.cwd), ["big.mrc", "small.mrc", "run_it001_data.star", "run_it002_data.star"], size=10)
+    (Path(run.cwd) / "big.mrc").write_bytes(b"x" * 2048)
+    gentle = {f["path"] for f in manager.cleanup_candidates(run.run_id, harsh=False) if f["suggested"]}
+    harsh = {f["path"] for f in manager.cleanup_candidates(run.run_id, harsh=True, harsh_size_threshold=1000) if f["suggested"]}
+    assert "big.mrc" not in gentle and "big.mrc" in harsh and "small.mrc" not in harsh
+
+
+def test_clean_keeps_logs_suggestion_and_never_bookkeeping(manager):
+    run = _finished_job(manager)
+    _populate(Path(run.cwd), ["run.out", "run.err", "x.log", "job.star", "note.txt", "default_pipeline.star", "job_pipeline.star"])
+    got = _suggested(manager, run, harsh=False)
+    assert {"run.out", "run.err", "x.log"} <= got
+    assert not got & {"job.star", "note.txt", "default_pipeline.star", "job_pipeline.star"}
+
+
+def test_each_suggestion_says_why(manager):
+    run = _finished_job(manager)
+    _populate(Path(run.cwd), ["run_it001_data.star", "run_it002_data.star", "x.log"])
+    why = {f["path"]: f["reason"] for f in manager.cleanup_candidates(run.run_id, harsh=False)}
+    assert why["run_it001_data.star"] == "an earlier iteration"
+    assert why["x.log"] == "a log or temporary file" and why["run_it002_data.star"] is None

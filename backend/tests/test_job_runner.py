@@ -607,10 +607,12 @@ def test_subprocess_surviving_a_carriage_return_animated_progress_line(tmp_path)
     assert not any("output stream error" in line for line in run.stderr_lines)
 
 
-def test_overwrite_run_out_appends_rather_than_truncates(tmp_path):
-    """RELION appends (">>") to run.out/run.err, not overwrites -- a
-    re-run's output accumulates on top of the previous attempt's, matching
-    what RELION's own Overwrite does."""
+def test_overwrite_starts_run_out_afresh(tmp_path):
+    """An Overwrite clears the job directory first (see
+    test_job_waiting.py's Overwrite tests), so run.out holds only the new
+    attempt's output -- the previous attempt's no longer accumulates under it
+    (an ordinary re-run into the same directory still appends, as RELION's
+    `>>` does)."""
     project_manager.init_new_project(tmp_path)
     manager = JobRunManager(tmp_path)
 
@@ -636,7 +638,7 @@ def test_overwrite_run_out_appends_rather_than_truncates(tmp_path):
     first, second = asyncio.run(go())
     assert second.status == STATUS_COMPLETED, second.stderr_lines
     out_text = (Path(second.cwd) / "run.out").read_text()
-    assert "first-attempt" in out_text
+    assert "first-attempt" not in out_text
     assert "second-attempt" in out_text
 
 
