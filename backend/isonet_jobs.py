@@ -54,7 +54,12 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import sys
 from pathlib import Path
+
+STAGE_SCRIPT = Path(__file__).resolve().parent / "converters" / "stage_isonet_tomograms.py"
+STAGED_DIRNAME = "staged"
+RELION_FULL_COLUMN = "rlnTomoReconstructedTomogram"
 
 
 def find_isonet_dir() -> str | None:
@@ -132,10 +137,45 @@ def _is_default(option: dict, value) -> bool:
     if isinstance(value, str) and value.strip() == "":
         return True
     default = option.get("default")
-    return str(value) == str(default)
+    if str(value) == str(default):
+        return True
+    try:                         # "1" and 1.0 are the same setting
+        return not isinstance(default, bool) and float(value) == float(default)
+    except (TypeError, ValueError):
+        return False
 
 
-def build_isonet_command(internal_name: str, field_values: dict, output_subdir: str) -> str:
+def _blank(value) -> bool:
+    return value is None or str(value).strip() in ("", "None")
+
+
+def _truthy(value) -> bool:
+    return value is True or str(value).strip().lower() in ("true", "1", "yes")
+
+
+def _resolve_in_project(value, project_dir) -> Path:
+    p = Path(str(value).strip()).expanduser()
+    return p if p.is_absolute() or not project_dir else Path(project_dir) / p
+
+
+def _staged_kinds(field_values: dict, project_dir) -> list[str]:
+    """Which of full/even/odd the RELION STAR provides, so the command can
+    pass exactly those to isonet.py. When the STAR can't be read yet (no
+    project, file not there, or a typo mid-edit) all three are assumed; the
+    staging step itself then fails with a message naming what is missing."""
+    from converters import stage_isonet_tomograms as stager
+    try:
+        column = str(field_values.get("relion_tomo_column") or RELION_FULL_COLUMN).strip()
+        found = stager.columns_for(_resolve_in_project(field_values["relion_star"], project_dir), column)
+        if "full" not in found and found.get("even") and _truthy(field_values.get("create_average")):
+            found = {"full": None, **found}      # averaged from the halves by the staging step
+        return [k for k in stager.KINDS if k in found]
+    except Exception:  # noqa: BLE001
+        return ["full", "even", "odd"]
+
+
+def build_isonet_command(internal_name: str, field_values: dict, output_subdir: str,
+                         project_dir=None) -> str:
     """Builds the full, editable shell command for one IsoNet2 job: a
     `conda run -n <env>` prefix (the "conda environment name" field the user
     asked for -- see ISONET_JOB_DEFINITIONS' conda_env option below) around
@@ -190,6 +230,22 @@ def build_isonet_command(internal_name: str, field_values: dict, output_subdir: 
     if source_star:
         prefix = ["cp", shlex.quote(source_star), shlex.quote(job_star), "&&"]
 
+    # PrepareStar from a RELION tomograms STAR: stage full/even/odd folders
+    # first (a visible step, like DeepETPicker's coordinate conversion) and
+    # give isonet.py those instead of any folder fields.
+    staged: list[str] = []
+    if internal_name == "IsonetPrepareStar" and not _blank(field_values.get("relion_star")):
+        staged = _staged_kinds(field_values, project_dir)
+        prefix = [shlex.quote(sys.executable), shlex.quote(str(STAGE_SCRIPT)),
+                  "--star", shlex.quote(str(field_values["relion_star"]).strip()),
+                  "--out", shlex.quote(subdir_arg + STAGED_DIRNAME)]
+        column = str(field_values.get("relion_tomo_column") or "").strip()
+        if column and column != RELION_FULL_COLUMN:
+            prefix += ["--full_column", shlex.quote(column)]
+        if _truthy(field_values.get("create_average")) and "full" in staged:
+            prefix += ["--average"]
+        prefix += ["&&"]
+
     parts = prefix + _isonet_env_assignments() + [
         "conda", "run", "--no-capture-output", "-n", shlex.quote(env),
         "isonet.py", definition["subcommand"],
@@ -199,8 +255,12 @@ def build_isonet_command(internal_name: str, field_values: dict, output_subdir: 
 
     for option in definition["options"]:
         key = option["key"]
-        if key == "conda_env":
-            continue  # consumed above, not an isonet.py flag
+        if key in ("conda_env", "relion_star", "relion_tomo_column"):
+            continue  # consumed above, not isonet.py flags
+        if staged and key in ("full", "even", "odd", "create_average"):  # create_average: staging step's --average
+            if key in staged:
+                parts.extend(_isonet_flag(key, subdir_arg + STAGED_DIRNAME + "/" + key))
+            continue
         value = field_values.get(key, option.get("default"))
         if internal_name == "IsonetPrepareStar" and key == "star_name":
             star_name = str(value if not _is_default(option, value) else option["default"])
@@ -242,6 +302,16 @@ _TOMO_IDX_OPTION = {
     "default": "",
     "help": "Process only these STAR row indices, 1-based (e.g. \"1,2,4\" or \"5-10,15,16\"). Leave blank for all.",
 }
+
+def _snrfalloff_deconv_options(snrfalloff_default: float) -> list[dict]:
+    """The three deconvolution knobs shared by Deconv, Denoise and Refine.
+    IsoNet's own default for snrfalloff differs by command (1 for deconv, 0
+    for denoise and refine -- read from isonet.py's signatures). The default
+    here must match, because a value equal to the default is left off the
+    command: a UI default of 1.0 on Denoise would show 1.0 and run with 0."""
+    return [{**o, "default": snrfalloff_default} if o["key"] == "snrfalloff" else o
+            for o in _SNRFALLOFF_DECONV_OPTIONS]
+
 
 _SNRFALLOFF_DECONV_OPTIONS = [
     {"key": "snrfalloff", "field_type": "slider", "label": "SNR falloff:", "default": 1.0,
@@ -309,9 +379,23 @@ ISONET_JOB_DEFINITIONS = {
             # "Even/Odd Input" toggle; FAQ: "Use even/odd... for
             # --method isonet2-n2n... Use full tomograms for... --method
             # isonet2 when movies/tilt-series are not available").
+            {"key": "relion_star", "field_type": "inputnode", "label": "RELION tomograms STAR (recommended):",
+             "default": "", "pattern": "*.star",
+             "help": "The easiest way to supply tomograms: the tomograms.star of a RELION Reconstruct "
+             "Tomograms job (or any STAR with rlnTomoName and the tomogram columns). RELION keeps the full "
+             "tomograms and both half-maps in one folder, which IsoNet cannot read directly -- it wants "
+             "one folder per kind. This step reads the STAR, makes a full/, even/ and odd/ folder of links "
+             "inside this job's directory from whichever of the full tomogram and the two half-maps the STAR "
+             "has, and points IsoNet at them. Leave the three folder fields below empty when using this."},
+            {"key": "relion_tomo_column", "field_type": "text", "label": "Full-tomogram column:",
+             "default": RELION_FULL_COLUMN,
+             "help": "Only with a RELION STAR above: the column holding the full tomograms. Change to "
+             "rlnTomoReconstructedTomogramDenoised to use denoised tomograms. The half-maps always come "
+             "from rlnTomoReconstructedTomogramHalf1 (even) and ...Half2 (odd)."},
             {"key": "full", "field_type": "directory", "label": "Full tomograms folder:", "default": "None",
-             "help": "One of two ways to supply tomograms -- either this, OR even+odd below (not both; "
-             "leaving all three at \"None\" fails). Directory containing full tomogram(s) (.mrc/.rec), "
+             "help": "Folder route (instead of the RELION STAR above): either this, OR even+odd below. The "
+             "folder must hold ONLY full tomograms -- not RELION's mixed folder of full tomograms and "
+             "_half1/_half2 files. Directory containing full tomogram(s) (.mrc/.rec), "
              "for single-map training (--method isonet2 downstream). Use this when you don't have "
              "even/odd halves (e.g. no separate movies/tilt-series to split)."},
             {"key": "even", "field_type": "directory", "label": "Even half-tomograms folder:", "default": "None",
@@ -364,7 +448,9 @@ ISONET_JOB_DEFINITIONS = {
              "help": "Optional, and only meaningful when even+odd are set (ignored for full). Sums the "
              "even and odd folders into full tomograms alongside the halves -- useful so the Deconvolution "
              "and Make Mask stages have a full tomogram to work from even though you're training "
-             "Noise2Noise on the halves (see the FAQ: 'When should I use CTF deconvolution?')."},
+             "Noise2Noise on the halves (see the FAQ: 'When should I use CTF deconvolution?'). With a "
+             "RELION tomograms STAR that has only half-maps, the sums are written into this job's own "
+             "staged/full folder (rather than an averaged_tomos folder in the project root)."},
             {"key": "number_subtomos", "field_type": "text", "label": "Subtomograms per tomogram:", "default": "auto",
              "help": "Optional; ignored if a coordinate folder is set above (see its own help). \"auto\" "
              "divides 3000 total subtomograms per epoch across your tomograms. Increasing this is like "
@@ -372,7 +458,8 @@ ISONET_JOB_DEFINITIONS = {
              "also be edited per-tomogram directly in the generated STAR file afterward."},
         ],
         "standard_groups": [
-            {"name": "", "fields": ["conda_env", "full", "even", "odd"]},
+            {"name": "", "fields": ["conda_env", "relion_star", "relion_tomo_column"]},
+            {"name": "Or tomogram folders (one kind of file per folder)", "fields": ["full", "even", "odd"]},
             {"name": "Optional inputs", "fields": ["mask_folder", "coordinate_folder"]},
             {"name": "Output", "fields": ["star_name"]},
             {"name": "Acquisition metadata (for later CTF correction)",
@@ -397,7 +484,7 @@ ISONET_JOB_DEFINITIONS = {
             {"key": "input_column", "field_type": "text", "label": "Input STAR column:", "default": "rlnTomoName",
              "help": "Optional. STAR column to read tomogram paths from -- rlnTomoName (full tomograms) is "
              "the only column this module reads directly; there's no even/odd form of deconv."},
-            *_SNRFALLOFF_DECONV_OPTIONS,
+            *_snrfalloff_deconv_options(1.0),
             {"key": "chunk_size", "field_type": "text", "label": "Chunk size (voxels, optional):", "default": "",
              "help": "Optional. Process tomograms in cubic chunks of this size, to reduce memory usage on "
              "very large tomograms or limited RAM/VRAM. May create edge artifacts if too small. Leave "
@@ -535,7 +622,7 @@ ISONET_JOB_DEFINITIONS = {
              "options": ["0", "1", "2", "3"],
              "help": "Optional. Attenuates the overrepresented very-low-frequency CTF peak. 0: none, "
              "1: constant clip, 2: negative sine, 3: cosine. 2/3 might increase low-resolution contrast."},
-            *_SNRFALLOFF_DECONV_OPTIONS,
+            *_snrfalloff_deconv_options(0.0),
             {"key": "with_preview", "field_type": "boolean", "label": "Predict a preview after training:",
              "default": True, "help": "Optional. Runs a prediction with the latest checkpoint every save "
              "interval (above), so you can watch results improve live -- the tomogram index below only "
@@ -669,7 +756,7 @@ ISONET_JOB_DEFINITIONS = {
             {"key": "prev_tomo_idx", "field_type": "text", "label": "Preview tomogram index:", "default": "1",
              "help": "Optional, and only used when \"predict a preview\" above is on. STAR row index (or "
              "range, e.g. \"1,2,4\") to auto-predict for the preview."},
-            *_SNRFALLOFF_DECONV_OPTIONS,
+            *_snrfalloff_deconv_options(0.0),
         ],
         "standard_groups": [
             {"name": "", "fields": ["conda_env", "star_file", "method", "input_column", "gpuID", "ncpus"]},
@@ -739,3 +826,115 @@ ISONET_JOB_DEFINITIONS = {
         ],
     },
 }
+
+
+def _folder_problems(label: str, folder, project_dir) -> tuple[list[str], list[Path]]:
+    """Files in one folder field, and what is wrong with the folder itself."""
+    path = _resolve_in_project(folder, project_dir)
+    if not path.is_dir():
+        return [f"{label} folder does not exist: {folder}"], []
+    return [], sorted(p for p in path.iterdir() if p.is_file())
+
+
+def _row_selection(spec, n_rows: int) -> list[int]:
+    """0-based rows named by IsoNet's 1-based tomo_idx ("1,2,4", "5-10,15");
+    blank or unparseable means every row."""
+    spec = str(spec or "").strip()
+    if not spec or spec == "None":
+        return list(range(n_rows))
+    rows = set()
+    try:
+        for part in spec.split(","):
+            lo, _, hi = part.strip().partition("-")
+            rows.update(range(int(lo), int(hi or lo) + 1))
+    except ValueError:
+        return list(range(n_rows))
+    return sorted(r - 1 for r in rows if 1 <= r <= n_rows)
+
+
+def _deconv_input_problems(v: dict, project_dir) -> list[str]:
+    """Deconv reads a FULL tomogram from every selected row's input column and
+    dies mid-run on `None` (what Prepare Star writes for rlnTomoName when it
+    was given only even/odd folders), after the star has been copied."""
+    if _blank(v.get("star_file")):
+        return []
+    path = _resolve_in_project(v["star_file"], project_dir)
+    if not path.is_file():
+        return []                                   # an earlier job's output that doesn't exist yet
+    import starfile
+    try:
+        blocks = starfile.read(path, always_dict=True)
+        table = next(d for d in blocks.values() if hasattr(d, "columns") and "rlnPixelSize" in d.columns)
+    except Exception:  # noqa: BLE001
+        return []
+    column = str(v.get("input_column") or "rlnTomoName").strip() or "rlnTomoName"
+    if column not in table.columns:
+        return [f"{v['star_file']} has no {column} column, which Deconvolution reads the tomograms from."]
+    rows = _row_selection(v.get("tomo_idx"), len(table))
+    missing = [i + 1 for i in rows if str(table[column].iloc[i]).strip() in ("", "None", "nan")]
+    if missing:
+        shown = ", ".join(map(str, missing[:8])) + (" ..." if len(missing) > 8 else "")
+        hint = (" Prepare Star leaves it empty when it is given only even/odd folders: re-run it with a RELION "
+                "tomograms STAR and \"Create averaged full tomograms\" ticked (or a full tomograms folder)."
+                if column == "rlnTomoName" else "")
+        return [f"Row(s) {shown} of {v['star_file']} have no tomogram in {column} ({len(missing)} of {len(rows)} "
+                f"selected).{hint}"]
+    absent = [i + 1 for i in rows if not _resolve_in_project(table[column].iloc[i], project_dir).exists()]
+    if absent:
+        shown = ", ".join(map(str, absent[:8])) + (" ..." if len(absent) > 8 else "")
+        first = table[column].iloc[absent[0] - 1]
+        return [f"Row(s) {shown} of {v['star_file']} point to tomogram files that do not exist ({len(absent)} of "
+                f"{len(rows)} selected), e.g. {first}. Was the job that wrote them deleted or cleaned?"]
+    return []
+
+
+def validate_isonet_fields(internal_name: str, field_values: dict, project_dir=None) -> list[str]:
+    """Problems that would make an IsoNet2 job fail or give a wrong result,
+    found before the job directory is created. Only Prepare Star has any:
+    isonet.py prepare_star pairs the files of its folders by sorted name and
+    does not check what they are, so RELION's mixed folder of full tomograms
+    and half-maps (or one folder given as both even and odd) silently gives
+    a star file with the wrong tomogram on every row."""
+    v = field_values or {}
+    if internal_name == "IsonetDeconv":
+        return _deconv_input_problems(v, project_dir)
+    if internal_name != "IsonetPrepareStar":
+        return []
+    problems = []
+    has_star = not _blank(v.get("relion_star"))
+    folders = {k: v.get(k) for k in ("full", "even", "odd") if not _blank(v.get(k))}
+    if has_star and folders:
+        return ["Give either a RELION tomograms STAR or tomogram folders, not both -- clear the folder fields."]
+    if has_star:
+        star = _resolve_in_project(v["relion_star"], project_dir)
+        if not star.is_file():
+            return [f"RELION tomograms STAR not found: {v['relion_star']}"]
+        from converters import stage_isonet_tomograms as stager
+        try:
+            stager.columns_for(star, str(v.get("relion_tomo_column") or RELION_FULL_COLUMN).strip())
+        except Exception as exc:  # noqa: BLE001
+            return [str(exc)]
+        return []
+    if not folders:
+        return ["Give a RELION tomograms STAR, or a full tomograms folder, or both even and odd folders."]
+    if ("even" in folders) != ("odd" in folders):
+        problems.append("Even and odd folders go together: give both or neither.")
+    if "even" in folders and "odd" in folders and \
+            _resolve_in_project(folders["even"], project_dir).resolve() == _resolve_in_project(folders["odd"], project_dir).resolve():
+        problems.append("The even and odd folders are the same folder, so every row would get the same file twice. "
+                        "Use a RELION tomograms STAR above instead, or point them at separate folders.")
+    counts = {}
+    for key, folder in folders.items():
+        bad, files = _folder_problems(key.capitalize(), folder, project_dir)
+        problems += bad
+        if bad:
+            continue
+        counts[key] = len(files)
+        halves = [f for f in files if "_half1" in f.stem or "_half2" in f.stem]
+        if halves and len(halves) != len(files):
+            problems.append(f"The {key} folder mixes full tomograms with _half1/_half2 files ({len(files)} files). "
+                            "IsoNet needs one kind per folder -- use a RELION tomograms STAR above, which sorts them out.")
+    if len(set(counts.values())) > 1:
+        problems.append("The folders hold different numbers of files (" +
+                        ", ".join(f"{k}: {n}" for k, n in counts.items()) + "); IsoNet pairs them by position.")
+    return problems

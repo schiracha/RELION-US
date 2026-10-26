@@ -187,7 +187,7 @@ One tab, two different questions, answered in order:
 
 The split is by *provenance*, not by how advanced an option feels, and not by
 being a separate tab: a separate tab would imply it's a peer of
-Inputs/Progress/Outputs/Errors, when it is really more Inputs the GUI
+Inputs/Progress/Outputs/Alerts, when it is really more Inputs the GUI
 doesn't have a field for.
 
 #### RELION's Running tab
@@ -1111,6 +1111,36 @@ builder; `main.py` treats both through `EXTERNAL_COMMAND_JOBS` and
 `build_external_command`, and `job_catalog.CUSTOM_JOBS` gives them menu entries
 with fabricated `custom.*` labels (no RELION class exists, so
 `relion_pipeliner` is not asked to register them).
+
+Output is read as a terminal shows it. `LogFollower` treats a line ended by a bare
+`\r` as one that the next piece overwrites, and hands out `(text, replace)`; the
+run buffer replaces that line instead of appending, the WebSocket message carries
+`"replace": true`, and the popup updates the same element. A multi-hour training
+therefore costs a handful of stored lines, not one per redraw, and the popup keeps
+at most 2000 lines per pane (a note says how many were left out; the whole log is
+`run.out`/`run.err`). Subprocess jobs also get `TQDM_MININTERVAL=2` so tqdm itself
+writes about a tenth of the redraws into `run.err` (an existing value wins).
+
+IsoNet2 specifics worth knowing: `isonet.py` needs both `PATH` and `PYTHONPATH`
+(what IsoNet's `isonet2.bashrc` sets), so `find_isonet_dir` locates the install
+(`$ISONET_DIR`, `~/.config/isoapp/environment.json`, `PATH`, `PYTHONPATH`) and
+`build_isonet_command` puts both in front of the `conda run`. `prepare_star`
+pairs the files of its `--full/--even/--odd` folders by sorted name and checks
+nothing, so Prepare Star can take a RELION tomograms STAR and run
+`converters/stage_isonet_tomograms.py` first (a visible `&&` step, as for
+DeepETPicker's coordinate conversion) to build `staged/{full,even,odd}` from the
+STAR's columns; `validate_isonet_fields` refuses the folder combinations that
+would silently pair the wrong files. An option left at IsoNet's own default is
+omitted from the command, so every UI default must equal the signature default
+in `isonet.py` (a test reads the real signatures to hold this).
+
+Make Mask's Progress tab (`mask_preview.py`, `GET /api/runs/{id}/mask-preview`):
+`isonet.py make_mask` writes one `<tomogram>_mask.mrc` per tomogram, tens of
+seconds apart and with no progress file, so the backend draws the first
+*complete* mask (header size matches file size, untouched for a moment) over its
+tomogram, looked up through the job's own STAR copy. The PNG and a small JSON of
+what it shows are written once into the job directory (an Overwrite clears them)
+and the frontend fetches the PNG through the ordinary run-file download.
 
 What the DeepETPicker command line promises, and what this side relies on:
 

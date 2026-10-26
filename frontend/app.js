@@ -744,7 +744,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <button class="tab-btn" data-tab="progress" hidden>Progress</button>
       <button class="tab-btn" data-tab="ctfqc" hidden>CTF QC</button>
       <button class="tab-btn" data-tab="outputs" hidden>Outputs</button>
-      <button class="tab-btn" data-tab="errors">Errors<span class="badge" data-role="error-badge" style="display:none">0</span></button>
+      <button class="tab-btn" data-tab="alerts">Alerts<span class="badge" data-role="alert-badge" style="display:none">0</span></button>
       ${def.is_custom ? "" : '<button class="tab-btn" data-tab="source">RELION Source</button>'}
     </div>
     <div class="tab-content-area" data-role="tab-content-area">
@@ -754,7 +754,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <div class="tab-content" data-tab-content="progress"></div>
       <div class="tab-content" data-tab-content="ctfqc"></div>
       <div class="tab-content" data-tab-content="outputs"></div>
-      <div class="tab-content" data-tab-content="errors"><pre class="errors-pre" data-role="errors-pre">(no errors yet)</pre></div>
+      <div class="tab-content" data-tab-content="alerts"><pre class="alerts-pre" data-role="alerts-pre">(no alerts yet)</pre></div>
       ${def.is_custom ? "" : `<div class="tab-content" data-tab-content="source"><pre class="source-pre">${escapeHtml(def.commands_source || "(source unavailable)")}</pre></div>`}
     </div>
     ${def.is_custom ? `
@@ -1100,35 +1100,66 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   }
 
   const statusLine = body.querySelector('[data-role="status-line"]');
-  const errorsPre = body.querySelector('[data-role="errors-pre"]');
-  const errorBadge = body.querySelector('[data-role="error-badge"]');
-  let errorLines = [];
+  const alertsPre = body.querySelector('[data-role="alerts-pre"]');
+  const alertBadge = body.querySelector('[data-role="alert-badge"]');
+  let alertCount = 0;      // lines in the Alerts tab (the badge) -- more than are kept on the page
+  // The line a progress-bar redraw (msg.replace) overwrites, per stream: the last
+  // element written for it.
+  const lastLine = { stdout: null, stderr: null, alert: null };
+  // Lines kept on the page per pane. A long training can still produce many
+  // distinct lines; the browser must not hold them all (the whole log is
+  // run.out / run.err in the job folder).
+  const OUTPUT_LINE_CAP = 2000;
+  function addCapped(host, el) {
+    host.appendChild(el);
+    let dropped = 0;
+    while (host.childElementCount > OUTPUT_LINE_CAP) { host.removeChild(host.firstElementChild); dropped++; }
+    if (dropped) host.dataset.trimmed = String((Number(host.dataset.trimmed) || 0) + dropped);
+  }
   let ws = null;
 
-  // stderr always goes to the dedicated Errors tab (errorsPre/errorBadge).
+  // stderr always goes to the dedicated Alerts tab (alertsPre/alertBadge) -- named
+  // for what is in it: warnings and INFO logging that tools write to stderr as
+  // well as real errors, not only errors.
   // Full stdout+stderr also streams into the Progress tab's own live-output
   // pane (see renderProgressShell) for jobs that have one -- the classic
   // scrolling RELION console view, split under the charts rather than
   // duplicated as a separate always-visible block under every tab the way
   // an earlier version of this had it (that showed stderr twice: once
-  // there, once in Errors). Queried fresh each line rather than cached,
+  // there, once in Alerts). Queried fresh each line rather than cached,
   // since the Progress tab's shell may not be built yet the first time a
   // line arrives.
-  function appendOutputLine(text, isStderr) {
+  function appendOutputLine(text, isStderr, replace = false) {
+    const kind = isStderr ? "stderr" : "stdout";
     const liveBody = progressContent.querySelector('[data-role="progress-live-output-body"]');
     if (liveBody) {
-      const line = document.createElement("div");
-      line.className = "progress-live-line" + (isStderr ? " stderr" : "");
-      line.textContent = text;
-      liveBody.appendChild(line);
+      const prior = replace ? lastLine[kind] : null;
+      if (prior && prior.isConnected) {
+        prior.textContent = text;                 // a progress bar redrawn in place
+      } else {
+        const line = document.createElement("div");
+        line.className = "progress-live-line" + (isStderr ? " stderr" : "");
+        line.textContent = text;
+        addCapped(liveBody, line);
+        lastLine[kind] = line;
+      }
       liveBody.scrollTop = liveBody.scrollHeight;
     }
     if (isStderr) {
-      errorLines.push(text);
-      errorsPre.textContent = errorLines.join("\n");
-      errorsPre.classList.add("has-errors");
-      errorBadge.style.display = "";
-      errorBadge.textContent = String(errorLines.length);
+      const prior = replace ? lastLine.alert : null;
+      if (prior && prior.isConnected) {
+        prior.textContent = text;
+      } else {
+        if (alertCount === 0) alertsPre.textContent = "";   // the "(no alerts yet)" placeholder
+        const line = document.createElement("div");
+        line.textContent = text;
+        addCapped(alertsPre, line);
+        lastLine.alert = line;
+        alertCount++;
+      }
+      alertsPre.classList.add("has-alerts");
+      alertBadge.style.display = "";
+      alertBadge.textContent = String(alertCount);
     }
   }
 
@@ -1296,6 +1327,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     selectedIteration: "latest",   // "latest" (auto-follows new polls) or a specific number
     iterationCache: {},      // iteration number -> its full {iteration, resolution_A, classes}
     orientationData: null,   // cached response from the on-demand viewing-direction button
+    maskPreview: null,       // IsonetMakeMask only -- response of GET .../mask-preview
     isonetLossFiles: [],     // IsonetDenoise/IsonetRefine only -- {path,size,mtime} for whichever
                              // of loss_full.png/loss_top.png/loss_bottom.png exist right now
   };
@@ -1787,7 +1819,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   const PROGRESS_POLL_MS = (globalSettings["progress.refresh_interval_s"] || 4) * 1000;
 
   function progressSupported() {
-    return currentRun && (PROGRESS_JOB_TYPES.has(internalName) || isonetLossSupported());
+    return currentRun && (PROGRESS_JOB_TYPES.has(internalName) || isonetLossSupported() || isonetMaskSupported());
   }
 
   // IsoNet2's Denoise/Refine training jobs have no RELION iteration-STAR
@@ -1806,6 +1838,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // endpoints (no backend changes needed).
   function isonetLossSupported() {
     return currentRun && ISONET_LOSS_JOB_TYPES.has(internalName);
+  }
+
+  // Make Mask's Progress tab: a picture of the FIRST mask the job finishes,
+  // over its tomogram, so a wrong patch size / density / std / z-crop can be
+  // spotted and the job aborted while the other masks are still being made.
+  // The backend draws it (mask_preview.py); like the loss curves it is shown
+  // through the run's own file download, in the same split view with the
+  // live output underneath.
+  function isonetMaskSupported() {
+    return currentRun && ISONET_MASK_JOB_TYPES.has(internalName);
   }
 
   // The Progress tab is a top/bottom split: charts/thumbnails above, the
@@ -1891,7 +1933,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   }
 
   function renderProgressShell() {
-    if (isonetLossSupported()) { renderIsonetLossShell(); return; }
+    if (isonetLossSupported() || isonetMaskSupported()) { renderIsonetLossShell(); return; }
     progressContent.innerHTML = `
       <div class="progress-split-wrap" data-role="progress-split-wrap">
         <div class="progress-split-top">
@@ -2013,10 +2055,44 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       </div>`).join("");
   }
 
+  function renderMaskPreviewBody(host, statusEl) {
+    if (!progressState.enabled) {
+      host.innerHTML = '<div class="progress-empty">Live progress is off for this job.</div>';
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    const d = progressState.maskPreview;
+    if (statusEl) statusEl.textContent = "";
+    if (d && d.error) {
+      host.innerHTML = `<div class="progress-empty">${escapeHtml(d.error)}</div>`;
+      return;
+    }
+    if (!d || !d.available) {
+      host.innerHTML = '<div class="progress-empty">Waiting for the first mask — each one takes a while. '
+        + 'It will appear here as soon as it is finished, so you can check the settings and abort if it looks wrong.</div>';
+      return;
+    }
+    const total = d.masks_total ? ` of ${d.masks_total}` : "";
+    if (statusEl) statusEl.textContent = `${d.masks_done}${total} masks finished`;
+    const facts = [`mask covers ${d.mask_percent}% of the volume`, ...(d.settings || [])].map(escapeHtml).join(" · ");
+    host.innerHTML = `
+      <div class="progress-section">
+        <h4>First mask — ${escapeHtml(d.mask)}</h4>
+        <div class="progress-empty" style="font-style:normal;padding:2px 0 6px">${facts}</div>
+        <img class="isonet-loss-image"
+             src="/api/runs/${currentRun.run_id}/files/download?path=${encodeURIComponent(d.file)}&t=${d.mtime}"
+             alt="First mask over its tomogram" />
+        <div class="progress-empty">Green: kept by the mask, outlined in yellow. If it keeps too much, too little or the
+          wrong parts, <b>Abort</b>, change the settings (patch size, density %, std %, z-crop) and run again.
+          ${d.note ? "<br>" + escapeHtml(d.note) : ""}</div>
+      </div>`;
+  }
+
   async function renderProgressBody() {
     const host = progressContent.querySelector('[data-role="prog-body"]');
     const statusEl = progressContent.querySelector('[data-role="prog-status"]');
     if (!host) return;
+    if (isonetMaskSupported()) { renderMaskPreviewBody(host, statusEl); return; }
     if (isonetLossSupported()) { renderIsonetLossBody(host, statusEl); return; }
     if (!progressState.enabled) {
       host.innerHTML = '<div class="progress-empty">Live progress is off for this job.</div>';
@@ -2126,6 +2202,20 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   async function refreshProgress() {
     stopProgressPolling();
     if (!progressSupported() || !progressState.enabled) { await renderProgressBody(); return; }
+    if (isonetMaskSupported()) {
+      try {
+        progressState.maskPreview = await api(`/api/runs/${currentRun.run_id}/mask-preview`);
+        await renderProgressBody();
+      } catch (err) {
+        const host = progressContent.querySelector('[data-role="prog-body"]');
+        if (host) host.innerHTML = `<div class="progress-empty">Could not read progress: ${escapeHtml(err.message)}</div>`;
+      }
+      if (currentRun && !["completed", "failed", "aborted"].includes(currentRun.status)
+          && progressState.enabled) {
+        progressTimer = setTimeout(refreshProgress, PROGRESS_POLL_MS);
+      }
+      return;
+    }
     if (isonetLossSupported()) {
       // No .../progress call here on purpose -- that endpoint's own
       // supported===false branch below would hide this tab right back,
@@ -2388,8 +2478,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       if (msg.type === "stdout") {
         // The backend says this once a waiting job's dependencies are done.
         if (currentRun && msg.line.startsWith("[RELION-US] Waited for")) currentRun.waiting = false;
-        appendOutputLine(msg.line, false);
-      } else if (msg.type === "stderr") appendOutputLine(msg.line, true);
+        appendOutputLine(msg.line, false, !!msg.replace);
+      } else if (msg.type === "stderr") appendOutputLine(msg.line, true, !!msg.replace);
       else if (msg.type === "status") {
         if (currentRun && msg.status !== "queued") currentRun.waiting = false;
         statusLine.textContent = `Status: ${msg.status}` +
@@ -5957,6 +6047,10 @@ const PROGRESS_JOB_TYPES = new Set([
 // progress.PROGRESS_JOBS counterpart at all, and never should (that
 // endpoint is RELION-iteration-STAR-specific).
 const ISONET_LOSS_JOB_TYPES = new Set(["IsonetDenoise", "IsonetRefine", "DeepETPickerTrain"]);
+
+// Make Mask's Progress tab shows a picture of the first mask (see
+// isonetMaskSupported).
+const ISONET_MASK_JOB_TYPES = new Set(["IsonetMakeMask"]);
 
 // The exact filenames IsoNet2 itself writes (IsoNet/models/train.py's
 // plot_metrics() call: loss_{split}.png, split="full" for Denoise's n2n,

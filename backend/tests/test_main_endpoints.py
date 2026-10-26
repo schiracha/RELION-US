@@ -1155,7 +1155,7 @@ def test_draft_endpoint_returns_notes_for_dropped_motioncor3_options(client):
 # ---------------------------------------------------------------------------
 # Live output / errors for a run the backend is NOT holding in memory (one
 # started before a restart). The socket used to answer a bare "Unknown run_id",
-# which the popup printed into the Errors tab and live output of every
+# which the popup printed into the Alerts tab and live output of every
 # reopened job.
 # ---------------------------------------------------------------------------
 
@@ -1253,3 +1253,29 @@ def test_a_running_entry_whose_process_is_gone_says_so_instead_of_following(clie
         msgs = _drain(ws)
     lines = [m["line"] for m in msgs if m["type"] == "stdout"]
     assert lines[0] == "last words" and "no longer running" in lines[-1]
+
+
+def test_a_redrawn_bar_in_a_followed_log_is_sent_as_a_replacement(client, monkeypatch):
+    """After a restart the popup follows run.err; a progress bar redrawn in
+    the file reaches it as ONE line plus replacements, not a line per redraw."""
+    import subprocess
+
+    monkeypatch.setattr(main, "FOLLOW_SAVED_POLL_S", 0.1)
+    project = main.run_manager.project_dir
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "Train/job007/"])
+    try:
+        job_dir = _saved_run(project, status="running", pid=proc.pid, err="INFO begin\nEpoch 1: 1%\r")
+        with client.websocket_connect("/ws/runs/saved7") as ws:
+            first = []
+            while not any(m["type"] == "stdout" and "not tracked live" in m["line"] for m in first):
+                first.append(ws.receive_json())
+            assert [m["line"] for m in first if m["type"] == "stderr"] == ["INFO begin", "Epoch 1: 1%"]
+            with open(job_dir / "run.err", "ab") as f:
+                f.write(b"Epoch 1: 2%\rEpoch 1: 3%\r")
+            assert ws.receive_json() == {"type": "stderr", "line": "Epoch 1: 3%", "replace": True}
+            with open(job_dir / "run.err", "ab") as f:
+                f.write(b"Epoch 1: 100%\nINFO done\n")
+            assert ws.receive_json() == {"type": "stderr", "line": "Epoch 1: 100%", "replace": True}
+            assert ws.receive_json() == {"type": "stderr", "line": "INFO done"}
+    finally:
+        proc.kill()

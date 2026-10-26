@@ -602,8 +602,11 @@ def test_subprocess_surviving_a_carriage_return_animated_progress_line(tmp_path)
 
     run = asyncio.run(go())
     assert run.status == STATUS_COMPLETED, (run.status, run.stderr_lines[-3:])
-    assert len(run.stdout_lines) == n_lines + 1, len(run.stdout_lines)
-    assert run.stdout_lines[-1] == "done-marker"
+    # Half a million redraws of one line are one line, like on a terminal (see
+    # LogFollower) -- the "done-marker" that finally overwrote it is all there
+    # is to show. Nothing was lost: the saved file still has every redraw.
+    assert run.stdout_lines == ["done-marker"], len(run.stdout_lines)
+    assert (Path(run.cwd) / "run.out").read_bytes().count(b"\r") == n_lines
     assert not any("output stream error" in line for line in run.stderr_lines)
 
 

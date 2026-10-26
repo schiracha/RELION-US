@@ -1,7 +1,7 @@
 """
 Playwright suite for job popups and the Command Center: opening/closing
 popups, the standard-fields form, the SPA/Tomo/All sidebar filter, running a
-job to completion (toolbar states, Outputs/Source/Errors tabs, rename,
+job to completion (toolbar states, Outputs/Source/Alerts tabs, rename,
 timeline view, table sort, delete), aborting a genuinely long-running
 process (with a server-side process-group kill check), and the
 overwrite/mark-finished/mark-failed flows.
@@ -170,7 +170,7 @@ with sync_playwright() as p:
     check("Timeline view hidden by default", not page.locator("#ccTimelineView").is_visible())
     check("Empty-state message shown in table", page.locator("#ccTableEmpty").is_visible())
 
-    # ==== run a job to completion: toolbar states, Outputs/Source/Errors ===
+    # ==== run a job to completion: toolbar states, Outputs/Source/Alerts ===
     page.locator(".job-item", has_text="Import Tomo Tilt Series").first.click()
     page.wait_for_selector(".winbox", timeout=5000)
     win1 = page.locator(".winbox").first
@@ -209,9 +209,9 @@ with sync_playwright() as p:
     source_text = win1.locator('[data-tab-content="source"] .source-pre').inner_text()
     check("Source tab shows non-empty RELION source", len(source_text.strip()) > 0)
 
-    win1.locator('.tab-btn[data-tab="errors"]').click()
+    win1.locator('.tab-btn[data-tab="alerts"]').click()
     page.wait_for_timeout(200)
-    check("Errors tab present", win1.locator('[data-tab-content="errors"]').is_visible())
+    check("Alerts tab present", win1.locator('[data-tab-content="alerts"]').is_visible())
 
     # --- Rename (Alias) / Collapse ---
     page.once("dialog", lambda d: d.accept())  # safety net; app uses custom dialogs, not native

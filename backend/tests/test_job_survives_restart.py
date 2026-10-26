@@ -84,7 +84,7 @@ def test_output_goes_to_the_job_files_and_is_still_streamed(project):
     job_dir = Path(run.cwd)
     assert (job_dir / "run.out").read_text().splitlines()[0] == "out1"
     assert "err1" in (job_dir / "run.err").read_text()
-    assert run.stdout_lines == ["out1", "a", "b", "c"]          # CR-separated progress stays separate lines
+    assert run.stdout_lines == ["out1", "c"]                    # a \r-redrawn line is kept as its last state
     assert run.stderr_lines == ["err1"]
     assert run.status == STATUS_COMPLETED and run.exit_code == 0
 
@@ -287,3 +287,80 @@ def test_a_hand_written_command_without_the_job_directory_is_still_recognised_as
     assert JobRunManager._pid_matches_persisted_run(entry["pid"], entry) is True
     assert JobRunManager._pid_matches_persisted_run(entry["pid"], {**entry, "run_id": "someone-else", "cwd": str(project / "X/job9")}) is False
     time.sleep(1.6)
+
+
+# --------------------------------------------------------------------------
+# Progress bars redrawn in place (tqdm / RELION): one line, not thousands
+# --------------------------------------------------------------------------
+
+def test_a_progress_bar_redrawn_in_place_stays_one_line_in_the_buffer_and_the_stream(project):
+    manager = JobRunManager(project)
+
+    async def go():
+        queue = asyncio.Queue()
+        run = await manager.start_subprocess_job(
+            "Import", "Import",
+            # bar redrawn, a pause long enough for the tail to hand it out, redrawn again, then ordinary lines
+            "printf 'bar 1\\rbar 2\\r' >&2; sleep 0.7; printf 'bar 3\\rbar 4\\n' >&2; echo end >&2",
+            subdir="Import/job001")
+        run.subscribers.append(queue)
+        assert await until(lambda: run.status in TERMINAL)
+        await asyncio.sleep(0.4)
+        messages = []
+        while not queue.empty():
+            messages.append(queue.get_nowait())
+        return run, messages
+
+    run, messages = asyncio.run(go())
+    assert run.stderr_lines == ["bar 4", "end"]
+    errs = [m for m in messages if m["type"] == "stderr"]
+    assert errs[0] == {"type": "stderr", "line": "bar 2"}
+    assert {"type": "stderr", "line": "bar 4", "replace": True} in errs     # overwrites "bar 2" on screen
+    assert errs[-1] == {"type": "stderr", "line": "end"}
+
+
+def test_a_thousand_redraws_are_stored_as_one_line(project):
+    manager = JobRunManager(project)
+
+    async def go():
+        run = await manager.start_subprocess_job(
+            "Import", "Import", "i=0; while [ $i -lt 1000 ]; do printf \"step $i\\r\" >&2; i=$((i+1)); done; echo >&2",
+            subdir="Import/job001")
+        assert await until(lambda: run.status in TERMINAL)
+        return run
+
+    run = asyncio.run(go())
+    assert run.stderr_lines == ["step 999"]
+    assert (Path(run.cwd) / "run.err").read_bytes().count(b"\r") == 1000      # the file itself is untouched
+
+
+def test_subprocess_jobs_get_a_tqdm_throttle_unless_the_user_set_one(project, monkeypatch):
+    manager = JobRunManager(project)
+
+    async def go(subdir):
+        run = await manager.start_subprocess_job("Import", "Import", "echo $TQDM_MININTERVAL", subdir=subdir)
+        assert await until(lambda: run.status in TERMINAL)
+        return run.stdout_lines
+
+    monkeypatch.delenv("TQDM_MININTERVAL", raising=False)
+    assert asyncio.run(go("Import/job001")) == [job_runner.TQDM_MININTERVAL_S]
+    monkeypatch.setenv("TQDM_MININTERVAL", "7")
+    assert asyncio.run(go("Import/job002")) == ["7"]
+
+
+def test_a_slurm_style_chunk_with_redraws_shows_only_the_last_state(project):
+    """The SLURM tail splits on newline only; a bar redrawn inside one line
+    must not reach the screen as a line full of \\r."""
+    manager = JobRunManager(project)
+    log = project / "slurm.err"
+    log.write_bytes(b"bar 1\rbar 2\rbar 3\nnext\r\nlast\n")
+
+    class FakeRun:
+        stdout_lines, stderr_lines = [], []
+
+        async def broadcast(self, message):
+            pass
+
+    run = FakeRun()
+    asyncio.run(manager._tail_new_lines(run, log, 0, "stderr"))
+    assert run.stderr_lines == ["bar 3", "next", "last"]

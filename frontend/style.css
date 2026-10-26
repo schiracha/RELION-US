@@ -871,8 +871,12 @@ html, body {
   width: 110px; background: var(--panel-alt); border: 1px solid var(--border);
   color: var(--text); padding: 3px 5px; border-radius: 3px; font-family: inherit; font-size: 11px;
 }
-.source-pre, .errors-pre { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-dim); margin: 0; }
-.errors-pre.has-errors { color: var(--err); }
+.source-pre, .alerts-pre { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-dim); margin: 0; }
+.alerts-pre.has-alerts { color: var(--err); }
+.alerts-pre[data-trimmed]::before, .progress-live-output-body[data-trimmed]::before {
+  content: "\2026  " attr(data-trimmed) " earlier lines not shown \2014  the whole log is in the job folder (run.out / run.err)";
+  display: block; color: var(--text-dim); font-style: italic; margin-bottom: 4px;
+}
 
 /* Pinned to the bottom of the popup (a sibling of tab-content-area, not
    nested inside the Inputs tab-content) so it stays put and resizable

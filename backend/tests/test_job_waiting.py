@@ -351,7 +351,7 @@ from job_runner import LogFollower  # noqa: E402
 
 def test_log_follower_missing_file_is_empty(tmp_path):
     f = LogFollower(tmp_path / "nope.out")
-    assert f.initial() == ([], False) and f.new_lines() == []
+    assert f.initial() == ([], False) and f.new_entries() == []
 
 
 def test_log_follower_returns_the_whole_small_file_then_only_new_lines(tmp_path):
@@ -359,19 +359,55 @@ def test_log_follower_returns_the_whole_small_file_then_only_new_lines(tmp_path)
     p.write_text("a\nb\n")
     f = LogFollower(p)
     assert f.initial() == (["a", "b"], False)
-    assert f.new_lines() == []
+    assert f.new_entries() == []
     with open(p, "a") as fh:
         fh.write("c\nd")
-    assert f.new_lines() == ["c"]            # "d" is unfinished: held back
+    assert f.new_entries() == [("c", False)]            # "d" is unfinished: held back
     with open(p, "a") as fh:
         fh.write("\n")
-    assert f.new_lines() == ["d"]
+    assert f.new_entries() == [("d", False)]
 
 
-def test_log_follower_splits_progress_bar_carriage_returns(tmp_path):
+def test_log_follower_shows_a_redrawn_progress_bar_as_one_line(tmp_path):
+    """tqdm / RELION rewrite one line with \\r; like a terminal, only its last
+    state is a line -- a training's thousands of redraws must not become
+    thousands of lines in the live output and the Alerts tab."""
     p = tmp_path / "run.out"
-    p.write_bytes(b"1/200\r2/200\r3/200\rdone\n")
-    assert LogFollower(p).initial()[0] == ["1/200", "2/200", "3/200", "done"]
+    p.write_bytes(b"start\n1/200\r2/200\r3/200\rdone\nnext\n")
+    assert LogFollower(p).initial()[0] == ["start", "done", "next"]
+    p.write_bytes(b"1/200\r2/200\r3/200\r")
+    assert LogFollower(p).initial()[0] == ["3/200"]                 # still being redrawn
+
+
+def test_log_follower_marks_a_redraw_of_a_line_already_handed_out(tmp_path):
+    p = tmp_path / "run.err"
+    p.write_bytes(b"INFO begin\nEpoch 1: 1%\r")
+    f = LogFollower(p)
+    assert f.initial()[0] == ["INFO begin", "Epoch 1: 1%"] and f.open_line
+    with open(p, "ab") as fh:
+        fh.write(b"Epoch 1: 2%\rEpoch 1: 3%\r")
+    assert f.new_entries() == [("Epoch 1: 3%", True)]               # overwrites the bar already shown
+    with open(p, "ab") as fh:
+        fh.write(b"Epoch 1: 100%\nINFO next\n")
+    assert f.new_entries() == [("Epoch 1: 100%", True), ("INFO next", False)]
+    assert not f.open_line
+
+
+def test_log_follower_crlf_is_one_ordinary_line_break(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_bytes(b"a\r\nb\r\n\r\nc\n")
+    assert LogFollower(p).initial()[0] == ["a", "b", "", "c"]
+
+
+def test_log_follower_flush_gives_the_unfinished_last_line_once(tmp_path):
+    p = tmp_path / "run.out"
+    p.write_bytes(b"bar 1\rbar 2\r")
+    f = LogFollower(p).start_at_end()
+    with open(p, "ab") as fh:
+        fh.write(b"bar 3\rlast words")
+    assert f.new_entries() == [("bar 3", False)]
+    assert f.flush() == ("last words", True)       # redraws the bar still on screen
+    assert f.flush() is None
 
 
 def test_log_follower_keeps_only_the_tail_of_a_big_file(tmp_path):
@@ -389,7 +425,7 @@ def test_log_follower_restarts_when_the_file_is_replaced(tmp_path):
     f = LogFollower(p)
     f.initial()
     p.write_text("new\n")                    # shorter than before: an Overwrite started over
-    assert f.new_lines() == ["new"]
+    assert f.new_entries() == [("new", False)]
 
 
 # --------------------------------------------------------------------------

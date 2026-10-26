@@ -4,7 +4,7 @@ custom_jobs.py — wires the IMOD / Warp-M / DeepETPicker / AreTomo2 import brid
 into this app's Jobs list as four more job types, run the same way as
 every RELION job: a popup with an Inputs tab (standard inputs, plus an
 Advanced section for options the GUI never shows), live output, and an
-Errors tab.
+Alerts tab.
 
 These don't spawn a relion_* subprocess — they call directly into
 converters/ in a worker thread (via asyncio.to_thread, since pandas/

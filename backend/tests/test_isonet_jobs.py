@@ -304,7 +304,11 @@ def test_start_run_over_http_builds_the_real_command_when_none_is_given(client):
     then the user never touched a field) can still POST with no `command` --
     main.py's ISONET_JOB_DEFINITIONS branch falls back to building it fresh
     via build_isonet_command, the same as the draft endpoint would have."""
-    resp = client.post("/api/runs", json={"internal_name": "IsonetPrepareStar"})
+    full = Path(main.run_manager.project_dir) / "Tomograms"
+    full.mkdir()
+    (full / "TS_1.mrc").write_bytes(b"")
+    resp = client.post("/api/runs", json={"internal_name": "IsonetPrepareStar",
+                                          "field_values": {"full": "Tomograms"}})
     assert resp.status_code == 200
     run = resp.json()
     assert run["command"].split()[6] == "prepare_star"
@@ -395,3 +399,385 @@ def test_a_stale_or_garbled_isoapp_config_is_ignored(tmp_path, monkeypatch):
     for text in ("not json", json.dumps({"IsoNetPath": "/nonexistent"}), json.dumps({"IsoNetPath": ""}), "[]"):
         (cfg / "environment.json").write_text(text)
         assert find_isonet_dir() is None
+
+
+# ---------------------------------------------------------------------------
+# Prepare Star from a RELION tomograms STAR. RELION keeps full tomograms and
+# both half-maps in ONE folder; isonet.py prepare_star wants one folder per
+# kind and pairs them by sorted name, so pointing it at RELION's folder gave a
+# star whose rows were a mix of full/half1/half2 files (reported on a real
+# project: "Number of tomograms: 23" for 8 tomograms, Half1 == Half2).
+# ---------------------------------------------------------------------------
+
+import pandas as pd
+import starfile
+
+from converters import stage_isonet_tomograms as stager
+from isonet_jobs import STAGED_DIRNAME, validate_isonet_fields
+
+
+def _relion_tomograms(project, names=("TS_001", "TS_002"), full=True, halves=True, folder="Tomograms/job018/tomograms"):
+    """A RELION-style project: one folder holding <n>.mrc, <n>_half1.mrc and
+    <n>_half2.mrc, and the tomograms.star that says which is which."""
+    d = project / folder
+    d.mkdir(parents=True, exist_ok=True)
+    rows = {"rlnTomoName": list(names)}
+    for n in names:
+        for suffix in ("", "_half1", "_half2"):
+            (d / f"{n}{suffix}.mrc").write_bytes(b"x")
+    if full:
+        rows["rlnTomoReconstructedTomogram"] = [f"{folder}/{n}.mrc" for n in names]
+    if halves:
+        rows["rlnTomoReconstructedTomogramHalf1"] = [f"{folder}/{n}_half1.mrc" for n in names]
+        rows["rlnTomoReconstructedTomogramHalf2"] = [f"{folder}/{n}_half2.mrc" for n in names]
+    star = project / "Tomograms" / "job018" / "tomograms.star"
+    starfile.write({"global": pd.DataFrame(rows)}, star, overwrite=True)
+    return star
+
+
+def test_stage_makes_one_folder_per_kind_with_matching_names(tmp_path):
+    star = _relion_tomograms(tmp_path)
+    made = stager.stage(star, tmp_path / "out", project_dir=tmp_path)
+    assert set(made) == {"full", "even", "odd"}
+    for kind, suffix in (("full", ""), ("even", "_half1"), ("odd", "_half2")):
+        folder = tmp_path / "out" / kind
+        assert sorted(p.name for p in folder.iterdir()) == ["TS_001.mrc", "TS_002.mrc"]
+        assert (folder / "TS_001.mrc").resolve() == (tmp_path / f"Tomograms/job018/tomograms/TS_001{suffix}.mrc").resolve()
+
+
+def test_stage_rerun_replaces_its_own_links_only(tmp_path):
+    star = _relion_tomograms(tmp_path)
+    stager.stage(star, tmp_path / "out", project_dir=tmp_path)
+    stager.stage(star, tmp_path / "out", project_dir=tmp_path)           # a re-run is fine
+    (tmp_path / "out" / "even" / "TS_001.mrc").unlink()
+    (tmp_path / "out" / "even" / "TS_001.mrc").write_bytes(b"a real file")
+    with pytest.raises(FileExistsError):
+        stager.stage(star, tmp_path / "out", project_dir=tmp_path)
+    assert (tmp_path / "out" / "even" / "TS_001.mrc").read_bytes() == b"a real file"
+
+
+def test_stage_only_makes_the_kinds_the_star_has(tmp_path):
+    only_halves = _relion_tomograms(tmp_path, full=False)
+    assert set(stager.stage(only_halves, tmp_path / "a", project_dir=tmp_path)) == {"even", "odd"}
+    only_full = _relion_tomograms(tmp_path, halves=False)
+    assert set(stager.stage(only_full, tmp_path / "b", project_dir=tmp_path)) == {"full"}
+
+
+def test_stage_alternative_full_column(tmp_path):
+    star = _relion_tomograms(tmp_path)
+    df = starfile.read(star, always_dict=True)["global"]
+    df["rlnTomoReconstructedTomogramDenoised"] = [f"Tomograms/job018/tomograms/{n}_half1.mrc" for n in df["rlnTomoName"]]
+    starfile.write({"global": df}, star, overwrite=True)
+    stager.stage(star, tmp_path / "out", project_dir=tmp_path, full_column="rlnTomoReconstructedTomogramDenoised")
+    assert (tmp_path / "out" / "full" / "TS_001.mrc").resolve().name == "TS_001_half1.mrc"
+
+
+def test_stage_errors_are_plain(tmp_path):
+    star = _relion_tomograms(tmp_path)
+    df = starfile.read(star, always_dict=True)["global"].drop(columns=["rlnTomoReconstructedTomogramHalf2"])
+    df = df.drop(columns=["rlnTomoReconstructedTomogram"])
+    starfile.write({"global": df}, star, overwrite=True)
+    with pytest.raises(ValueError, match="only one of the two half-map columns"):
+        stager.columns_for(star)
+    broken = _relion_tomograms(tmp_path, folder="Tomograms/job018/tomograms")
+    (tmp_path / "Tomograms/job018/tomograms/TS_002.mrc").unlink()
+    with pytest.raises(FileNotFoundError, match="TS_002"):
+        stager.stage(broken, tmp_path / "out2", project_dir=tmp_path)
+    assert stager.main(["--star", str(broken), "--out", str(tmp_path / "out3"), "--project_dir", str(tmp_path)]) == 1
+
+
+def test_prepare_star_command_stages_first_then_points_isonet_at_the_staged_folders(tmp_path):
+    star = _relion_tomograms(tmp_path)
+    cmd = build_isonet_command("IsonetPrepareStar", {"relion_star": "Tomograms/job018/tomograms.star"},
+                               "IsonetPrepareStar/job033", project_dir=tmp_path)
+    stage_part, isonet_part = cmd.split(" && ")
+    assert "stage_isonet_tomograms.py" in stage_part
+    assert "--star Tomograms/job018/tomograms.star --out IsonetPrepareStar/job033/staged" in stage_part
+    tokens = isonet_part.split()
+    for kind in ("full", "even", "odd"):
+        assert tokens[tokens.index(f"--{kind}") + 1] == f"IsonetPrepareStar/job033/{STAGED_DIRNAME}/{kind}"
+    assert "create_average" not in cmd and "--relion_star" not in cmd
+
+
+def test_prepare_star_command_passes_only_what_the_star_has(tmp_path):
+    _relion_tomograms(tmp_path, full=False)
+    cmd = build_isonet_command("IsonetPrepareStar", {"relion_star": "Tomograms/job018/tomograms.star"},
+                               "IsonetPrepareStar/job033", project_dir=tmp_path)
+    assert "--even" in cmd and "--odd" in cmd and "--full" not in cmd
+
+
+def test_prepare_star_command_with_a_denoised_full_column(tmp_path):
+    _relion_tomograms(tmp_path)
+    cmd = build_isonet_command("IsonetPrepareStar", {"relion_star": "t.star",
+                                                     "relion_tomo_column": "rlnTomoReconstructedTomogramDenoised"},
+                               "IsonetPrepareStar/job033", project_dir=tmp_path)
+    assert "--full_column rlnTomoReconstructedTomogramDenoised" in cmd.split(" && ")[0]
+
+
+def test_prepare_star_folder_mode_is_unchanged():
+    cmd = build_isonet_command("IsonetPrepareStar", {"full": "A/full"}, "IsonetPrepareStar/job001")
+    assert cmd.startswith("conda run ") and "--full A/full" in cmd and "stage_isonet" not in cmd
+
+
+def test_validation_accepts_a_relion_star_and_proper_folders(tmp_path):
+    _relion_tomograms(tmp_path)
+    assert validate_isonet_fields("IsonetPrepareStar", {"relion_star": "Tomograms/job018/tomograms.star"}, tmp_path) == []
+    for k in ("full", "even", "odd"):
+        (tmp_path / k).mkdir()
+        (tmp_path / k / "a.mrc").write_bytes(b"")
+    assert validate_isonet_fields("IsonetPrepareStar", {"full": "full", "even": "even", "odd": "odd"}, tmp_path) == []
+
+
+def test_validation_rejects_the_same_folder_as_even_and_odd(tmp_path):
+    """The reported case: --even and --odd both Tomograms/job018/tomograms/."""
+    _relion_tomograms(tmp_path)
+    problems = validate_isonet_fields("IsonetPrepareStar",
+                                      {"even": "Tomograms/job018/tomograms/", "odd": "Tomograms/job018/tomograms"}, tmp_path)
+    assert any("same folder" in p for p in problems)
+    assert any("mixes full tomograms" in p for p in problems)
+
+
+def test_validation_rejects_a_folder_mixing_full_and_half_maps(tmp_path):
+    _relion_tomograms(tmp_path)
+    problems = validate_isonet_fields("IsonetPrepareStar", {"full": "Tomograms/job018/tomograms"}, tmp_path)
+    assert len(problems) == 1 and "RELION tomograms STAR" in problems[0]
+
+
+def test_validation_folder_counts_and_pairing(tmp_path):
+    for k, n in (("even", 2), ("odd", 3)):
+        (tmp_path / k).mkdir()
+        for i in range(n):
+            (tmp_path / k / f"t{i}.mrc").write_bytes(b"")
+    problems = validate_isonet_fields("IsonetPrepareStar", {"even": "even", "odd": "odd"}, tmp_path)
+    assert any("different numbers of files" in p for p in problems)
+    assert any("together" in p for p in validate_isonet_fields("IsonetPrepareStar", {"even": "even"}, tmp_path))
+
+
+def test_validation_requires_some_input_and_not_two_kinds(tmp_path):
+    _relion_tomograms(tmp_path)
+    assert validate_isonet_fields("IsonetPrepareStar", {}, tmp_path)
+    assert validate_isonet_fields("IsonetPrepareStar", {"relion_star": "Tomograms/job018/tomograms.star",
+                                                        "full": "Tomograms"}, tmp_path)
+    assert any("not found" in p for p in validate_isonet_fields("IsonetPrepareStar", {"relion_star": "nope.star"}, tmp_path))
+    assert validate_isonet_fields("IsonetDeconv", {}, tmp_path) == []
+
+
+def test_run_over_http_rejects_a_mixed_folder_before_creating_the_job(client):
+    project = Path(main.run_manager.project_dir)
+    _relion_tomograms(project)
+    resp = client.post("/api/runs", json={"internal_name": "IsonetPrepareStar",
+                                          "field_values": {"even": "Tomograms/job018/tomograms",
+                                                           "odd": "Tomograms/job018/tomograms"}})
+    assert resp.status_code == 400 and "same folder" in resp.json()["detail"]
+    assert not (project / "IsonetPrepareStar").exists()
+
+
+# ---------------------------------------------------------------------------
+# snrfalloff: IsoNet's own default is 1 for deconv but 0 for denoise/refine.
+# A default equal to the UI default is left off the command, so a UI default
+# of 1.0 on Denoise/Refine showed 1.0 and ran with 0.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,real_default", [("IsonetDeconv", 1.0), ("IsonetDenoise", 0.0), ("IsonetRefine", 0.0)])
+def test_snrfalloff_default_matches_isonet(name, real_default):
+    option = next(o for o in ISONET_JOB_DEFINITIONS[name]["options"] if o["key"] == "snrfalloff")
+    assert option["default"] == real_default
+    cmd = build_isonet_command(name, {"star_file": "X/tomograms.star"}, f"{name}/job001")
+    assert "--snrfalloff" not in cmd                              # equals IsoNet's default: left off
+    other = 1.0 if real_default == 0.0 else 0.0
+    assert f"--snrfalloff {other}" in build_isonet_command(
+        name, {"star_file": "X/tomograms.star", "snrfalloff": other}, f"{name}/job001")
+
+
+@pytest.mark.skipif(not (Path.home() / "IsoNet2-IsoNet-2.0.0-beta/IsoNet/bin/isonet.py").is_file(),
+                    reason="needs a real IsoNet2 install")
+def test_every_default_matches_the_real_isonet_signature():
+    """Read isonet.py's own signatures: any option whose UI default differs
+    from IsoNet's (beyond float/str spelling) would silently run differently
+    from what the popup shows."""
+    import ast
+    src = (Path.home() / "IsoNet2-IsoNet-2.0.0-beta/IsoNet/bin/isonet.py").read_text()
+    sigs = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef):
+            a = node.args
+            names = [x.arg for x in a.args]
+            defaults = [None] * (len(names) - len(a.defaults)) + [ast.literal_eval(d) for d in a.defaults]
+            sigs[node.name] = dict(zip(names, defaults))
+    def same(ui, real):
+        if real is None:
+            return str(ui).strip() == ""
+        if isinstance(real, list):                      # defocus: [10000] <-> "10000"
+            return str(ui).strip() == ",".join(str(x) for x in real)
+        try:
+            return float(ui) == float(real)
+        except (TypeError, ValueError):
+            return str(ui) == str(real)
+    for name, d in ISONET_JOB_DEFINITIONS.items():
+        real = sigs[d["subcommand"]]
+        for o in d["options"]:
+            if o["key"] in real and o["key"] != "star_file" and "default" in o and not isinstance(o["default"], bool):
+                assert same(o["default"], real[o["key"]]), (name, o["key"], o["default"], real[o["key"]])
+
+
+def _real_mrc_tomograms(project, voxel=10.0):
+    import mrcfile
+    import numpy as np
+    folder = project / "Tomograms" / "job018" / "tomograms"
+    folder.mkdir(parents=True)
+    for n, base in (("TS_001", 1.0), ("TS_002", 5.0)):
+        for suffix, add in (("_half1", 0.0), ("_half2", 2.0)):
+            with mrcfile.new(folder / f"{n}{suffix}.mrc", overwrite=True) as m:
+                m.set_data(np.full((4, 5, 6), base + add, dtype=np.float32))
+                m.voxel_size = voxel
+    star = project / "Tomograms" / "job018" / "tomograms.star"
+    names = ["TS_001", "TS_002"]
+    starfile.write({"global": pd.DataFrame({
+        "rlnTomoName": names,
+        "rlnTomoReconstructedTomogramHalf1": [f"Tomograms/job018/tomograms/{n}_half1.mrc" for n in names],
+        "rlnTomoReconstructedTomogramHalf2": [f"Tomograms/job018/tomograms/{n}_half2.mrc" for n in names]})},
+        star, overwrite=True)
+    return star
+
+
+def test_stage_average_sums_the_halves_into_the_job_folder(tmp_path):
+    import mrcfile
+    star = _real_mrc_tomograms(tmp_path, voxel=10.0)
+    made = stager.stage(star, tmp_path / "out", project_dir=tmp_path, average=True)
+    assert set(made) == {"full", "even", "odd"}
+    full = tmp_path / "out" / "full" / "TS_002.mrc"
+    assert not full.is_symlink()
+    with mrcfile.open(full) as m:
+        assert float(m.data[0, 0, 0]) == 5.0 + 7.0 and m.data.dtype.name == "float32"
+        assert float(m.voxel_size.x) == 10.0
+    stager.stage(star, tmp_path / "out", project_dir=tmp_path, average=True)      # a re-run replaces them
+    assert sorted(p.name for p in (tmp_path / "out" / "full").iterdir()) == ["TS_001.mrc", "TS_002.mrc"]
+
+
+def test_stage_without_average_leaves_a_half_only_star_without_full(tmp_path):
+    star = _real_mrc_tomograms(tmp_path)
+    assert set(stager.stage(star, tmp_path / "out", project_dir=tmp_path)) == {"even", "odd"}
+
+
+def test_prepare_star_command_average_option_goes_to_the_staging_step(tmp_path):
+    _real_mrc_tomograms(tmp_path)
+    star = "Tomograms/job018/tomograms.star"
+    plain = build_isonet_command("IsonetPrepareStar", {"relion_star": star}, "IsonetPrepareStar/job033", project_dir=tmp_path)
+    avg = build_isonet_command("IsonetPrepareStar", {"relion_star": star, "create_average": True},
+                               "IsonetPrepareStar/job033", project_dir=tmp_path)
+    assert "--full" not in plain and "--average" not in plain
+    stage_part, isonet_part = avg.split(" && ")
+    assert "--average" in stage_part
+    assert "--full IsonetPrepareStar/job033/staged/full" in isonet_part and "--create_average" not in avg
+
+
+# ---------------------------------------------------------------------------
+# Deconv on a Prepare Star output that has no full tomograms (reported:
+# FileNotFoundError: 'None' eight rows into a run).
+# ---------------------------------------------------------------------------
+
+def _prepared_star(tmp_path, tomo_names):
+    path = tmp_path / "IsonetPrepareStar" / "job033" / "tomograms.star"
+    path.parent.mkdir(parents=True)
+    starfile.write(pd.DataFrame({"rlnIndex": range(1, len(tomo_names) + 1), "rlnTomoName": tomo_names,
+                                 "rlnPixelSize": [10.0] * len(tomo_names)}), path, overwrite=True)
+    return "IsonetPrepareStar/job033/tomograms.star"
+
+
+def test_deconv_refuses_a_star_whose_full_tomograms_are_none(tmp_path):
+    star = _prepared_star(tmp_path, ["None", "None", "None"])
+    problems = validate_isonet_fields("IsonetDeconv", {"star_file": star}, tmp_path)
+    assert len(problems) == 1
+    assert "1, 2, 3" in problems[0] and "3 of 3" in problems[0] and "averaged full tomograms" in problems[0]
+
+
+def test_deconv_only_checks_the_rows_it_will_process(tmp_path):
+    star = _prepared_star(tmp_path, ["a.mrc", "None", "c.mrc"])
+    for n in ("a.mrc", "c.mrc"):
+        (tmp_path / n).write_bytes(b"")
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": star, "tomo_idx": "1,3"}, tmp_path) == []
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": star, "tomo_idx": "2"}, tmp_path)
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": star, "tomo_idx": "1-3"}, tmp_path)
+
+
+def test_deconv_accepts_a_good_star_and_ignores_one_that_isnt_there_yet(tmp_path):
+    star = _prepared_star(tmp_path, ["a.mrc", "b.mrc"])
+    for n in ("a.mrc", "b.mrc"):
+        (tmp_path / n).write_bytes(b"")
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": star}, tmp_path) == []
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": "IsonetPrepareStar/job099/tomograms.star"}, tmp_path) == []
+    assert validate_isonet_fields("IsonetDeconv", {}, tmp_path) == []
+
+
+def test_deconv_names_a_missing_input_column(tmp_path):
+    star = _prepared_star(tmp_path, ["a.mrc"])
+    problems = validate_isonet_fields("IsonetDeconv", {"star_file": star, "input_column": "rlnNope"}, tmp_path)
+    assert problems and "rlnNope" in problems[0]
+
+
+def test_the_same_number_written_differently_is_still_the_default():
+    """The popup stored "1" for a slider whose default is 1.0, which put a
+    redundant --snrfalloff 1 --deconvstrength 1 on the command."""
+    cmd = build_isonet_command("IsonetDeconv", {"star_file": "X/tomograms.star", "snrfalloff": "1", "deconvstrength": 1},
+                               "IsonetDeconv/job001")
+    assert "--snrfalloff" not in cmd and "--deconvstrength" not in cmd
+    assert "--snrfalloff 2" in build_isonet_command(
+        "IsonetDeconv", {"star_file": "X/tomograms.star", "snrfalloff": "2"}, "IsonetDeconv/job001")
+
+
+def test_deconv_refuses_tomogram_paths_that_do_not_exist(tmp_path):
+    """The STAR looks fine but its files are gone (a deleted/cleaned Prepare
+    Star job, or a STAR copied from another project)."""
+    star = _prepared_star(tmp_path, ["IsonetPrepareStar/job033/staged/full/a.mrc", "b.mrc"])
+    (tmp_path / "b.mrc").write_bytes(b"")
+    problems = validate_isonet_fields("IsonetDeconv", {"star_file": star}, tmp_path)
+    assert len(problems) == 1 and "1 of 2" in problems[0] and "staged/full/a.mrc" in problems[0]
+    assert validate_isonet_fields("IsonetDeconv", {"star_file": star, "tomo_idx": "2"}, tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# Make Mask's Progress tab: GET /api/runs/{id}/mask-preview (see mask_preview.py)
+# ---------------------------------------------------------------------------
+
+def _start_trivial_run(client, internal_name, field_values=None):
+    """A real run of `internal_name` whose command is harmless, so there is a
+    run record with a job directory to put masks in."""
+    resp = client.post("/api/runs", json={"internal_name": internal_name, "command": "true",
+                                          "field_values": field_values or {}})
+    assert resp.status_code == 200, resp.text
+    run = resp.json()
+    _wait_for_status(client, run["run_id"], {"completed", "failed"})
+    return run
+
+
+def test_mask_preview_endpoint_draws_the_first_mask_of_a_make_mask_run(client):
+    import mrcfile
+    import numpy as np
+    project = Path(main.run_manager.project_dir)
+    run = _start_trivial_run(client, "IsonetMakeMask")
+    job = Path(run["cwd"])
+    assert client.get(f"/api/runs/{run['run_id']}/mask-preview").json()["available"] is False
+
+    tomo = project / "Tomo" / "TS_1.mrc"
+    tomo.parent.mkdir()
+    for path, data in ((tomo, np.random.default_rng(1).normal(size=(6, 10, 12)).astype(np.float32)),
+                       (job / "TS_1_mask.mrc", np.ones((6, 10, 12), dtype=np.uint16))):
+        with mrcfile.new(path, overwrite=True) as m:
+            m.set_data(data)
+            m.voxel_size = 10.0
+    old = time.time() - 30
+    os.utime(job / "TS_1_mask.mrc", (old, old))
+    starfile.write(pd.DataFrame({"rlnTomoName": ["Tomo/TS_1.mrc"], "rlnDeconvTomoName": ["Tomo/TS_1.mrc"],
+                                 "rlnPixelSize": [10.0]}), job / "tomograms.star", overwrite=True)
+
+    body = client.get(f"/api/runs/{run['run_id']}/mask-preview").json()
+    assert body["available"] and body["mask"] == "TS_1_mask.mrc" and body["mask_percent"] == 100.0
+    assert body["tomogram"].endswith("Tomo/TS_1.mrc") and body["masks_total"] == 1
+    png = client.get(f"/api/runs/{run['run_id']}/files/download", params={"path": body["file"]})
+    assert png.status_code == 200 and png.content[:4] == b"\x89PNG"
+
+
+def test_mask_preview_endpoint_is_unsupported_for_other_jobs_and_unknown_runs(client):
+    run = _start_trivial_run(client, "IsonetDeconv")
+    assert client.get(f"/api/runs/{run['run_id']}/mask-preview").json() == {"supported": False, "available": False}
+    assert client.get("/api/runs/nope/mask-preview").status_code == 404

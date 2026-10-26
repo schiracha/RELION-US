@@ -437,8 +437,12 @@ between jobs.
 - **Outputs tab** — browse and download individual files, or a `.zip` of any
   selection. Click a `.star` filename to preview its contents inline instead
   of downloading it first.
-- **Errors tab** — fills in live if the run writes to stderr; the tab badge
-  shows a running error count.
+- **Alerts tab** — fills in live with whatever the run writes to stderr (real
+  errors, but also the warnings and INFO logging many tools send there); the tab badge
+  shows a running count of the lines. A progress bar that redraws one line over and
+  over (tqdm, RELION) is shown as that one line, like in a terminal, and each pane keeps
+  only the last 2000 lines on the page, so a long training cannot slow the browser; the
+  whole log stays in the job folder.
 - **RELION Source tab** — the *actual*, unmodified C++ `getCommands<Job>Job()`
   function for this job type, so you can check the draft or edited command
   against RELION's real logic by eye.
@@ -487,7 +491,7 @@ RELION's own source.
 
 **Four import bridges** (`backend/converters/`) — `Import from IMOD (.mod)`,
 `Import from Warp/M`, `Import from DeepETPicker`, and `Import from AreTomo2
-(.aln)`. They use the same popup layout, live output, and Errors tab as any
+(.aln)`. They use the same popup layout, live output, and Alerts tab as any
 RELION job; they just have no command box, since they call directly into
 Python rather than spawning a subprocess. What to double-check before trusting
 each one:
@@ -537,6 +541,19 @@ environment (SLURM submission included), with folder browse buttons for their
 directory inputs and options cross-checked against IsoNet2's own GUI and
 tutorial. **Denoise (Train)** and **Refine (Train)** get a live loss curve on
 their Progress tab; **Predict**'s output MRCs link straight into the viewer.
+**Make Mask**'s Progress tab shows a picture of the *first* mask as soon as it is
+finished (XY and XZ sections through the middle, the tomogram in grey with the
+mask tinted and outlined, plus its coverage and the four settings), so a wrong
+patch size, density, std or z-crop can be caught and the job aborted while the
+other masks are still being made.
+**Prepare Star** takes a RELION `tomograms.star` directly: IsoNet wants one
+folder per kind of tomogram (full, even, odd) while RELION keeps all three in
+one, so a visible first step lays out links to the right files from the STAR's
+own columns (and can sum the halves into full tomograms inside the job folder
+when the STAR has only half-maps). Pointing it at RELION's mixed folder by hand
+is refused up front. The jobs find the IsoNet install themselves
+(`$ISONET_DIR`, the path IsoNet's GUI saved in `~/.config/isoapp`, or
+`PATH`/`PYTHONPATH`) and set the `PATH` and `PYTHONPATH` that `isonet.py` needs.
 
 **Three DeepETPicker job types** under **DeepETPicker (Beta)** — Prepare, Train
 and Predict, each one command of the `deepetpicker` command line. That command
@@ -831,7 +848,7 @@ from paths in the command that exist on disk and live under an earlier job's
 directory; the timeline labels these "Inputs from:" either way.
 
 Clicking a job reopens its popup, showing the options it ran with, its live or
-final status, and its Outputs/Errors/RELION Source tabs. For a run from the
+final status, and its Outputs/Alerts/RELION Source tabs. For a run from the
 current backend session this reconnects to the live stream; for one from a
 previous session it shows the saved status and its output files, since the live
 transcript itself isn't persisted — only the summary.

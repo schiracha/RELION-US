@@ -173,11 +173,12 @@ import pipeline_bridge
 import program_help
 import project_manager
 import manual_pick
+import mask_preview
 import select_interactive
 import terminal_session
 import viz
 from custom_jobs import CUSTOM_JOB_DEFINITIONS, CUSTOM_JOB_RUNNERS
-from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command
+from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command, validate_isonet_fields
 from deepetpicker_jobs import (
     DEEPETPICKER_JOB_DEFINITIONS, build_deepetpicker_command, validate_deepetpicker_fields,
 )
@@ -193,7 +194,7 @@ def build_external_command(internal_name: str, field_values: dict, output_subdir
                            project_dir=None) -> str:
     if internal_name in DEEPETPICKER_JOB_DEFINITIONS:
         return build_deepetpicker_command(internal_name, field_values, output_subdir, project_dir)
-    return build_isonet_command(internal_name, field_values, output_subdir)
+    return build_isonet_command(internal_name, field_values, output_subdir, project_dir)
 from job_runner import (
     MANUALLY_SETTABLE_STATUSES, STATUS_PENDING, STATUS_QUEUED, STATUS_RUNNING, WAIT_MODES,
     JobRunManager, LogFollower,
@@ -704,7 +705,7 @@ async def start_run(req: StartRunRequest):
             raise HTTPException(status_code=409, detail=str(exc))
         return run.to_summary()
 
-    if req.internal_name in DEEPETPICKER_JOB_DEFINITIONS:
+    if req.internal_name in EXTERNAL_COMMAND_JOBS:
         # The popup always sends the command box content along with the fields,
         # so "no command" is not the signal. Validate the fields when the
         # command is still one this app drafted (for the current fields, or for
@@ -715,8 +716,9 @@ async def start_run(req: StartRunRequest):
                                           run_manager.project_dir),
                    build_external_command(req.internal_name, {}, draft_subdir)}
         if not req.command or req.command in drafted:
-            problems = validate_deepetpicker_fields(
-                req.internal_name, req.field_values or {}, run_manager.project_dir)
+            validate = (validate_deepetpicker_fields if req.internal_name in DEEPETPICKER_JOB_DEFINITIONS
+                        else validate_isonet_fields)
+            problems = validate(req.internal_name, req.field_values or {}, run_manager.project_dir)
             if problems:
                 raise HTTPException(status_code=400, detail=" ".join(problems))
 
@@ -1464,7 +1466,7 @@ async def _stream_saved_run(websocket: WebSocket, run_id: str) -> None:
     to join, but every job's output is also in run.out / run.err in its job
     directory, so replay the tail of those and, if the job is still going,
     keep following them. (This used to answer a bare "Unknown run_id", which
-    the popup then printed into the Errors tab and live output of every
+    the popup then printed into the Alerts tab and live output of every
     reopened job.)"""
     record = run_manager._resolve_run_record(run_id)
     if record is None:
@@ -1512,8 +1514,11 @@ async def _stream_saved_run(websocket: WebSocket, run_id: str) -> None:
             if reader.done():
                 break
             for follower, kind in ((out_follow, "stdout"), (err_follow, "stderr")):
-                for line in follower.new_lines():
-                    await websocket.send_json({"type": kind, "line": line})
+                for text, replace in follower.new_entries():
+                    message = {"type": kind, "line": text}
+                    if replace:
+                        message["replace"] = True       # a progress bar redrawn in place
+                    await websocket.send_json(message)
             latest = run_manager._resolve_run_record(run_id) or record
             if latest.get("status") != status:
                 status = latest.get("status")
@@ -1670,6 +1675,21 @@ def run_orientation_distribution(run_id: str):
     data = progress.read_orientation_distribution(Path(cwd))
     data["supported"] = True
     return data
+
+
+@app.get("/api/runs/{run_id}/mask-preview")
+def run_mask_preview(run_id: str):
+    """The Make Mask Progress tab: a picture of the first mask the job has
+    finished (see mask_preview.py), drawn the first time one exists. The PNG
+    itself is then fetched through the ordinary run-file download."""
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    if run_manager.run_internal_name(run_id) != "IsonetMakeMask":
+        return {"supported": False, "available": False}
+    return mask_preview.mask_preview(
+        Path(cwd), run_manager.project_dir, run_manager.run_field_values(run_id) or {},
+        ISONET_JOB_DEFINITIONS["IsonetMakeMask"])
 
 
 # --------------------------------------------------------------------------

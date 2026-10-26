@@ -524,7 +524,7 @@ def test_registration_failure_raises_for_the_caller_to_handle(project, monkeypat
 def test_registration_failure_falls_back_and_surfaces_in_the_run(project, monkeypatch):
     """A job the user asked to run should still run when the pipeline is
     momentarily unavailable -- it just won't be in RELION's record -- and
-    the reason should land on the run (and its Errors tab) instead of being
+    the reason should land on the run (and its Alerts tab) instead of being
     swallowed, which is what a bare instance attribute nothing ever read
     used to do here."""
     project_manager.set_pipeline_sync(project, True)

@@ -126,6 +126,20 @@ _JOB_DIR_TOKEN_RE = re.compile(
 # animation without dropping output, not to fragment ordinary CRLF text).
 _LINE_SEP_RE = re.compile(rb"\r\n|\r|\n")
 
+# The same separators, kept (capture group) so a piece can be told apart by
+# what ended it. A bare \r means "go back to the start of the line", so the
+# next piece OVERWRITES this one, as on a terminal: that is how tqdm and
+# RELION draw progress bars, rewriting one line many times a second. Stored as
+# separate lines they flood the live output and the Alerts tab by the
+# thousands; only the final state of each bar is worth keeping.
+_LINE_TERM_RE = re.compile(rb"(\r\n|\r|\n)")
+
+# Throttle for tqdm progress bars (IsoNet, DeepETPicker, cryoCARE ...) in
+# subprocess jobs: seconds between redraws. tqdm's own default is 0.1, i.e. up
+# to ten lines a second into run.err for the whole of a multi-hour training.
+# An explicit TQDM_MININTERVAL in RELION-US's environment wins.
+TQDM_MININTERVAL_S = "2"
+
 
 # How often a running job's saved output files are read for the live view, and
 # how often an adopted job (see adopt_running_jobs) is checked for being alive.
@@ -144,9 +158,14 @@ class LogFollower:
     directory, which RELION-US tees every line into -- and RELION's own GUI
     writes the same files) for a run this backend no longer holds in memory,
     e.g. one started before a restart. initial() gives the tail already there;
-    new_lines() gives what has been appended since, to follow a job whose
-    process is still going. Lines split the way the live stream splits them
-    (_LINE_SEP_RE: \\r counts, so progress-bar output survives)."""
+    new_entries() gives what has been appended since, to follow a job whose
+    process is still going.
+
+    Output is read the way a terminal shows it: a line ended by a bare \\r is
+    redrawn by whatever follows, so a progress bar rewritten a thousand times
+    is one line, not a thousand. new_entries() therefore returns
+    (text, replace) pairs: replace=True means "this overwrites the last line
+    you were given" (it was a progress update still being redrawn)."""
 
     def __init__(self, path, max_lines: int = 1000, max_bytes: int = 1_000_000):
         self.path = Path(path)
@@ -154,9 +173,27 @@ class LogFollower:
         self.max_bytes = max_bytes
         self.pos = 0
         self._partial = b""
+        self.open_line = False      # the last line returned ended in \r and may still be redrawn
 
-    def _split(self, data: bytes) -> list[str]:
-        return [chunk.decode("utf-8", errors="replace") for chunk in _LINE_SEP_RE.split(data)]
+    def _consume(self, data: bytes) -> list[tuple[str, bool]]:
+        """Complete lines in self._partial + data, progress redraws collapsed;
+        text after the last separator is held back in self._partial."""
+        pieces = _LINE_TERM_RE.split(self._partial + data)
+        self._partial = pieces.pop()
+        entries: list[list] = []
+        for text, term in zip(pieces[0::2], pieces[1::2]):
+            if term == b"\r" and not text:
+                continue                            # "\r\r": nothing drawn
+            shown = text.decode("utf-8", errors="replace")
+            if self.open_line:
+                if entries:
+                    entries[-1][0] = shown          # redrawn within this batch
+                else:
+                    entries.append([shown, True])   # redraws the line already handed out
+            else:
+                entries.append([shown, False])
+            self.open_line = term == b"\r"
+        return [(text, replace) for text, replace in entries]
 
     def initial(self) -> tuple[list[str], bool]:
         """(last lines, truncated). truncated is True when earlier output was
@@ -174,9 +211,10 @@ class LogFollower:
             m = _LINE_SEP_RE.search(data)          # drop the cut-off first line
             data = data[m.end():] if m else b""
         self.pos = size
-        lines = self._split(data)
-        if lines and lines[-1] == "":
-            lines.pop()                             # trailing separator, not a line
+        self._partial, self.open_line = b"", False
+        if data and not data.endswith((b"\n", b"\r")):
+            data += b"\n"                          # an unfinished last line is still shown
+        lines = [text for text, _ in self._consume(data)]
         if len(lines) > self.max_lines:
             lines, truncated = lines[-self.max_lines:], True
         return lines, truncated
@@ -190,18 +228,22 @@ class LogFollower:
             self.pos = 0
         return self
 
-    def flush(self) -> Optional[str]:
-        """The unfinished last line, if any, once the writer is known to be done."""
+    def flush(self) -> Optional[tuple[str, bool]]:
+        """The unfinished last line as a (text, replace) pair, if any, once the
+        writer is known to be done."""
         rest, self._partial = self._partial, b""
-        return rest.decode("utf-8", errors="replace") if rest else None
+        if not rest:
+            return None
+        replace, self.open_line = self.open_line, False
+        return rest.decode("utf-8", errors="replace"), replace
 
-    def new_lines(self) -> list[str]:
-        """Complete lines appended since the last call; an unfinished last
-        line is held back until its terminator arrives."""
+    def new_entries(self) -> list[tuple[str, bool]]:
+        """(text, replace) for the lines completed since the last call; an
+        unfinished last line is held back until its terminator arrives."""
         try:
             size = self.path.stat().st_size
             if size < self.pos:                     # file replaced/truncated (an Overwrite)
-                self.pos, self._partial = 0, b""
+                self.pos, self._partial, self.open_line = 0, b"", False
             if size == self.pos:
                 return []
             with open(self.path, "rb") as f:
@@ -210,10 +252,7 @@ class LogFollower:
             self.pos = size
         except OSError:
             return []
-        buf = self._partial + data
-        parts = _LINE_SEP_RE.split(buf)
-        self._partial = parts.pop()                 # text after the last separator
-        return [p.decode("utf-8", errors="replace") for p in parts]
+        return self._consume(data)
 
 
 def _detect_inputs(text: str, project_dir: Path, own_cwd: Path, limit: int = 8) -> list[str]:
@@ -400,7 +439,7 @@ class JobRun:
     rewrite_note: Optional[str] = field(default=None, repr=False, compare=False)
     # Set when RELION pipeline sync was on but registering this job with
     # relion_pipeliner failed (pipeline locked, job type not recognised,
-    # etc.) -- surfaced into the Errors tab at the start of
+    # etc.) -- surfaced into the Alerts tab at the start of
     # _run_subprocess, same as rewrite_note is surfaced into stdout. The
     # job still runs under RELION-US's own numbering either way (see
     # start_subprocess_job); this only means it won't show up in RELION's
@@ -1530,7 +1569,7 @@ class JobRunManager:
     async def _cancel_waiting_run(self, run: JobRun, broken: dict) -> None:
         """A job set to run only after others succeed: one of them didn't, so
         this one never starts. Recorded as aborted (it never ran), with the
-        reason in its Errors tab."""
+        reason in its Alerts tab."""
         wanted = ", ".join(self._dependency_label(d) for d in run.wait_for)
         outcome = ", ".join(f"{self._dependency_label(d)} {st or 'was deleted'}" for d, st in broken.items())
         msg = (f"[RELION-US] Cancelled before starting: this job was set to run only after "
@@ -1567,7 +1606,7 @@ class JobRunManager:
             await run.broadcast({"type": "stdout", "line": run.rewrite_note})
 
         # Pipeline-sync registration failures go to stderr specifically (not
-        # rewrite_note's stdout channel) so they land in the Errors tab,
+        # rewrite_note's stdout channel) so they land in the Alerts tab,
         # where a failure is actually noticed -- see JobRun.pipeline_sync_error.
         if run.pipeline_sync_error:
             run.stderr_lines.append(run.pipeline_sync_error)
@@ -1598,6 +1637,7 @@ class JobRunManager:
                     # delete, download); only the process's working directory is
                     # the project root.
                     cwd=run.project_dir,
+                    env={**os.environ, "TQDM_MININTERVAL": os.environ.get("TQDM_MININTERVAL", TQDM_MININTERVAL_S)},
                     stdout=fout,
                     stderr=ferr,
                     # New session (setsid) so this shell becomes its own process
@@ -1812,18 +1852,32 @@ class JobRunManager:
         """Follow one of a running job's output files, feeding each new line to
         the run's buffer and its live subscribers, until `stop` is set; then one
         last read so nothing the process wrote just before it exited is lost.
-        Lines split on \\r as well as \\n (LogFollower), so RELION's in-place
-        progress animation survives and no single line can grow without bound."""
+        A progress bar redrawn in place (LogFollower) replaces its line in the
+        buffer and is broadcast with "replace": true, so a long training is a
+        handful of lines rather than one per redraw."""
+        # Index of the line this tail last wrote, so a redraw only replaces
+        # the bar itself and never something else appended after it.
+        last = len(sink) - 1 if follower.open_line and sink else None
+
+        async def publish(text: str, replace: bool) -> None:
+            nonlocal last
+            message = {"type": msg_type, "line": text}
+            if replace and last is not None and last == len(sink) - 1:
+                sink[-1] = text
+                message["replace"] = True
+            else:
+                sink.append(text)
+            last = len(sink) - 1
+            await run.broadcast(message)
+
         while True:
             finished = stop.is_set()
-            for line in follower.new_lines():
-                sink.append(line)
-                await run.broadcast({"type": msg_type, "line": line})
+            for text, replace in follower.new_entries():
+                await publish(text, replace)
             if finished:
                 rest = follower.flush()
                 if rest is not None:
-                    sink.append(rest)
-                    await run.broadcast({"type": msg_type, "line": rest})
+                    await publish(*rest)
                 return
             await asyncio.sleep(TAIL_POLL_S)
 
@@ -1913,6 +1967,7 @@ class JobRunManager:
 
         sink = run.stdout_lines if msg_type == "stdout" else run.stderr_lines
         for line in complete_bytes.decode(errors="replace").split("\n"):
+            line = line.rstrip("\r").rsplit("\r", 1)[-1]      # a progress bar redrawn in place: its last state
             sink.append(line)
             await run.broadcast({"type": msg_type, "line": line})
         return end_pos
@@ -2454,7 +2509,7 @@ class JobRunManager:
 
     async def _finish_pipeline_registration(self, run: JobRun, job_dir: Path) -> None:
         """_write_exit_marker_and_sync for a LIVE run -- also surfaces a
-        sync failure into the run's own Errors tab, which the persisted
+        sync failure into the run's own Alerts tab, which the persisted
         -only fallback (nothing subscribed to broadcast to) can't do."""
         synced = await self._write_exit_marker_and_sync(run.status, Path(run.project_dir), job_dir)
         if not synced:
@@ -3034,7 +3089,7 @@ class JobRunManager:
         )
         # Live stdout/stderr lines were never part of the persisted summary
         # (to_summary() doesn't carry them, same as any other reopened
-        # history entry) -- a restored run's Outputs/Errors tabs work from
+        # history entry) -- a restored run's Outputs/Alerts tabs work from
         # its files on disk, same as before it was ever trashed.
         self.runs[run.run_id] = run
         history = project_manager.load_history(self.project_dir)
