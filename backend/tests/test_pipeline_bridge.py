@@ -924,3 +924,88 @@ def test_set_process_status_times_out_on_a_held_lock(tmp_path, monkeypatch):
         pipeline_bridge.set_process_status(tmp_path, "Import/job000", "Running")
     # A lock this call didn't take must not be removed by it.
     assert (tmp_path / pipeline_bridge.LOCK_DIRNAME).exists()
+
+
+# --------------------------------------------------------------------------
+# RELION's counter does not know about jobs only RELION-US runs
+# (reported: cloning job032 gave Extract/job030, a number DeepETPickerTrain
+# and Picks already had -- RELION's counter stood at 30 while RELION-US's own
+# jobs, which RELION never registers, had reached 040)
+# --------------------------------------------------------------------------
+
+
+def _counter(project):
+    import re
+    return int(re.search(r"_rlnPipeLineJobCounter\s+(\d+)",
+                         (project / "default_pipeline.star").read_text()).group(1))
+
+
+def test_ensure_job_counter_only_ever_raises_it(project):
+    assert _counter(project) == 7
+    assert pipeline_bridge.ensure_job_counter(project, 41) is True and _counter(project) == 41
+    assert pipeline_bridge.ensure_job_counter(project, 12) is False and _counter(project) == 41
+    assert pipeline_bridge.ensure_job_counter(project, 41) is False
+    assert not (project / pipeline_bridge.LOCK_DIRNAME).exists()
+
+
+def test_ensure_job_counter_changes_nothing_else_in_the_file(project):
+    star = project / "default_pipeline.star"
+    star.write_text("# version 50001\n\ndata_pipeline_general\n\n_rlnPipeLineJobCounter                      31\n\n"
+                    "data_pipeline_processes\n\nloop_\n_rlnPipeLineProcessName #1\nExtract/job030/ None x Running\n")
+    before = star.read_text()
+    pipeline_bridge.ensure_job_counter(project, 41)
+    assert star.read_text() == before.replace("                      31\n", "                      41\n")
+
+
+def test_ensure_job_counter_leaves_a_file_without_one_alone(project):
+    star = project / "default_pipeline.star"
+    star.write_text("data_pipeline_general\n")
+    assert pipeline_bridge.ensure_job_counter(project, 41) is False
+    assert star.read_text() == "data_pipeline_general\n"
+
+
+def test_register_job_can_be_told_the_lowest_free_number(project):
+    got = pipeline_bridge.register_job(project, "relion.class2d", {}, min_job_number=41)
+    assert (got["job_number"], got["process_name"]) == (41, "Class2D/job041")
+    nxt = pipeline_bridge.register_job(project, "relion.class2d", {}, min_job_number=12)   # lower: no effect
+    assert nxt["job_number"] == 42
+
+
+def test_a_job_RELION_allocates_never_reuses_a_number_relion_us_gave_out(project):
+    """RELION-US's own history reaches 40 (IsoNet / DeepETPicker jobs RELION
+    never registered); RELION's counter says 7. The registered job must get
+    41, matching what the popup showed, not 7."""
+    project_manager.save_history(project, [
+        {"run_id": f"r{n}", "job_number": n, "internal_name": "DeepETPickerTrain",
+         "cwd": str(project / f"DeepETPickerTrain/job{n:03d}"), "status": "completed"}
+        for n in (8, 20, 30, 39, 40)])
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    assert m.prospective_subdir("Class2D") == "Class2D/job041"
+    registered = m._register_in_relion_pipeline(project, "Class2D", {})
+    assert registered["process_name"] == "Class2D/job041"
+
+
+def test_a_started_job_runs_in_the_directory_the_popup_promised(project):
+    """The whole path: the command drafted for the prospective directory is
+    run in that same directory, with no 'advanced to' rewrite."""
+    import asyncio
+    project_manager.save_history(project, [
+        {"run_id": "r40", "job_number": 40, "internal_name": "DeepETPickerPredict",
+         "cwd": str(project / "DeepETPickerPredict/job040"), "status": "completed"}])
+    project_manager.set_pipeline_sync(project, True)
+    m = job_runner.JobRunManager(project)
+    promised = m.prospective_subdir("Class2D")
+
+    async def go():
+        run = await m.start_subprocess_job("Class2D", "Class 2D", f"echo hi --o {promised}/", subdir=promised)
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            if run.status in ("completed", "failed"):
+                break
+        return run
+
+    run = asyncio.run(go())
+    assert promised == "Class2D/job041"
+    assert run.job_number == 41 and Path(run.cwd) == project / "Class2D/job041"
+    assert run.pipeline_registered and "advanced to" not in (run.rewrite_note or "")

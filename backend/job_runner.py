@@ -981,8 +981,11 @@ class JobRunManager:
             options_by_key = {}
         field_values = dict(field_values or {})
         field_values["is_tomo"] = internal_name in job_catalog.TOMO_VARIANT_OF
+        # RELION allocates from its own counter, which does not know about the
+        # jobs only RELION-US runs; tell it the lowest number that is free.
         return pipeline_bridge.register_job(
-            project_dir, type_label, field_values, options_by_key)
+            project_dir, type_label, field_values, options_by_key,
+            min_job_number=self._next_job_number(project_dir, internal_name))
 
     def sync_completion_to_relion(self, project_dir: Optional[Path] = None) -> bool:
         """Let RELION notice that a job finished (it reads the exit files the

@@ -91,6 +91,7 @@ default_pipeline.star; it only changes what RELION-US chooses to display.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -367,6 +368,46 @@ def set_process_status(project_dir: Path, process_name: str, status_label: str) 
         _release_pipeline_lock(project_dir)
 
 
+_JOB_COUNTER_RE = re.compile(r"^(_rlnPipeLineJobCounter\s+)(\d+)", re.MULTILINE)
+
+
+def ensure_job_counter(project_dir: Path, next_number: int) -> bool:
+    """Make RELION's next job number at least `next_number`.
+
+    RELION numbers every job from ONE counter in default_pipeline.star, but
+    RELION-US runs jobs RELION has never heard of (the IsoNet2 and
+    DeepETPicker jobs, the import bridges -- no RELION class, so they are not
+    registered) and gives those numbers too. RELION's counter knows nothing of
+    them, so the next job it allocated reused a number RELION-US had already
+    handed out (Extract/job030 beside DeepETPickerTrain/job030), and the
+    popup's own "next job" was overruled at Run time. The counter is only
+    "the next number to use", and RELION itself leaves gaps whenever a job is
+    deleted, so raising it is safe.
+
+    Returns True when the file was changed. A missing counter line leaves the
+    file alone (RELION will write one). Raises PipelineBridgeError if the lock
+    cannot be taken or the file cannot be read or written.
+    """
+    _ensure_pipeline_bootstrapped(project_dir)
+    star_path = Path(project_dir) / "default_pipeline.star"
+    _acquire_pipeline_lock(project_dir)
+    try:
+        try:
+            text = star_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PipelineBridgeError(f"could not read {star_path}: {exc}") from exc
+        m = _JOB_COUNTER_RE.search(text)
+        if not m or int(m.group(2)) >= next_number:
+            return False
+        try:
+            star_path.write_text(text[:m.start(2)] + str(int(next_number)) + text[m.end(2):], encoding="utf-8")
+        except OSError as exc:
+            raise PipelineBridgeError(f"could not write {star_path}: {exc}") from exc
+        return True
+    finally:
+        _release_pipeline_lock(project_dir)
+
+
 # --------------------------------------------------------------------------
 # job.star
 # --------------------------------------------------------------------------
@@ -523,8 +564,13 @@ def register_job(
     values: dict[str, Any],
     options_by_key: Optional[dict[str, dict]] = None,
     alias: str = "",
+    min_job_number: Optional[int] = None,
 ) -> dict[str, Any]:
     """Register a job in RELION's pipeline and return the slot RELION gave it.
+
+    min_job_number: RELION's counter is raised to this first (see
+    ensure_job_counter), so the number it allocates is one the caller knows is
+    free rather than one already used by a job RELION is not aware of.
 
     Returns {"process_name": "Class2D/job012", "job_number": 12}. RELION
     allocates the number and creates the directory, so the caller must use what
@@ -536,6 +582,8 @@ def register_job(
     diff is true regardless of RELION version.
     """
     project_dir = Path(project_dir)
+    if min_job_number:
+        ensure_job_counter(project_dir, int(min_job_number))
     before = {p["name"] for p in project_manager.read_relion_pipeline(project_dir)["processes"]}
 
     with tempfile.TemporaryDirectory(dir=str(project_dir)) as tmp:
