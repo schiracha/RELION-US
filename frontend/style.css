@@ -1298,3 +1298,19 @@ html, body {
 .viz-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .viz-legend-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .viz-legend .viz-hint { flex-basis: 100%; }
+
+
+/* ---- 3D volume viewer (volume3d.js) ---- */
+.vol3d-popup { display: flex; gap: 10px; height: 100%; min-height: 0; padding: 10px; box-sizing: border-box; background: var(--bg); color: var(--text); }
+.vol3d-side { width: 290px; flex-shrink: 0; overflow-y: auto; }
+.vol3d-stage { flex: 1; position: relative; min-width: 0; background: #14161a; }
+.vol3d-stage .msp-plugin { position: absolute; inset: 0; }
+.vol3d-fail { color: var(--err); padding: 20px; font-size: 13px; }
+.vol3d-card { border-left: 3px solid var(--border); }
+.vol3d-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.vol3d-card-head input[type="color"] { width: 26px; height: 22px; padding: 0; border: 1px solid var(--border); background: none; cursor: pointer; }
+.vol3d-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; font-size: 12px; }
+.vol3d-readout { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11px; color: var(--text-dim); margin: -2px 0 6px 52px; }
+.vol3d-check { display: block; font-size: 12px; margin-top: 6px; color: var(--text-dim); }
+.vol3d-hint { padding: 0 2px 10px; }
+.outputs-row .out-3d { cursor: pointer; flex-shrink: 0; }

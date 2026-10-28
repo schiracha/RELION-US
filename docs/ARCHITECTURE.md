@@ -1121,6 +1121,22 @@ at most 2000 lines per pane (a note says how many were left out; the whole log i
 `run.out`/`run.err`). Subprocess jobs also get `TQDM_MININTERVAL=2` so tqdm itself
 writes about a tenth of the redraws into `run.err` (an existing value wins).
 
+The 3D volume viewer (`frontend/volume3d.js`, `backend/volume3d.py`) is Mol*
+(vendored prebuilt viewer, loaded on first use) in its own WinBox window, separate
+from the slice viewer. A browser can only render what it downloads, so
+`GET /api/viz/volume3d/file` serves a block-averaged float32 copy of the MRC (at
+most `max_dim` voxels along the longest side, voxel size scaled so Angstrom
+distances stay true, non-finite voxels zeroed), cached by path, modification time
+and factor under the temp directory and pruned to the newest 12;
+`GET /api/viz/volume3d/info` gives its shape, factor and density statistics, and
+whether the volume is a 0/1 mask (judged on the original data, since averaging
+blurs a mask's edge into fractions) so it gets an absolute 0.5 contour instead of
+one in sigma. Paths go through `viz._safe`, so only files under the project can
+be read. The window drives each map's Mol* isosurface through the plugin state
+tree (`build().to(rep).update(...)`), coalescing slider changes because every
+update re-extracts the surface. Mol*'s hidden panels only redraw on a state
+change, so they are hidden by going through "collapsed" first.
+
 IsoNet2 specifics worth knowing: `isonet.py` needs both `PATH` and `PYTHONPATH`
 (what IsoNet's `isonet2.bashrc` sets), so `find_isonet_dir` locates the install
 (`$ISONET_DIR`, `~/.config/isoapp/environment.json`, `PATH`, `PYTHONPATH`) and

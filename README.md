@@ -143,7 +143,8 @@ IsoNet2 jobs; `sbatch`/`squeue`/`sacct`/`scancel` for
 use and reported plainly if missing — nothing is required just to start the
 app.
 
-No CDN dependency: WinBox.js (the popup-window library) and xterm.js are
+No CDN dependency: WinBox.js (the popup-window library), xterm.js and Mol\* (the
+3D volume viewer, loaded only when first opened) are
 vendored under `frontend/vendor/`, specifically because many HPC login nodes
 and workstations have no outbound internet access.
 
@@ -385,6 +386,19 @@ out** item appears under **☰ Menu** once you're in.
   start a new project there or pick a different folder.
 - **🔍 Visualize** — the [tomogram / particle-pick
   viewer](#tomogram--particle-pick-viewer). Not a job; it writes nothing.
+- **🧊 3D** — a 3D volume viewer ([Mol\*](https://molstar.org)) for maps, masks
+  and any other `.mrc` volume: isosurfaces with a contour level (in standard
+  deviations above the mean, or as an absolute value), colour, opacity and
+  solid/mesh per map, several maps overlaid (half maps, mask, refined map),
+  PNG screenshot, and Mol\*'s own tools one tick away. It is separate from the
+  slice viewer, which stays the place for slices, contrast and picking, and
+  opens any `.mrc` as before. A volume can also be sent to it from a job's
+  Outputs tab (🧊 beside an `.mrc`) or from the slice viewer ("Open in 3D
+  viewer"). The browser only receives a block-averaged copy no larger than the
+  chosen detail level (128-384 voxels along the longest side, voxel size scaled
+  to match, cached), so a 1.3 GB tomogram or mask opens in seconds, coarsely;
+  a refined map of 100-300 voxels is shown unchanged. Reads files under the
+  project only, like the slice viewer. Not a job; it writes nothing.
 - **🌙 Dark / ☀ Light** — theme switch. Dark is the default, and your choice is
   remembered. Chart colours are mode-specific and validated against each
   background rather than naively inverted, so they stay legible either way.
@@ -1151,7 +1165,8 @@ That license follows the material this repository redistributes:
 source and the field defaults and help strings for all 32 job types, extracted
 from RELION (© MRC Laboratory of Molecular Biology, GPL-2.0-or-later) — the
 same data the RELION Source tab shows you. `frontend/vendor/` bundles WinBox.js
-(Apache-2.0) and xterm.js (MIT).
+(Apache-2.0), xterm.js (MIT) and Mol\* 5.13.1 (MIT; the prebuilt viewer,
+`molstar.js` / `molstar.css`, about 5 MB).
 
 The Analyze popup ports the tab layout and technique — not source — of
 `relion_analyse.py` from

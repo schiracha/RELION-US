@@ -174,6 +174,7 @@ import program_help
 import project_manager
 import manual_pick
 import mask_preview
+import volume3d
 import select_interactive
 import terminal_session
 import viz
@@ -1884,6 +1885,27 @@ def viz_slice(
     except viz.VizError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return Response(content=png, media_type="image/png")
+
+
+@app.get("/api/viz/volume3d/info")
+def viz_volume3d_info(mrc_path: str = Query(...), max_dim: int = Query(volume3d.DEFAULT_MAX_DIM)):
+    """What the 3D viewer needs to know about a volume: its shape, voxel size,
+    the downsampling factor, and density statistics for choosing a contour.
+    Builds (and caches) the downsampled copy `volume3d/file` then serves."""
+    try:
+        return volume3d.public_info(volume3d.prepare(run_manager.project_dir, mrc_path, max_dim))
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/viz/volume3d/file")
+def viz_volume3d_file(mrc_path: str = Query(...), max_dim: int = Query(volume3d.DEFAULT_MAX_DIM)):
+    """The downsampled MRC itself, for Mol* to load."""
+    try:
+        info = volume3d.prepare(run_manager.project_dir, mrc_path, max_dim)
+    except viz.VizError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return FileResponse(info["file"], media_type="application/octet-stream", filename=info["name"])
 
 
 class VizPicksRequest(BaseModel):

@@ -33,7 +33,7 @@
 #
 # Which tier for which change:
 #   converters, viz.py, progress.py, job_registry ....... (default)
-#   the tomogram viewer or the file picker ............... viewer
+#   the tomogram viewer, 3D volume viewer or file picker . viewer
 #   the Progress tab or the theme ........................ progress
 #   job popups, run/abort/overwrite, Outputs ............. jobs
 #   job_registry / the extractor / the Advanced section .. options
@@ -762,6 +762,7 @@ fi
 if wants viewer || wants progress; then
   run_browser_suite test_viz_and_progress.py yes
 fi
+wants viewer  && run_browser_suite test_volume3d_popup.py
 wants options  && run_browser_suite test_job_options_panel.py
 wants jobs     && run_browser_suite test_jobs.py
 wants jobs     && run_browser_suite test_deepetpicker_popup.py

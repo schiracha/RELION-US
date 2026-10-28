@@ -1681,9 +1681,21 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
               ${kind ? `data-role="preview" title="${PREVIEW_TITLES[kind]}"` : ""}
         >${escapeHtml(f.path)}</span>
         <span class="out-size">${formatBytes(f.size)}</span>
+        ${/\.(mrc|rec|map)$/i.test(f.path)
+          ? '<span class="out-3d" data-role="open3d" title="Open in the 3D volume viewer">🧊</span>' : ""}
         <span class="out-download" data-role="download" title="Download">⬇</span>
       </div>`;
     }).join("")}</div>`;
+  }
+
+  function wireOpen3dClicks(container) {
+    container.querySelectorAll('[data-role="open3d"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // an absolute path under the project, like the tomogram viewer gets
+        openVolumeViewer(`${currentRun.cwd.replace(/\/+$/, "")}/${el.closest(".outputs-row").dataset.path}`);
+      });
+    });
   }
 
   function wireDownloadClicks(container) {
@@ -2406,6 +2418,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         ${starPreviewPanelHtml}
       `;
       wireDownloadClicks(outputsContent);
+      wireOpen3dClicks(outputsContent);
       wireStarPreviewClicks(outputsContent);
       wireStarPreviewPanel(outputsContent);
 
@@ -2433,6 +2446,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           ${starPreviewPanelHtml}
         `;
         wireDownloadClicks(outputsContent);   // the review list has ⬇ links too
+        wireOpen3dClicks(outputsContent);
         wireStarPreviewClicks(outputsContent);
         wireStarPreviewPanel(outputsContent);
         outputsContent.querySelector('[data-role="cancel-clean-btn"]').addEventListener("click", loadOutputsTab);
@@ -4768,6 +4782,10 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
 
       <div class="viz-controls" data-role="viz-controls" style="display:none">
         <div class="viz-side-group">
+          <button class="btn btn-sm" data-role="viz-open3d"
+                  title="Show this volume as an isosurface in the 3D viewer (averaged down for large tomograms)">🧊 Open in 3D viewer</button>
+        </div>
+        <div class="viz-side-group">
           <div class="viz-side-title">Position</div>
           <div class="viz-ctrl-row">
             <span class="viz-ctrl-key">X</span>
@@ -5125,6 +5143,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       q('[data-role="viz-lo"]').value = String(Math.round(((state.lo - vmin) / span) * 100));
       q('[data-role="viz-hi"]').value = String(Math.round(((state.hi - vmin) / span) * 100));
       q('[data-role="viz-controls"]').style.display = "";
+      q('[data-role="viz-open3d"]').style.display = info.nz > 1 ? "" : "none";   // a single image has no 3D view
       q('[data-role="viz-ortho"]').classList.add("loaded");
       setupPosition();
       layoutStage();
@@ -5232,6 +5251,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     refreshAllPanels();
   }
   q('[data-role="viz-load"]').addEventListener("click", runVizLoad);
+  q('[data-role="viz-open3d"]').addEventListener("click", () => { if (state.mrc) openVolumeViewer(state.mrc); });
 
   // --- Controls ---
   ["x", "y", "z"].forEach((letter) => {
@@ -5517,6 +5537,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
 }
 
 document.getElementById("visualizeBtn").addEventListener("click", () => openVisualizer());
+document.getElementById("volume3dBtn").addEventListener("click", () => openVolumeViewer());
 
 // ---- Exclude Tilt Images: the in-browser tilt-image reviewer ------------
 // Opened from a TomoExcludeTiltImages job popup's "Open Reviewer" button
