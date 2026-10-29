@@ -210,6 +210,21 @@ AMBIGUOUS_TOMO_LABELS = {JOB_CATALOG[base][0] for base in set(TOMO_VARIANT_OF.va
 # just fail (harmlessly; _register_in_relion_pipeline's caller already
 # falls back to this app's own numbering on any registration error).
 CUSTOM_JOBS = {
+    # Interactive "Select on value": tune a numeric column's range against a live
+    # histogram and an image preview, then write what RELION's own Select job would
+    # (see pick_filter.py). Registers as the real job it is: relion.select.onvalue,
+    # with do_select_values on and the tuned label / min / max. real_job names the
+    # RELION job whose options describe it; registered_values are the option values
+    # that make it that mode; unregistered_fields are this job's own (not RELION's).
+    "PickFilter": {
+        "label_new": "relion.select.onvalue",
+        "display_name": "Filter Picks (interactive)",
+        "category": "Classification & Refinement",
+        "description": "Tune which picks to keep by a numeric column, with a live histogram and an image preview",
+        "real_job": "Select",
+        "registered_values": {"do_select_values": True},
+        "unregistered_fields": ["fn_preview"],
+    },
     "Manualpick": {
         "label_new": "relion.manualpick",
         "display_name": "Manual Picking",
@@ -477,6 +492,9 @@ JOB_DIRNAME = {
     # its own unambiguous prefix instead (not a real RELION directory name,
     # so no collision risk with the real ones above).
     "AreTomoImport": "AreTomoImport",
+    # Filter Picks is RELION's Select job in its select-on-value mode, so it
+    # numbers and registers as one (Select/jobNNN, relion.select.onvalue).
+    "PickFilter": "Select",
     "ImodImport": "ImodImport",
     "WarpImport": "WarpImport",
     "DeepETPickerImport": "DeepETPickerImport",

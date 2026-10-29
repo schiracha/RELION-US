@@ -781,3 +781,34 @@ def test_mask_preview_endpoint_is_unsupported_for_other_jobs_and_unknown_runs(cl
     run = _start_trivial_run(client, "IsonetDeconv")
     assert client.get(f"/api/runs/{run['run_id']}/mask-preview").json() == {"supported": False, "available": False}
     assert client.get("/api/runs/nope/mask-preview").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# A command edited after the form drew it up is flagged on the run (reported:
+# a job ran from a hand-edited command -- patch size 64 -- while the recorded
+# form said 96, so cloning it reproduced a job that ran out of GPU memory).
+# ---------------------------------------------------------------------------
+
+def test_a_run_records_whether_its_command_was_edited(client):
+    plain = client.post("/api/runs", json={"internal_name": "IsonetDeconv", "command": "true"}).json()
+    assert plain["command_edited"] is False
+    edited = client.post("/api/runs", json={"internal_name": "IsonetDeconv", "command": "true",
+                                            "command_edited": True}).json()
+    assert edited["command_edited"] is True
+    for run in (plain, edited):
+        _wait_for_status(client, run["run_id"], {"completed", "failed"}, timeout_s=20)
+    history = {h["run_id"]: h for h in project_manager.load_history(Path(main.run_manager.project_dir))}
+    assert history[edited["run_id"]]["command_edited"] is True
+    assert history[plain["run_id"]]["command_edited"] is False
+    assert client.get(f"/api/runs/{edited['run_id']}").json()["command_edited"] is True
+
+
+def test_the_flag_survives_a_restart_and_an_overwrite_is_judged_afresh(client):
+    run = client.post("/api/runs", json={"internal_name": "IsonetDeconv", "command": "true",
+                                         "command_edited": True}).json()
+    _wait_for_status(client, run["run_id"], {"completed", "failed"}, timeout_s=20)
+    main.run_manager.runs.clear()                               # as after a restart: only the history remains
+    assert client.get(f"/api/runs/{run['run_id']}").json()["command_edited"] is True
+    again = client.post("/api/runs", json={"internal_name": "IsonetDeconv", "command": "true",
+                                           "overwrite_run_id": run["run_id"], "command_edited": False}).json()
+    assert again["command_edited"] is False

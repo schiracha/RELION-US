@@ -174,6 +174,8 @@ import program_help
 import project_manager
 import manual_pick
 import mask_preview
+import pick_filter
+import table_preview
 import volume3d
 import select_interactive
 import terminal_session
@@ -611,6 +613,10 @@ class StartRunRequest(BaseModel):
     # all ended, however they ended). Only real RELION/IsoNet jobs can wait.
     wait_for: list[str] | None = None
     wait_mode: str = "success"
+    # The popup says the command is not the one the form drew up (edited by
+    # hand, or the form changed since) -- recorded on the run; see
+    # JobRun.command_edited.
+    command_edited: bool = False
 
 
 @app.post("/api/runs")
@@ -741,6 +747,7 @@ async def start_run(req: StartRunRequest):
                 overwrite_run_id=req.overwrite_run_id,
                 slurm_options=req.slurm,
                 wait_for=req.wait_for, wait_mode=req.wait_mode,
+                command_edited=req.command_edited,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -760,6 +767,7 @@ async def start_run(req: StartRunRequest):
             overwrite_run_id=req.overwrite_run_id,
             slurm_options=req.slurm,
             wait_for=req.wait_for, wait_mode=req.wait_mode,
+            command_edited=req.command_edited,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -883,7 +891,7 @@ async def resume_run(run_id: str):
     if internal_name is None or not CUSTOM_JOB_DEFINITIONS.get(internal_name, {}).get("is_picker"):
         raise HTTPException(
             status_code=400,
-            detail="Only a picker-style job (Manualpick/TomoManualPick/TomoExcludeTiltImages) can be resumed.",
+            detail="Only a picker-style job (Manualpick/TomoManualPick/TomoExcludeTiltImages/PickFilter) can be resumed.",
         )
     try:
         updated = await run_manager.resume_run(run_id)
@@ -1043,8 +1051,8 @@ PREVIEW_MAX_ROWS_CAP = 2000
 
 @app.get("/api/runs/{run_id}/files/preview")
 def preview_run_file(run_id: str, path: str, max_rows: int = 300):
-    """Outputs tab: click a .star filename (not its checkbox) to see its
-    contents without downloading it. Parses every block in the file --
+    """Outputs tab: click a .star (or .coords / .csv table) filename (not its
+    checkbox) to see its contents without downloading it. Parses every block in the file --
     RELION STAR files mix "list" blocks (single row of `_key value` pairs,
     e.g. model_general) with "loop_" blocks (multi-row tables, e.g.
     particles) -- and returns each in whatever shape it actually is, rather
@@ -1055,10 +1063,16 @@ def preview_run_file(run_id: str, path: str, max_rows: int = 300):
     resolved = run_manager.resolve_output_file(run_id, path)
     if resolved is None:
         raise HTTPException(status_code=404, detail="File not found in this job's output directory")
-    if resolved.suffix.lower() != ".star":
-        raise HTTPException(status_code=400, detail="Preview is only available for .star files")
+    suffix = resolved.suffix.lower()
+    if suffix != ".star" and suffix not in table_preview.TABLE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Preview is only available for .star, .coords and .csv files")
 
     max_rows = max(1, min(max_rows, PREVIEW_MAX_ROWS_CAP))
+    if suffix in table_preview.TABLE_SUFFIXES:
+        try:
+            return {"path": path, "blocks": table_preview.preview_table(resolved, max_rows)}
+        except Exception as exc:  # noqa: BLE001 -- a malformed table is the user's file, not a server error
+            raise HTTPException(status_code=400, detail=f"Could not read {resolved.name}: {exc}")
 
     import json as _json
     import starfile
@@ -1691,6 +1705,100 @@ def run_mask_preview(run_id: str):
     return mask_preview.mask_preview(
         Path(cwd), run_manager.project_dir, run_manager.run_field_values(run_id) or {},
         ISONET_JOB_DEFINITIONS["IsonetMakeMask"])
+
+
+# --------------------------------------------------------------------------
+# Filter Picks (pick_filter.py): the tuner's data. Every route reads the picks
+# file named in the run's own fn_data field; only /apply writes, and only into
+# this job's directory.
+# --------------------------------------------------------------------------
+
+
+def _pick_filter_context(run_id: str):
+    cwd = run_manager._resolve_run_cwd(run_id)
+    if cwd is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    if run_manager.run_internal_name(run_id) != "PickFilter":
+        raise HTTPException(status_code=400, detail="This is not a Filter Picks job")
+    return Path(cwd), run_manager.run_field_values(run_id) or {}
+
+
+def _pick_filter_table(run_id: str):
+    cwd, values = _pick_filter_context(run_id)
+    try:
+        return cwd, values, pick_filter.load_table(run_manager.project_dir, str(values.get("fn_data") or ""))
+    except (pick_filter.PickFilterError, viz.VizError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/pick-filter/{run_id}/info")
+def pick_filter_info(run_id: str):
+    """What the tuner opens with: the numeric columns (score-like first), the
+    default one, and the selection the job currently holds."""
+    _, values, table = _pick_filter_table(run_id)
+    info = pick_filter.summary(table)
+    info["current"] = {"column": values.get("select_label"), "min": values.get("select_minval"),
+                       "max": values.get("select_maxval")}
+    info["has_preview_source"] = table.image_column == "rlnMicrographName" or bool(values.get("fn_preview"))
+    # which images can be drawn (null: all of them)
+    info["previewable"] = pick_filter.previewable_images(run_manager.project_dir, table,
+                                                         str(values.get("fn_preview") or ""))
+    return info
+
+
+@app.get("/api/pick-filter/{run_id}/histogram")
+def pick_filter_histogram(run_id: str, column: str = Query(...), bins: int = Query(60, ge=2, le=200)):
+    _, _, table = _pick_filter_table(run_id)
+    try:
+        return pick_filter.histogram(table, column, bins)
+    except pick_filter.PickFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/pick-filter/{run_id}/counts")
+def pick_filter_counts(run_id: str, column: str = Query(...), lo: float = Query(...), hi: float = Query(...)):
+    _, _, table = _pick_filter_table(run_id)
+    try:
+        return pick_filter.counts(table, column, lo, hi)
+    except pick_filter.PickFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/pick-filter/{run_id}/image")
+def pick_filter_image(run_id: str, column: str = Query(...), image: str = Query(...)):
+    """One image's picks (in its own voxels, each with the column's value) and the
+    file to draw them on."""
+    _, values, table = _pick_filter_table(run_id)
+    try:
+        return pick_filter.image_picks(run_manager.project_dir, table, column, image,
+                                       str(values.get("fn_preview") or ""))
+    except (pick_filter.PickFilterError, viz.VizError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class PickFilterApplyRequest(BaseModel):
+    column: str
+    lo: float
+    hi: float
+
+
+@app.post("/api/pick-filter/{run_id}/apply")
+def pick_filter_apply(run_id: str, req: PickFilterApplyRequest):
+    """Write the job's particles.star for this selection (RELION's select on value)
+    and make the job remember it. Only while the session is open: a finished job
+    is re-opened with Continue first, as for the picking jobs."""
+    cwd, values, table = _pick_filter_table(run_id)
+    record = run_manager._resolve_run_record(run_id) or {}
+    if record.get("status") != "running":
+        raise HTTPException(status_code=409, detail="This job is not running: press Continue to reopen the session.")
+    try:
+        result = pick_filter.apply_filter(run_manager.project_dir, str(values.get("fn_data")), cwd,
+                                          req.column, req.lo, req.hi)
+    except (pick_filter.PickFilterError, viz.VizError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    selection = pick_filter.record_selection(cwd, None, req.column, req.lo, req.hi)
+    run_manager.update_field_values(run_id, selection)
+    return {**result, "selection": selection}
 
 
 # --------------------------------------------------------------------------

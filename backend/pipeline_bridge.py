@@ -481,6 +481,39 @@ def _is_tomo_job(values: dict[str, Any]) -> bool:
     )
 
 
+def update_job_options(job_dir: Path, updates: dict[str, Any]) -> bool:
+    """Change option values in an existing `job.star`, byte for byte elsewhere.
+
+    A job registered with the values it started with (Filter Picks starts with
+    its defaults and is then tuned) must end up recording the values its output
+    was actually made with, as RELION's own job.star does. Only rows already in
+    the file are changed; returns False when there is no job.star or nothing
+    matched. Never raises for a missing file: the pipeline record is a
+    convenience, not something to fail a job over."""
+    path = Path(job_dir) / "job.star"
+    if not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return False
+    changed = False
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)(\S+)(\s+)(.*?)(\s*)$", line)
+        if m and m.group(2) in updates:
+            lead, key, gap, old, trail = m.groups()
+            value = _job_option_value(updates[key], None)
+            # keep the file's own style: RELION writes values bare, RELION-US's first write quotes them
+            lines[i] = f"{lead}{key}{gap}" + (f'"{value}"' if old.startswith('"') else value) + trail
+            changed = True
+    if changed:
+        try:
+            path.write_text("\n".join(lines), encoding="utf-8")
+        except OSError:
+            return False
+    return changed
+
+
 def write_job_star(
     path: Path,
     type_label: str,

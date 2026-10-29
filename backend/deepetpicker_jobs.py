@@ -204,6 +204,14 @@ DEEPETPICKER_JOB_DEFINITIONS = {
              "help": "Move each pick to the centre of mass of the prediction around it, giving fractional "
                      "coordinates. Without this, picks are whole voxels. Not yet validated against ground "
                      "truth."},
+            {"key": "min_score", "field_type": "slider", "label": "Minimum pick score:", "default": 0.0,
+             "min": 0.0, "max": 1.0, "step": 0.05,
+             "help": "Keep only picks scoring at least this in particles.star (the native coords/ files keep every "
+                     "pick). Every pick's score is written to particles.star as rlnAutopickFigureOfMerit either "
+                     "way, so you can also leave this at 0 and choose the cutoff afterwards with the Filter Picks "
+                     "job (or RELION's Select on value) without re-running the network. The score is the peak of "
+                     "the smoothed 0/1 prediction mask around the pick: about 1.0 for a solidly predicted particle, "
+                     "low for a marginal blob. It is not a raw network probability."},
             {"key": "relion_scale", "field_type": "text", "label": "Scale to RELION pixels:", "default": "1.0",
              "help": "Multiplies the coordinates written to particles.star: picking pixel size / RELION "
                      "tomogram pixel size (picked on 6.3 Å/px, RELION tomogram at 10.5 Å/px: 0.6). The "
@@ -214,7 +222,7 @@ DEEPETPICKER_JOB_DEFINITIONS = {
             {"name": "Tomograms", "fields": ["tomo_star", "tomo_dir", "tomo_column", "already_standardized"]},
             {"name": "Network input", "fields": ["patch_size", "pad_size", "batch_size", "seg_thresh"]},
             {"name": "Hardware", "fields": ["gpu"]},
-            {"name": "Output", "fields": ["refine_centroids", "relion_scale"]},
+            {"name": "Output", "fields": ["refine_centroids", "min_score", "relion_scale"]},
         ],
     },
 }
@@ -228,7 +236,12 @@ def _blank(value) -> bool:
 
 
 def _is_default(option: dict, value) -> bool:
-    return _blank(value) or str(value) == str(option.get("default"))
+    if _blank(value) or str(value) == str(option.get("default")):
+        return True
+    try:                         # "0" and 0.0 are the same setting
+        return not isinstance(option.get("default"), bool) and float(value) == float(option.get("default"))
+    except (TypeError, ValueError):
+        return False
 
 
 CONVERTER_SCRIPT = Path(__file__).resolve().parent / "converters" / "centered_to_voxels.py"

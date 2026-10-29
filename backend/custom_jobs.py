@@ -181,7 +181,52 @@ def _picker_definition(internal_name: str, real_job_name: str, label_new: str,
     }
 
 
+def _pick_filter_definition() -> dict:
+    """Filter Picks: RELION's Select job in its select-on-value mode, with an
+    interactive tuner. The four fields it shares with the real job (the input
+    star, label, min, max) take their definitions from RELION's own Select job."""
+    raw = job_registry.raw_job("Select")
+    real = {o["key"]: o for o in raw.get("options", [])}
+    options = [
+        {**real["fn_data"], "label": "Particles / picks STAR file (required):", "pattern": "*.star",
+         "help": "The particles.star (or a picks STAR) to filter: tomography (rlnTomoName) or single-particle "
+                 "(rlnMicrographName). Any numeric column of it can be used to exclude picks."},
+        {"key": "fn_preview", "field_type": "inputnode", "label": "Tomograms STAR (for the preview):", "default": "",
+         "pattern": "*.star",
+         "help": "Optional, tomography only: the tomograms.star that says which volume each rlnTomoName is, so the "
+                 "tuner can show a tomogram with its picks. Not needed for single-particle picks (their "
+                 "micrographs are named in the picks file). The counts, histogram and selection work without it."},
+        {**real["select_label"], "default": "rlnAutopickFigureOfMerit",
+         "help": real["select_label"]["help"] + " The tuner sets this when you apply a selection. Starts as "
+                 "RELION's pick score (rlnAutopickFigureOfMerit); if the file has no such column the first "
+                 "numeric column is used."},
+        {**real["select_minval"], "help": real["select_minval"]["help"] + " Set by the tuner."},
+        {**real["select_maxval"], "help": real["select_maxval"]["help"] + " Set by the tuner."},
+    ]
+    return {
+        "internal_name": "PickFilter",
+        "label_new": "relion.select.onvalue",
+        "display_name": "Filter Picks (interactive)",
+        "category": "Classification & Refinement",
+        "description": "Tune which picks to keep by a numeric column, with a live histogram and an image preview",
+        "options": options,
+        "standard_groups": [
+            {"name": "Input", "fields": ["fn_data", "fn_preview"]},
+            {"name": "Selection (set by the tuner)", "fields": ["select_label", "select_minval", "select_maxval"]},
+        ],
+        "program_guess": "(no subprocess to start -- see backend/pick_filter.py; the selection is written with "
+                         "RELION's own relion_star_handler --select, as the Select job's 'select based on "
+                         "metadata values' branch does)",
+        "flags_used": [],
+        "commands_source": raw.get("commands_source", ""),
+        "is_custom": True,
+        "is_picker": True,
+        "picker_kind": "pickfilter",
+    }
+
+
 CUSTOM_JOB_DEFINITIONS = {
+    "PickFilter": _pick_filter_definition(),
     "Manualpick": _picker_definition(
         "Manualpick", "Manualpick", "relion.manualpick", "Manual Picking",
         "Manually pick particle coordinates from micrographs", "spa",
@@ -543,7 +588,49 @@ async def run_exclude_tilt_images(project_dir: Path, values: dict, job_dir: Path
     return await asyncio.to_thread(work)
 
 
+async def run_pick_filter(project_dir: Path, values: dict, job_dir: Path) -> str:
+    """Starts a Filter Picks session: reads the picks file, and writes a first
+    particles.star with the job's current label and range (RELION's defaults keep
+    every pick, so a job closed untouched is a harmless pass-through, like Exclude
+    Tilt Images' keep-everything start). The tuning itself happens in the browser
+    (the tuner button), which re-writes the output with /api/pick-filter/{run}/apply.
+
+    `values` is the run's own field_values dict, so the label this settles on is
+    what the job records. main.py passes stays_running=True (is_picker): the user
+    ends the session with Done, as for the picking jobs."""
+    import pick_filter
+
+    star = str(values.get("fn_data") or "").strip()
+    if not star:
+        raise ValueError("The particles / picks STAR file is required.")
+
+    def work():
+        table = pick_filter.load_table(project_dir, star)
+        columns = {c["name"] for c in table.numeric_columns()}
+        if not columns:
+            raise ValueError(f"{star} has no numeric column that varies, so there is nothing to filter on.")
+        label = str(values.get("select_label") or "").strip()
+        note = ""
+        if label not in columns:
+            chosen = table.default_column()
+            if label:
+                note = f"{label} is not a numeric column of {star}; starting with {chosen}.\n"
+            label = chosen
+            values["select_label"] = label
+            values["select_minval"], values["select_maxval"] = "", ""
+        lo, hi = pick_filter.parse_range(label, values.get("select_minval"), values.get("select_maxval"), table)
+        result = pick_filter.apply_filter(project_dir, star, job_dir, label, lo, hi)
+        pick_filter.record_selection(job_dir, values, label, lo, hi)
+        what = f"{label} from {pick_filter._number(lo)} to {pick_filter._number(hi)}"
+        return (f"{note}Read {result['total']:,} picks from {star}; kept {result['kept']:,} ({what}).\n"
+                "Use the tuner button above to change the selection: it re-writes this job's particles.star "
+                "each time you apply, and Done keeps what is there.")
+
+    return await asyncio.to_thread(work)
+
+
 CUSTOM_JOB_RUNNERS = {
+    "PickFilter": run_pick_filter,
     "Manualpick": run_manual_pick,
     "TomoManualPick": run_tomo_manual_pick,
     "TomoExcludeTiltImages": run_exclude_tilt_images,

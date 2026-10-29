@@ -419,6 +419,12 @@ with sync_playwright() as p:
 
     check("Clone button visible on a completed job", win8.locator('[data-action="clone"]').is_visible())
     win8.locator('[data-action="clone"]').click()
+    # this job's command was hand-edited above, so Clone warns that the form's
+    # values may differ from what ran, and goes ahead only once confirmed
+    page.wait_for_selector(".mini-dialog", timeout=3000)
+    check("Clone of a job with a hand-edited command asks first",
+          "edited after it was drawn up" in page.locator(".mini-dialog").inner_text())
+    page.locator('.mini-dialog [data-role="confirm"]').click()
     page.wait_for_timeout(500)
     check("Clicking Clone closes the source job's popup", page.locator(".winbox").count() == 1)
     win9 = page.locator(".winbox").first

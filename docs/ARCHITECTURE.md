@@ -1121,6 +1121,28 @@ at most 2000 lines per pane (a note says how many were left out; the whole log i
 `run.out`/`run.err`). Subprocess jobs also get `TQDM_MININTERVAL=2` so tqdm itself
 writes about a tenth of the redraws into `run.err` (an existing value wins).
 
+Filter Picks (`pick_filter.py`, `custom_jobs.run_pick_filter`, `frontend/pickfilter.js`) is an
+interactive job in the picker mould (`is_picker`: stays running until Done, Continue, Overwrite
+restarts) that stands in for RELION's Select job in its select-on-value mode. It registers as
+`relion.select.onvalue` in `Select/jobNNN`: `job_catalog.CUSTOM_JOBS["PickFilter"]` names the real
+job whose options describe it (`real_job`), the option values that make it that mode
+(`registered_values`: `do_select_values`) and its own fields RELION has no option for
+(`unregistered_fields`: the preview star), and `_register_in_relion_pipeline` applies them. The
+tuner only chooses label / min / max; the file is written by the real
+`relion_star_handler --select ...` (project-relative paths, the command appended to `note.txt` as
+RELION does), with a starfile fallback that keeps the same rows. RELION parses `--minval` and
+`--maxval` with `textToFloat`, a 32-bit float even in a double build, so a value exactly on a bound
+that float32 cannot hold is dropped; `pick_filter._keep_mask` and the tuner's `Math.fround` round
+the bounds the same way so the counts shown are the counts written (tested against the real
+binary), and the count reported after a write is the one RELION printed. Each write also updates
+the job's recorded field values and the option rows of its `job.star` in place
+(`pipeline_bridge.update_job_options`, which keeps the file's own quoting), so a registered job
+records the selection its output was made with. A session starts by writing a keep-everything
+`particles.star`: a blank bound, or a default that does not cover the column, becomes just outside
+the column's extreme. The tuner's endpoints (`/api/pick-filter/{run}/info|histogram|counts|image|apply`)
+read the picks file named in the run's own `fn_data`; only `apply` writes, and only while the
+session is open.
+
 The 3D volume viewer (`frontend/volume3d.js`, `backend/volume3d.py`) is Mol*
 (vendored prebuilt viewer, loaded on first use) in its own WinBox window, separate
 from the slice viewer. A browser can only render what it downloads, so
@@ -1136,6 +1158,18 @@ be read. The window drives each map's Mol* isosurface through the plugin state
 tree (`build().to(rep).update(...)`), coalescing slider changes because every
 update re-extracts the surface. Mol*'s hidden panels only redraw on a state
 change, so they are hidden by going through "collapsed" first.
+
+A job records the form's `field_values` next to the command that ran, and Clone
+starts from `field_values`, so a command edited by hand (or a form changed after
+the command was drawn up; nothing recomputes it by itself) would not be
+reproduced by a clone. The popup tracks what it last wrote into the command box
+and the form that text was drawn from, and at Run (and Overwrite) sends
+`command_edited` when either has moved; the run keeps it (`JobRun.command_edited`,
+persisted in the history). A flagged job shows a warning under its command, Clone
+asks first, and recomputing the draft clears the flag for the next run. This
+records the mismatch rather than repairing it; parsing the edited command back
+into field values is possible for the IsoNet2 and DeepETPicker jobs, whose options
+map one to one onto flags, and is not done yet.
 
 IsoNet2 specifics worth knowing: `isonet.py` needs both `PATH` and `PYTHONPATH`
 (what IsoNet's `isonet2.bashrc` sets), so `find_isonet_dir` locates the install

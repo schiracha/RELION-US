@@ -670,6 +670,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     return;
   }
 
+  // What the interactive session of a picker-style job is called in its button texts.
+  const pickerWord = def.picker_kind === "excludetilts" ? "review" : def.picker_kind === "pickfilter" ? "tuning" : "picking";
+
   const optionsByKey = {};
   (def.options || []).forEach((o) => (optionsByKey[o.key] = o));
   // Fetched once here and reused below for the Progress tab's own defaults
@@ -727,11 +730,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       ${def.is_picker ? `<button class="btn primary" data-action="picker" hidden title="${
         def.picker_kind === "excludetilts"
           ? "Open the in-browser tilt-image reviewer for this job — check/uncheck images to exclude them"
-          : "Open the in-browser picker for this job — double-click to add a pick, right-click to delete one"
-      }">${def.picker_kind === "excludetilts" ? "🔍 Open Reviewer" : "🔍 Open Picker"}</button>` : ""}
-      ${def.is_picker ? `<button class="btn" data-action="continue-picking" hidden title="Resume this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — keeps everything already saved">▶ Continue</button>` : ""}
+          : def.picker_kind === "pickfilter"
+            ? "Open the tuner for this job — choose a column and a range with a live histogram and an image preview, then apply it"
+            : "Open the in-browser picker for this job — double-click to add a pick, right-click to delete one"
+      }">${def.picker_kind === "excludetilts" ? "🔍 Open Reviewer" : def.picker_kind === "pickfilter" ? "🎚 Open Tuner" : "🔍 Open Picker"}</button>` : ""}
+      ${def.is_picker ? `<button class="btn" data-action="continue-picking" hidden title="Resume this ${pickerWord} session — keeps everything already saved">▶ Continue</button>` : ""}
       ${internalName === "Select" ? `<button class="btn primary" data-action="select-picker" hidden title="Open the in-browser class selector — this job has no do_select_values/do_discard/do_split/do_class_ranker/do_filaments mode checked, so it ran as an interactive class-average selection instead of a subprocess command">🎯 Select Classes</button>` : ""}
-      <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? `Start a NEW ${def.picker_kind === "excludetilts" ? "review" : "picking"} session in this same job — discards everything already saved here. Use Continue instead to keep it.` : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
+      <button class="btn" data-action="overwrite" hidden title="${def.is_picker ? `Start a NEW ${pickerWord} session in this same job — discards everything already saved here. Use Continue instead to keep it.` : "Re-run into this SAME output directory, overwriting its files (RELION's 'Overwrite' job action)"}">⟳ Overwrite</button>
       <button class="btn" data-action="clone" hidden title="Open a new job of this type, pre-filled with these same settings — a fresh job with its own new number, not tied to this one">⎘ Clone</button>
       <button class="btn" data-action="abort" hidden title="Stop this running job">⏹ Abort</button>
       <button class="btn" data-action="mark-finished" hidden title="Manually mark as finished">✓ Mark Finished</button>
@@ -762,7 +767,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       <div class="command-actions">
         <button class="btn primary" data-role="run-btn">Run</button>
         <button class="btn" data-role="save-draft-btn" title="Save these inputs to come back to later without running">💾 Save Draft</button>
-        ${def.is_picker ? `<button class="btn primary" data-role="done-btn" hidden title="Finish this ${def.picker_kind === "excludetilts" ? "review" : "picking"} session — marks the job complete, including in RELION's own pipeline">✓ Done</button>` : ""}
+        ${def.is_picker ? `<button class="btn primary" data-role="done-btn" hidden title="Finish this ${pickerWord} session — marks the job complete, including in RELION's own pipeline">✓ Done</button>` : ""}
         <span class="status-line" data-role="status-line"></span>
       </div>
     </div>` : `
@@ -772,6 +777,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       </label>
       <textarea class="command-box" data-role="command-box"></textarea>
       <div class="draft-notes" data-role="draft-notes" hidden></div>
+      <div class="draft-notes edited-note" data-role="edited-note" hidden></div>
       <div class="wait-row" data-role="wait-row">
         <label class="wait-toggle-label"><input type="checkbox" data-role="wait-toggle"> Wait for other job(s) before starting</label>
         <div class="wait-fields" data-role="wait-fields" hidden>
@@ -1038,8 +1044,37 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
 
   // Draft command recompute (RELION jobs only)
   const commandBox = body.querySelector('[data-role="command-box"]');
+  // What the app last put in the command box, and the form it was drawn up
+  // from. At Run time a box that no longer says that (edited by hand), or a
+  // form that has moved on since, means the recorded field_values do not
+  // describe what actually ran -- so Clone, which starts from them, would not
+  // reproduce the job. The run is flagged (command_edited) and the job says so.
+  // A reopened run that was already flagged stays flagged until the draft is
+  // recomputed from the form.
+  let autoCommand = "";
+  let autoForm = "";
+  let inheritedEdited = false;
+  function commandIsFromForm() {
+    if (!commandBox) return true;
+    return !inheritedEdited && commandBox.value.trim() === autoCommand.trim()
+      && JSON.stringify(collectValues()) === autoForm;
+  }
+  function renderEditedNote(run) {
+    const el = body.querySelector('[data-role="edited-note"]');
+    if (!el) return;
+    const edited = !!(run && run.command_edited);
+    el.hidden = !edited;
+    el.innerHTML = edited
+      ? "⚠ This command was edited after it was drawn up from the form (by hand, or the form was changed "
+        + "afterwards), so the settings in the form above may not match what ran. The command above is what "
+        + "ran. <b>Clone starts from the form's values, not from this command.</b>"
+      : "";
+  }
   if (commandBox) {
     commandBox.value = isReopen ? (currentRun.command || "") : (def.draft_command || "");
+    autoCommand = commandBox.value;
+    autoForm = JSON.stringify(collectValues());
+    inheritedEdited = !!(isReopen && currentRun && currentRun.command_edited);
     const recomputeBtn = body.querySelector('[data-role="recompute-btn"]');
     async function recomputeDraft() {
   try {
@@ -1059,6 +1094,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       ),
     });
     commandBox.value = resp.draft_command;
+    autoCommand = commandBox.value;
+    autoForm = JSON.stringify(collectValues());
+    inheritedEdited = false;
     // Options the draft deliberately left out for these settings (e.g. float16
     // with MotionCor2/3) -- said out loud rather than silently dropped.
     const notesEl = body.querySelector('[data-role="draft-notes"]');
@@ -1552,6 +1590,10 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     pickerBtn.addEventListener("click", () => {
       if (!currentRun) return;
       const kind = def.picker_kind;
+      if (kind === "pickfilter") {
+        openPickFilterTuner({ runId: currentRun.run_id, jobName: currentRun.job_name });
+        return;
+      }
       const sourceKey = kind === "spa" ? "fn_in" : kind === "excludetilts" ? "in_tiltseries" : "in_tomoset";
       const sourcePath = (currentRun.field_values || {})[sourceKey];
       if (!sourcePath) {
@@ -1611,6 +1653,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       else {
         payload.command = cmdToRun;
         payload.field_values = collectValues();
+        payload.command_edited = !commandIsFromForm();
         // Lets the backend's own defensive rewrite (start_subprocess_job)
         // catch and fix a stale output dir in the command box -- e.g. left
         // over from before this popup's Recompute was fixed to track the
@@ -1643,8 +1686,13 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // too (source: "relion"), which is the point: it's the supported way to
   // get an unregistered job's settings into a properly tracked, registrable
   // RELION-US run without touching the original.
-  cloneBtn.addEventListener("click", () => {
+  cloneBtn.addEventListener("click", async () => {
     if (!currentRun) return;
+    if (currentRun.command_edited && !(await confirmDialog(
+      `The command of "${currentRun.job_name}" was edited after it was drawn up from the form, so the form's `
+      + `settings may differ from what actually ran. Clone starts from the form's values, not from the command `
+      + `that ran. Check the settings in the new job against this job's command.`,
+      { confirmLabel: "Clone anyway" }))) return;
     win.close();
     openJobPopup(internalName, displayName, null, { cloneFieldValues: currentRun.field_values || {} });
   });
@@ -1659,7 +1707,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   // file content. The volume extension set mirrors backend/viz.py's own
   // VOLUME_SUFFIXES exactly -- keep the two in sync if that set ever changes.
   function previewKindFor(path) {
-    if (/\.star$/i.test(path)) return "star";
+    if (/\.(star|coords|csv)$/i.test(path)) return "star";    // tables: the same preview panel
     if (/\.(png|jpe?g|gif|webp)$/i.test(path)) return "image";
     if (/\.(mrc|mrcs|rec|st|ali)$/i.test(path)) return "volume";
     return null;
@@ -1751,9 +1799,11 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
           <table class="star-kv-table">${block.fields.map(starPreviewFieldRow).join("")}</table>
         </div>`;
     }
-    const meta = block.truncated
-      ? `showing ${block.rows.length.toLocaleString()} of ${block.total_rows.toLocaleString()} rows`
-      : `${block.total_rows.toLocaleString()} row${block.total_rows === 1 ? "" : "s"}`;
+    const meta = block.total_rows === null || block.total_rows === undefined
+      ? `first ${block.rows.length.toLocaleString()} rows (file too large to count)`
+      : block.truncated
+        ? `showing ${block.rows.length.toLocaleString()} of ${block.total_rows.toLocaleString()} rows`
+        : `${block.total_rows.toLocaleString()} row${block.total_rows === 1 ? "" : "s"}`;
     return `
       <div class="star-block">
         <div class="star-block-name">${escapeHtml(block.name || "(unnamed block)")}<span class="star-block-meta">${meta}</span></div>
@@ -2541,6 +2591,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     statusLine.textContent = `Status: ${currentRun.status}`
       + (waitingOn(currentRun) ? ` — waiting for ${waitingOn(currentRun)}` : "");
     statusLine.className = statusLineClass(currentRun.status);
+    renderEditedNote(currentRun);
     connectWebSocket(currentRun.run_id);
   } else {
     runBtn.addEventListener("click", async () => {
@@ -2555,6 +2606,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         } else {
           payload.command = commandBox.value;
           payload.field_values = collectValues();
+          payload.command_edited = !commandIsFromForm();
           // Tell the backend which <JobDir>/jobNNN this command's --o targets,
           // so it creates/tracks that dir and can renumber if it was taken.
           payload.subdir = popupOutputSubdir;
@@ -2569,6 +2621,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         });
         currentRun = run;
         refreshToolbarState();
+        renderEditedNote(run);
         connectWebSocket(run.run_id);
         refreshCommandCenter();
         if (saveDraftBtn) saveDraftBtn.style.display = "none";
@@ -2626,8 +2679,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     doneBtn.addEventListener("click", async () => {
       if (!currentRun) return;
       const ok = await confirmDialog(
-        `Mark "${currentRun.job_name}" as finished? This ends the picking session -- `
-        + `you can still reopen the picker afterward, or use Continue to resume it.`,
+        `Mark "${currentRun.job_name}" as finished? This ends the ${pickerWord} session -- `
+        + `you can still reopen the ${def.picker_kind === "pickfilter" ? "tuner" : "picker"} afterward, or use Continue to resume it.`,
         { confirmLabel: "Done" }
       );
       if (!ok) return;

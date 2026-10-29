@@ -467,6 +467,12 @@ class JobRun:
     wait_for: list[str] = field(default_factory=list)
     wait_mode: str = WAIT_MODE_SUCCESS
     waiting: bool = False
+    # True when the command that ran is not the one the form drew up: it was
+    # edited by hand, or the form was changed after the command was drawn up. The
+    # recorded field_values then describe the form, not what ran, so Clone (which
+    # starts from field_values) would not reproduce this job. The popup sets it
+    # at Run time and says so on the job. Persisted via to_summary().
+    command_edited: bool = False
     # True for a run taken back after a RELION-US restart (adopt_running_jobs):
     # its process belongs to the previous backend, so there is no proc handle.
     adopted: bool = field(default=False, repr=False, compare=False)
@@ -525,6 +531,7 @@ class JobRun:
             "wait_for": self.wait_for,
             "wait_mode": self.wait_mode,
             "waiting": self.waiting,
+            "command_edited": self.command_edited,
         }
 
     async def broadcast(self, message: dict) -> None:
@@ -971,15 +978,23 @@ class JobRunManager:
             type_label = custom_meta["label_new"] if custom_meta else ""
             if not type_label.startswith("relion."):
                 return None
+        # A custom job that stands in for one mode of a real RELION job (Filter
+        # Picks is Select on value) says which real job's options describe it,
+        # the option values that make it that mode, and which of its own fields
+        # RELION has no option for -- see job_catalog.CUSTOM_JOBS.
+        stand_in = job_catalog.CUSTOM_JOBS.get(internal_name) or {}
         try:
             import job_registry
 
             options_by_key = {
-                o["key"]: o for o in job_registry.raw_job(internal_name).get("options", [])
+                o["key"]: o for o in job_registry.raw_job(stand_in.get("real_job", internal_name)).get("options", [])
             }
         except Exception:
             options_by_key = {}
         field_values = dict(field_values or {})
+        for key in stand_in.get("unregistered_fields", ()):
+            field_values.pop(key, None)
+        field_values.update(stand_in.get("registered_values", {}))
         field_values["is_tomo"] = internal_name in job_catalog.TOMO_VARIANT_OF
         # RELION allocates from its own counter, which does not know about the
         # jobs only RELION-US runs; tell it the lowest number that is free.
@@ -1175,6 +1190,7 @@ class JobRunManager:
         slurm_options: Optional[dict] = None,
         wait_for: Optional[list[str]] = None,
         wait_mode: str = WAIT_MODE_SUCCESS,
+        command_edited: bool = False,
     ) -> JobRun:
         """
         Launch `command` (the exact, user-edited string) via the shell,
@@ -1399,6 +1415,7 @@ class JobRunManager:
         run.rewrite_note = rewrite_note
         run.pipeline_sync_error = pipeline_sync_error
         run.clean_on_start = overwrite_run_id is not None
+        run.command_edited = bool(command_edited)
         if wait_for:
             run.wait_for, run.wait_mode = wait_for, wait_mode
             run.waiting = True
@@ -2809,6 +2826,22 @@ class JobRunManager:
         project_manager.save_history(self.project_dir, history)
         self._notify_changed(run_id, entry.get("status"))
         return entry
+
+    def update_field_values(self, run_id: str, updates: dict) -> Optional[dict]:
+        """Merge `updates` into a run's recorded field_values (live or only in
+        the history), so Clone and a reopened popup show what the job now holds.
+        Filter Picks uses it: tuning changes the label / min / max the job's
+        output was made with."""
+        run = self.get(run_id)
+        if run is None:
+            entry = next((h for h in project_manager.load_history(self.project_dir)
+                          if h.get("run_id") == run_id), None)
+            if entry is None:
+                return None
+            return self._update_persisted_only(run_id, field_values={**(entry.get("field_values") or {}), **updates})
+        run.field_values = {**(run.field_values or {}), **updates}
+        self._persist(run)
+        return run.to_summary()
 
     def set_alias(self, run_id: str, alias: str) -> Optional[dict]:
         """Real RELION 'Alias' job action (gui_mainwindow.cpp's

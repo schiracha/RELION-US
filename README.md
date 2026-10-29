@@ -449,8 +449,9 @@ between jobs.
 - **CTF QC tab** (CTF Estimation only) — every micrograph's or tilt image's
   CTF fit numbers, with thumbnails, once the job finishes.
 - **Outputs tab** — browse and download individual files, or a `.zip` of any
-  selection. Click a `.star` filename to preview its contents inline instead
-  of downloading it first.
+  selection. Click a `.star`, `.coords` or `.csv` filename to preview its
+  contents inline as a table (the first rows of a long file, with the total)
+  instead of downloading it first.
 - **Alerts tab** — fills in live with whatever the run writes to stderr (real
   errors, but also the warnings and INFO logging many tools send there); the tab badge
   shows a running count of the lines. A progress bar that redraws one line over and
@@ -462,6 +463,13 @@ between jobs.
   against RELION's real logic by eye.
 - **Command box** — pre-filled with the draft, fully editable. **Recompute
   draft** regenerates it from the current form values; or just hand-edit it.
+  Fields do not rewrite the command by themselves, and a run records the form's
+  values next to the command, so a command you edited by hand (or a form you
+  changed after the command was drawn up) is **flagged** on the job with a
+  warning under the command box: the recorded settings may not match what
+  actually ran, and **Clone**, which starts from the form's values, would not
+  reproduce it (it asks before cloning such a job). Recompute the draft before
+  Run to avoid the mismatch.
 - **Run** — executes exactly the string in the command box (RELION, IsoNet2
   and DeepETPicker jobs) or calls the converter directly (import bridges), streams output live
   over a websocket, and keeps the full transcript if you close and reopen.
@@ -585,6 +593,15 @@ pip install -r requirement.txt    # pytorch-lightning 1.1.0 and the rest
 pip install -e .     # provides the `deepetpicker` command
 ```
 
+Every pick Predict makes has a score, written to `particles.star` as
+`rlnAutopickFigureOfMerit` (RELION's pick-score column) and as the fifth column
+of `coords_with_area/<tomogram>.coords`. It is the peak of the smoothed 0/1
+prediction mask around the pick — about 1.0 for a pick inside a solidly predicted
+particle — not a raw network probability. The Predict job's **Minimum pick
+score** keeps only picks scoring at least that in `particles.star`; leave it at 0
+and choose the cutoff afterwards, without re-running the network, with
+**Filter Picks (interactive)** or RELION's Select on value.
+
 Prepare needs only `pip install -e .`. Train and Predict run the fork's
 `train.py` and `test.py` (from the same checkout, so keep it in place — the
 command finds them through the editable install), and they depend on edits I
@@ -631,6 +648,27 @@ job.
   from the tilt series' original input, never from a previous save, so
   re-checking a previously-excluded image genuinely re-includes it and nothing
   accumulates across sessions.
+- **Filter Picks (interactive)** — RELION's *Select on value* with a tuner:
+  point it at a particles/picks STAR (tomography `rlnTomoName`, or single-particle
+  `rlnMicrographName`), press **🎚 Open Tuner**, and choose the column to filter
+  on from a drop-down (RELION's pick score `rlnAutopickFigureOfMerit` first, then
+  other score-like columns, then position/orientation columns, then any other
+  numeric column that varies), the range to keep (two sliders, numeric boxes, or
+  drag the bounds on the histogram), and watch the kept/excluded counts, overall
+  and per image, change live. A preview shows one tomogram slice or micrograph
+  with its picks drawn kept (green) or excluded (red), with the pick's value on
+  hover; for tomograms give the job a `tomograms.star` to draw them on (without
+  one, or for a tomogram it does not list, the picks are shown as a scatter).
+  **Apply to job** writes `particles.star` with `relion_star_handler --select
+  <label> --minval <min> --maxval <max>` — the very command RELION's own Select
+  job runs, recorded in the job's `note.txt` — so the output is exactly what RELION would
+  write and the job registers in RELION's pipeline as `relion.select.onvalue` in
+  `Select/jobNNN`, recording the label and range you chose. (Without RELION on
+  `PATH` the same rows are selected in Python.) The counts use RELION's own
+  comparison, which reads `--minval` / `--maxval` as 32-bit floats: a pick sitting
+  exactly on a bound such as a score of 0.9 with maximum 0.9 is left out, as it
+  is by RELION. Like the picking jobs it stays running until **Done**, and
+  **Continue** reopens it. A job started untouched keeps every pick.
 - **Subset Selection (Select)** — RELION's Select job is a six-way branch.
   Five of them (select-on-value, discard-on-statistics, split, automated
   class-ranker, filament selection) are ordinary command-line calls RELION-US

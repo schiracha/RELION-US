@@ -766,6 +766,7 @@ wants viewer  && run_browser_suite test_volume3d_popup.py
 wants options  && run_browser_suite test_job_options_panel.py
 wants jobs     && run_browser_suite test_jobs.py
 wants jobs     && run_browser_suite test_deepetpicker_popup.py
+wants jobs     && run_browser_suite test_pick_filter_popup.py
 wants project  && run_browser_suite test_frontend_project.py
 wants legacy   && run_browser_suite test_legacy_project.py yes
 wants legacy   && run_browser_suite test_network_branching.py

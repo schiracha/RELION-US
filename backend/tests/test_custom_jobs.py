@@ -744,3 +744,48 @@ def test_tomo_manual_pick_job_fails_loudly_when_the_star_has_no_volumes(tmp_path
     job_dir.mkdir(parents=True)
     with pytest.raises(ValueError, match="No tomogram volumes found"):
         asyncio.run(custom_jobs.run_tomo_manual_pick(tmp_path, {"in_tomoset": "tomograms.star"}, job_dir))
+
+
+# ---------------------------------------------------------------------------
+# Filter Picks registers as the real RELION job it is: Select on value
+# ---------------------------------------------------------------------------
+
+def test_filter_picks_registers_as_relions_select_on_value_and_records_what_was_tuned(synced_project):
+    import pandas as pd
+    import pick_filter
+    import starfile
+
+    project = synced_project
+    starfile.write({"particles": pd.DataFrame({
+        "rlnTomoName": ["TS_1"] * 4, "rlnCoordinateX": [1.0, 2, 3, 4], "rlnCoordinateY": [1.0, 2, 3, 4],
+        "rlnCoordinateZ": [1.0, 2, 3, 4], "rlnAutopickFigureOfMerit": [0.2, 0.5, 0.75, 1.0]})},
+        project / "p.star", overwrite=True)
+    manager = JobRunManager(project)
+    values = {"fn_data": "p.star", "fn_preview": "Tomograms/tomograms.star", "select_label": "rlnAutopickFigureOfMerit",
+              "select_minval": "-9999.", "select_maxval": "9999."}
+
+    async def go():
+        async def factory(job_dir):
+            return await custom_jobs.run_pick_filter(project, values, job_dir)
+        run = await manager.start_custom_job("PickFilter", "Filter Picks", factory, field_values=values,
+                                             stays_running=True)
+        await run.task
+        return run
+
+    run = asyncio.run(go())
+    assert run.status == "running" and run.pipeline_registered
+    job_dir = Path(run.cwd)
+    pipeline = project_manager.read_relion_pipeline(project)
+    proc = next(p for p in pipeline["processes"] if p["name"] == f"Select/{job_dir.name}")
+    assert proc["type_label"] == "relion.select.onvalue" and proc["status_label"] == "Running"
+    job_star = (job_dir / "job.star").read_text()
+    assert 'do_select_values "Yes"' in job_star                       # what makes it the on-value job
+    assert 'fn_data "p.star"' in job_star
+    assert "fn_preview" not in job_star                               # this app's own field, unknown to RELION
+    assert 'select_label "rlnAutopickFigureOfMerit"' in job_star
+    # tuning updates what the registered job records, as RELION's own job.star would hold
+    pick_filter.apply_filter(project, "p.star", job_dir, "rlnAutopickFigureOfMerit", 0.5, 1.0)
+    pick_filter.record_selection(job_dir, None, "rlnAutopickFigureOfMerit", 0.5, 1.0)
+    job_star = (job_dir / "job.star").read_text()
+    assert 'select_minval "0.5"' in job_star and 'select_maxval "1"' in job_star and 'do_select_values "Yes"' in job_star
+    assert len(starfile.read(job_dir / "particles.star")) == 3

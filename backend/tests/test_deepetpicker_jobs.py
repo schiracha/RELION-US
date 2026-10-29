@@ -40,7 +40,7 @@ EXPECTED_FLAGS = {
               "lr", "max_epochs", "seg_thresh", "gpu", "resume"},
     "predict": {"output_dir", "train_job", "model", "tomo_dir", "tomo_star", "tomo_column", "tomo_ext",
                 "project_dir", "already_standardized", "batch_size", "patch_size", "pad_size", "seg_thresh",
-                "gpu", "refine_centroids", "relion_scale"},
+                "gpu", "refine_centroids", "min_score", "relion_scale"},
 }
 NOT_EXPOSED = {"tomo_ext", "project_dir", "coords_ext", "output_dir"}
 
@@ -238,3 +238,14 @@ def test_train_job_gets_the_loss_curve_view():
     js = (Path(__file__).resolve().parents[2] / "frontend" / "app.js").read_text()
     line = next(l for l in js.splitlines() if l.startswith("const ISONET_LOSS_JOB_TYPES"))
     assert '"DeepETPickerTrain"' in line and "loss_full.png" in js
+
+
+def test_predict_min_score_is_left_off_at_zero_and_passed_when_set():
+    from deepetpicker_jobs import build_deepetpicker_command
+    base = {"train_job": "DeepETPickerTrain/job002", "tomo_dir": "t"}
+    assert "--min_score" not in build_deepetpicker_command("DeepETPickerPredict", base, "DeepETPickerPredict/job003")
+    assert "--min_score" not in build_deepetpicker_command(
+        "DeepETPickerPredict", {**base, "min_score": 0}, "DeepETPickerPredict/job003")
+    tokens = build_deepetpicker_command(
+        "DeepETPickerPredict", {**base, "min_score": 0.8}, "DeepETPickerPredict/job003").split()
+    assert tokens[tokens.index("--min_score") + 1] == "0.8"
