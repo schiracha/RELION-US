@@ -264,7 +264,7 @@ def inspect(project_dir: Path, path: str, particles_path: Optional[str] = None) 
     mismatch warning. Never raises for a mismatch (that's a warning, not an
     error) — only for unreadable/invalid inputs."""
     src = _safe(project_dir, path)
-    if not src.is_file():
+    if not (src.is_file() or src.is_dir()):
         raise VizError(f"file not found: {path}")
 
     suffix = src.suffix.lower()
@@ -273,7 +273,15 @@ def inspect(project_dir: Path, path: str, particles_path: Optional[str] = None) 
         "tomograms": [], "particles_path": None, "warnings": [], "needs_mrc": False,
     }
 
-    if suffix in VOLUME_SUFFIXES:
+    if src.is_dir():
+        # A folder of volumes (e.g. a DeepETPicker job's tomograms_std/): every volume in it
+        # is offered, so a running job's tomograms can be paged through as they are picked.
+        result["kind"] = "volume_folder"
+        result["tomograms"] = [{"name": f.stem, "mrc_path": str(f)} for f in sorted(src.iterdir())
+                               if f.suffix.lower() in VOLUME_SUFFIXES and (f.is_file() or f.is_symlink())]
+        if not result["tomograms"]:
+            raise VizError(f"no volumes ({', '.join(sorted(VOLUME_SUFFIXES))}) in the folder {path}")
+    elif suffix in VOLUME_SUFFIXES:
         result["kind"] = "volume"
         result["tomograms"] = [{"name": src.stem, "mrc_path": str(src)}]
     elif suffix in STAR_SUFFIXES:
@@ -296,8 +304,10 @@ def inspect(project_dir: Path, path: str, particles_path: Optional[str] = None) 
     # from the STAR (single place, rather than once per branch).
     if particles_path:
         ppath = _safe(project_dir, particles_path)
-        if not ppath.is_file():
-            raise VizError(f"particles file not found: {particles_path}")
+        if not (ppath.is_file() or ppath.is_dir()):
+            raise VizError(f"picks file not found: {particles_path}")
+        if ppath.is_dir() and not any(ppath.glob("*.coords")):
+            raise VizError(f"no .coords files in the folder {particles_path}")
         result["particles_path"] = str(ppath)
 
     return result
@@ -555,6 +565,8 @@ def load_picks(
     if `tomo_name` is given and the STAR has an rlnTomoName column, we check
     whether any rows correspond to it (exact, or by filename stem)."""
     p = _safe(project_dir, particles_path)
+    if p.is_dir() or p.suffix.lower() == ".coords":
+        return _load_coords_picks(project_dir, p, tomo_name)
     if not p.is_file():
         raise VizError(f"particles file not found: {particles_path}")
     blocks = _read_star_blocks(p)
@@ -614,6 +626,81 @@ def load_picks(
     ]
 
     return {"picks": picks, "tomo_names": tomo_names, "matched": matched, "message": message}
+
+
+def read_coords_file(path: Path) -> dict:
+    """A DeepETPicker `.coords` file: whitespace (or comma) separated `x y z`,
+    `class x y z`, or `class x y z score` (the form predict writes to coords_with_area/).
+    Coordinates are voxels of the tomogram it was picked on. Returns {x, y, z, class,
+    score|None} as arrays. Lenient: comments and blank lines are skipped, and a last line
+    with no newline that does not fit the rows before it (a file a running job is still
+    writing) is ignored. A last line without a newline that does fit is kept, since other
+    tools do not always end the file with one."""
+    text = Path(path).read_text(errors="replace")
+    lines = text.split("\n")
+    complete = text.endswith("\n")
+    rows, scores, widths = [], [], []
+    for i, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace(",", " ").split()
+        if i == len(lines) and not complete and widths and len(parts) != widths[-1]:
+            continue                                     # cut off mid-line by a job still writing
+        try:
+            if len(parts) == 3:
+                values = [1.0] + [float(v) for v in parts]
+            elif len(parts) in (4, 5):
+                values = [float(v) for v in parts]
+            else:
+                raise ValueError(f"expected 3, 4 or 5 columns, got {len(parts)}")
+        except ValueError as exc:
+            if i == len(lines) and not complete:
+                continue                                     # still being written
+            raise VizError(f"{Path(path).name}:{i}: {exc}: {line!r}") from exc
+        rows.append(values[:4])
+        scores.append(values[4] if len(values) == 5 else None)
+        widths.append(len(parts))
+    arr = np.asarray(rows, dtype=float).reshape(-1, 4)
+    has_scores = bool(scores) and all(s is not None for s in scores)
+    return {"class": arr[:, 0], "x": arr[:, 1], "y": arr[:, 2], "z": arr[:, 3],
+            "score": np.asarray(scores, dtype=float) if has_scores else None}
+
+
+def _load_coords_picks(project_dir: Path, p: Path, tomo_name: Optional[str]) -> dict:
+    """Picks from one `.coords` file (that tomogram's picks; the file's stem names it) or
+    from a folder of them (the file matching the chosen tomogram, e.g. a predict job's
+    coords/, which gains a file as each tomogram finishes). Same result shape as the STAR path."""
+    if p.is_dir():
+        files = sorted(p.glob("*.coords"))
+        if not files:
+            raise VizError(f"no .coords files in {p.name}/")
+        names = [f.stem for f in files]
+        chosen = next((f for f in files if tomo_name and _names_match(f.stem, tomo_name)), None)
+        if chosen is None and tomo_name is None and len(files) == 1:
+            chosen = files[0]
+        matched, message = _match_check(tomo_name, names)
+        if chosen is None and matched is not False:
+            matched = False
+        if chosen is None:
+            message = (f"No .coords file for '{tomo_name}' in {p.name}/ yet (found: {', '.join(names[:6])}"
+                       f"{'…' if len(names) > 6 else ''}). A running job adds one as each tomogram finishes.")
+    else:
+        chosen, names = p, [p.stem]
+        matched, message = _match_check(tomo_name, names)
+    picks: list[dict] = []
+    if chosen is not None:
+        chosen = _safe(project_dir, str(chosen))          # a file in the folder may be a link out of the project
+        data = read_coords_file(chosen)
+        score = data["score"]
+        for i in range(len(data["x"])):
+            pick = {"x": float(data["x"][i]), "y": float(data["y"][i]), "z": float(data["z"][i]),
+                    "class": int(data["class"][i])}
+            if score is not None:
+                pick["score"] = float(score[i])
+            picks.append(pick)
+    return {"picks": picks, "tomo_names": names, "matched": matched, "message": message,
+            "source": chosen.name if chosen is not None else None}
 
 
 def _match_check(tomo_name: Optional[str], tomo_names: list[str]) -> tuple[bool, str]:

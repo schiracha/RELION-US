@@ -1731,6 +1731,8 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         <span class="out-size">${formatBytes(f.size)}</span>
         ${/\.(mrc|rec|map)$/i.test(f.path)
           ? '<span class="out-3d" data-role="open3d" title="Open in the 3D volume viewer">🧊</span>' : ""}
+        ${/\.coords$/i.test(f.path)
+          ? '<span class="out-3d" data-role="open-picks" title="View these picks on their tomogram (the job\'s tomograms_std/) in the viewer; the other tomograms of the job are in its list">📍</span>' : ""}
         <span class="out-download" data-role="download" title="Download">⬇</span>
       </div>`;
     }).join("")}</div>`;
@@ -1742,6 +1744,22 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         e.stopPropagation();
         // an absolute path under the project, like the tomogram viewer gets
         openVolumeViewer(`${currentRun.cwd.replace(/\/+$/, "")}/${el.closest(".outputs-row").dataset.path}`);
+      });
+    });
+  }
+
+  // A DeepETPicker .coords file: show it on its tomogram, with the job's other tomograms and
+  // their picks one pick away. Works while the job still runs (its coords/ gains a file per tomogram).
+  function wireOpenPicksClicks(container) {
+    container.querySelectorAll('[data-role="open-picks"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const rel = el.closest(".outputs-row").dataset.path;            // e.g. coords/TS_001.coords
+        const cut = rel.lastIndexOf("/");
+        const dir = cut >= 0 ? rel.slice(0, cut) : "";
+        const stem = rel.slice(cut + 1).replace(/\.coords$/i, "");
+        const root = currentRun.cwd.replace(/\/+$/, "");
+        openVisualizer(null, `${root}/tomograms_std`, { particles: dir ? `${root}/${dir}` : `${root}/${rel}`, tomo: stem });
       });
     });
   }
@@ -2469,6 +2487,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       `;
       wireDownloadClicks(outputsContent);
       wireOpen3dClicks(outputsContent);
+      wireOpenPicksClicks(outputsContent);
       wireStarPreviewClicks(outputsContent);
       wireStarPreviewPanel(outputsContent);
 
@@ -2497,6 +2516,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
         `;
         wireDownloadClicks(outputsContent);   // the review list has ⬇ links too
         wireOpen3dClicks(outputsContent);
+        wireOpenPicksClicks(outputsContent);
         wireStarPreviewClicks(outputsContent);
         wireStarPreviewPanel(outputsContent);
         outputsContent.querySelector('[data-role="cancel-clean-btn"]').addEventListener("click", loadOutputsTab);
@@ -4783,7 +4803,7 @@ async function openAnalyzePopup() {
 // project-relative path to load immediately, no picking UI -- used by the
 // Outputs tab (see wireVolumePreviewClicks) to jump straight to viewing one
 // specific output .mrc without the user re-typing/re-browsing for it.
-async function openVisualizer(pickingContext = null, initialPath = null) {
+async function openVisualizer(pickingContext = null, initialPath = null, opts = {}) {
   const body = document.createElement("div");
   body.className = "viz-popup";
   // Layout: the orthogonal views take the whole left side; every control and
@@ -4813,17 +4833,19 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     <aside class="viz-side">
       <div class="viz-side-group">
         <label class="viz-field">
-          <span class="viz-field-label">Tomogram / STAR</span>
+          <span class="viz-field-label">Tomogram / STAR / folder</span>
           <span class="viz-input-row">
             <input type="text" class="viz-input-sm" data-role="viz-path" placeholder="Tomograms/job012/tomograms.star" />
             <button type="button" class="btn btn-icon" data-role="viz-browse-main" title="Browse for a STAR or MRC file on the machine running the backend">…</button>
+            <button type="button" class="btn btn-icon" data-role="viz-browse-main-dir" title="Browse for a folder of volumes (e.g. a DeepETPicker job's tomograms_std/) to page through them">📁</button>
           </span>
         </label>
         <label class="viz-field">
-          <span class="viz-field-label">Picks STAR <span class="viz-hint">(optional)</span></span>
+          <span class="viz-field-label">Picks <span class="viz-hint">(optional: a STAR, a .coords file, or a folder of .coords)</span></span>
           <span class="viz-input-row">
-            <input type="text" class="viz-input-sm" data-role="viz-particles" placeholder="particles.star" />
-            <button type="button" class="btn btn-icon" data-role="viz-browse-particles" title="Browse for a particles/coordinates STAR file">…</button>
+            <input type="text" class="viz-input-sm" data-role="viz-particles" placeholder="particles.star, picks.coords or coords/" />
+            <button type="button" class="btn btn-icon" data-role="viz-browse-particles" title="Browse for a particles/coordinates STAR file or a DeepETPicker .coords file">…</button>
+            <button type="button" class="btn btn-icon" data-role="viz-browse-particles-dir" title="Browse for a folder of .coords files (e.g. a predict job's coords/): each tomogram shows its own file, and a running job adds one as each finishes">📁</button>
           </span>
         </label>
         <div class="viz-inputs-row">
@@ -5218,6 +5240,13 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
           volume: state.vinfo,
         }),
       });
+      if (resp.matched === false && resp.source === null) {
+        // a folder of .coords with no file for this tomogram (a running job has not reached it yet):
+        // nothing to load, and nothing to ask about
+        state.picks = [];
+        statusEl.textContent = resp.message;
+        return;
+      }
       if (resp.matched === false) {
         const choice = await choiceDialog(
           "⚠ " + resp.message + "\n\nLoad these picks anyway, pick different files, or cancel?",
@@ -5250,10 +5279,24 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     });
     if (picked) q('[data-role="viz-path"]').value = picked;
   });
+  q('[data-role="viz-browse-main-dir"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({
+      title: "Select a folder of tomograms (MRC volumes)", mode: "directory",
+      startPath: startFolderOf(q('[data-role="viz-path"]').value),
+    });
+    if (picked) q('[data-role="viz-path"]').value = picked;
+  });
+  q('[data-role="viz-browse-particles-dir"]').addEventListener("click", async () => {
+    const picked = await pickFileDialog({
+      title: "Select a folder of .coords files", mode: "directory",
+      startPath: startFolderOf(q('[data-role="viz-particles"]').value || q('[data-role="viz-path"]').value),
+    });
+    if (picked) q('[data-role="viz-particles"]').value = picked;
+  });
   q('[data-role="viz-browse-particles"]').addEventListener("click", async () => {
     const picked = await pickFileDialog({
-      title: "Select a particles / coordinates STAR file",
-      extensions: [".star"],
+      title: "Select a particles / coordinates STAR file, or a DeepETPicker .coords file",
+      extensions: [".star", ".coords"],
       startPath: currentDirOf(q('[data-role="viz-particles"]').value)
         || currentDirOf(q('[data-role="viz-path"]').value),
     });
@@ -5263,7 +5306,10 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
   // --- Load button: inspect -> populate tomograms -> load volume+picks ---
   // Named (not an inline arrow in the listener) so initialPath below can
   // trigger the exact same load a manual click would, once, on open.
-  async function runVizLoad() {
+  async function runVizLoad(preferTomo) {
+    // preferTomo: the name of the tomogram to show first (a click on a pick file's row).
+    // The Load button passes its click event, which is not a name.
+    preferTomo = typeof preferTomo === "string" ? preferTomo : null;
     const path = q('[data-role="viz-path"]').value.trim();
     state.particles = q('[data-role="viz-particles"]').value.trim() || null;
     if (!path) { statusEl.textContent = "Enter a STAR or MRC path."; return; }
@@ -5283,8 +5329,10 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     }
     const tomos = info.tomograms || [];
     const sel = q('[data-role="viz-tomo"]');
+    const firstIndex = Math.max(0, tomos.findIndex((t) => preferTomo && t.name === preferTomo));
     if (tomos.length > 1) {
       sel.innerHTML = tomos.map((t, i) => `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
+      sel.value = String(firstIndex);
       sel.style.display = "";
       sel.onchange = async () => {
         const t = tomos[sel.value];
@@ -5297,13 +5345,13 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
       sel.style.display = "none";
     }
     if (!tomos.length) { statusEl.textContent = "No tomogram volume found to display."; return; }
-    const t = tomos[0];
+    const t = tomos[firstIndex];
     state.tomo = t.name;
     await loadVolume(t.mrc_path);
     await loadPicks(t.mrc_path);
     refreshAllPanels();
   }
-  q('[data-role="viz-load"]').addEventListener("click", runVizLoad);
+  q('[data-role="viz-load"]').addEventListener("click", () => runVizLoad());
   q('[data-role="viz-open3d"]').addEventListener("click", () => { if (state.mrc) openVolumeViewer(state.mrc); });
 
   // --- Controls ---
@@ -5388,6 +5436,7 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
     pathInput.value = sourcePath;
     pathInput.disabled = true;
     q('[data-role="viz-browse-main"]').style.display = "none";
+    q('[data-role="viz-browse-main-dir"]').style.display = "none";
     q('[data-role="viz-particles"]').closest(".viz-field").style.display = "none";
     q('[data-role="viz-load"]').style.display = "none";
 
@@ -5585,7 +5634,8 @@ async function openVisualizer(pickingContext = null, initialPath = null) {
   // field to its own sourcePath already (see above) and has no Load button.
   if (initialPath && !pickingContext) {
     q('[data-role="viz-path"]').value = initialPath;
-    runVizLoad();
+    if (opts.particles) q('[data-role="viz-particles"]').value = opts.particles;
+    runVizLoad(opts.tomo || null);
   }
 }
 
@@ -5945,6 +5995,17 @@ let cachedProjectPath = null;
 // typed in that field, so re-browsing resumes where you left off. Returns null
 // (meaning "start at the project directory") when the field is empty or has no
 // folder part.
+// Where a folder picker should open for a field that holds either a file or a
+// folder: a file's own folder, or the folder itself -- made absolute either
+// way, since the browse endpoint takes no project-relative paths.
+function startFolderOf(value) {
+  const v = (value || "").trim().replace(/\/+$/, "");
+  if (!v) return null;
+  if (/\.[A-Za-z0-9]+$/.test(v.slice(v.lastIndexOf("/") + 1))) return currentDirOf(v);
+  if (v.startsWith("/")) return v;
+  return cachedProjectPath ? `${cachedProjectPath.replace(/\/+$/, "")}/${v}` : v;
+}
+
 function currentDirOf(value) {
   const v = (value || "").trim();
   if (!v) return null;

@@ -544,8 +544,8 @@ def main():
         check("Second picker resumes in the same folder",
               "job099" in page.locator(".file-picker .picker-current").inner_text())
         star_only = page.locator(".file-picker .browser-entry.picker-file").all_inner_texts()
-        check("Particles picker offers only .star files",
-              star_only and all(e.strip().endswith(".star") for e in star_only))
+        check("Particles picker offers only .star / .coords files",
+              star_only and all(e.strip().endswith((".star", ".coords")) for e in star_only))
         page.locator(".file-picker .browser-entry", has_text="picks99.star").click()
         page.wait_for_timeout(400)
 
@@ -563,6 +563,62 @@ def main():
         check("Escape cancels the picker", page.locator(".file-picker").count() == 0)
         check("Cancelling leaves the field unchanged",
               viz.locator('[data-role="viz-path"]').input_value() == "Tomograms/job099/TS_77.mrc")
+
+
+        # ==== .coords files and folders (a DeepETPicker job, even a running one) ===
+        # A folder of tomograms plus a coords/ folder holding a file for only
+        # one of them -- what a predict job looks like partway through.
+        run_dir = PROJECT_DIR / "DeepETPickerPredict" / "job098"
+        (run_dir / "tomograms_std").mkdir(parents=True, exist_ok=True)
+        (run_dir / "coords").mkdir(exist_ok=True)
+        for name in ("TS_A", "TS_B"):
+            with mrcfile.new(run_dir / "tomograms_std" / f"{name}.mrc", overwrite=True) as mrc:
+                mrc.set_data((np.random.rand(12, 24, 24) * 100).astype(np.float32))
+                mrc.voxel_size = 10.0
+        (run_dir / "coords" / "TS_A.coords").write_text(
+            "1 5.0 5.0 3.0 0.91\n1 9.0 9.0 6.0 0.42\n1 12.0 12.0 8.0 0.77\n")
+
+        viz.locator('[data-role="viz-path"]').fill("DeepETPickerPredict/job098/tomograms_std")
+        viz.locator('[data-role="viz-particles"]').fill("")
+        viz.locator('[data-role="viz-browse-particles-dir"]').click()
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
+        # opens in the tomograms folder already (the field's own value)
+        check("Folder picker opens at the folder named in the field",
+              "tomograms_std" in page.locator(".file-picker .picker-current").inner_text())
+        page.locator(".file-picker .browser-entry", has_text="..").first.click()
+        page.wait_for_timeout(400)
+        page.locator(".file-picker .browser-entry", has_text="coords").first.click()
+        page.wait_for_timeout(400)
+        page.locator('[data-role="pick-select-folder"]').click()
+        page.wait_for_timeout(400)
+        picked = viz.locator('[data-role="viz-particles"]').input_value()
+        check(f"Folder button fills the picks field ({picked})",
+              picked.rstrip("/").endswith("DeepETPickerPredict/job098/coords"))
+
+        viz.locator('[data-role="viz-load"]').click()
+        page.wait_for_selector('[data-role="viz-img"]', state="visible", timeout=8000)
+        page.wait_for_timeout(1500)
+        sel = viz.locator('[data-role="viz-tomo"]')
+        names = sel.locator("option").all_inner_texts()
+        check(f"Folder of tomograms lists each one ({names})", names == ["TS_A", "TS_B"])
+        meta = viz.locator('[data-role="viz-meta"]').inner_text()
+        check(f"Tomogram with a .coords file shows its picks ({meta})", "TS_A" in meta and "3 picks" in meta)
+
+        sel.select_option(label="TS_B")
+        page.wait_for_timeout(1500)
+        status = viz.locator('[data-role="viz-status"]').inner_text()
+        check(f"Unfinished tomogram says its file is not there yet ({status})",
+              "No .coords file for 'TS_B'" in status and "yet" in status)
+        check("...without a Load anyway dialog", page.locator(".modal-overlay:visible, .modal:visible").count() == 0)
+
+        # the job finishes TS_B: reselecting picks the new file up with no reload
+        (run_dir / "coords" / "TS_B.coords").write_text("1 2.0 3.0 4.0\n1 6.0 7.0 8.0\n")
+        sel.select_option(label="TS_A")
+        page.wait_for_timeout(1000)
+        sel.select_option(label="TS_B")
+        page.wait_for_timeout(1500)
+        meta = viz.locator('[data-role="viz-meta"]').inner_text()
+        check(f"A file written after opening is picked up ({meta})", "TS_B" in meta and "2 picks" in meta)
 
         browser.close()
 

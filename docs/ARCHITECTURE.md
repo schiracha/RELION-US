@@ -1028,6 +1028,17 @@ a browser at usable speed, so `backend/viz.py` reproduces DeepETPicker's
 github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
 2026-08-15):
 
+- **`.coords` and folders.** `viz.inspect` takes a directory as the main path
+  (kind `volume_folder`: its `*.mrc` files, symlinks included) and a picks path
+  that is a STAR, a `.coords` file or a directory of them. `load_picks`
+  dispatches `.coords` to `_load_coords_picks`, which reads 3/4/5 columns
+  (`[class] x y z [score]`, comma or whitespace; `read_coords_file`) and, for a
+  directory, picks the file whose stem matches the tomogram (`_names_match`).
+  A job is still writing these files, so a last line cut off mid-write (its
+  column count differs from the rows before it) is dropped, and a tomogram with
+  no file yet returns `matched: false, source: null` with a message the UI shows
+  in the status line instead of the "Load anyway" dialog. Every chosen file goes
+  back through `_safe`, so a symlink out of the project is refused.
 - **Slice browsing.** `mrcfile.mmap` memory-maps the volume so a slice request
   touches only that slice's bytes; the server contrast-stretches it to 8-bit
   and returns a PNG. The volume is never loaded whole.

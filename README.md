@@ -931,6 +931,16 @@ Command Center and writes nothing. Give it an optimiser STAR, a
 `tomograms.star`, or an MRC (with or without a particles/coords STAR), by
 typing a path or hitting **…**, and it loads one tomogram at a time.
 
+It also reads DeepETPicker output directly, finished or not. The first field
+accepts a **folder of volumes** (📁; a predict job's `tomograms_std/`) and the
+picks field accepts a **`.coords` file** or a **folder of `.coords` files**
+(a predict job's `coords/`, or `coords_with_area/`). With a folder, each
+tomogram shows the `.coords` file that matches its name; Predict writes one as
+each tomogram finishes, so a tomogram without one says "No .coords file for …
+yet" and picks up the file when you select it again after it appears. A fifth
+column (the score) is kept. In a job's Outputs tab, 📍 beside a `.coords` file
+opens the job's tomograms with that folder of picks.
+
 **Three linked orthogonal views**, laid out the way DeepETPicker's picker is:
 **XY** is the large main view, **ZY** to its left, **XZ** below it. All three
 are cuts through one crosshair position, so:
