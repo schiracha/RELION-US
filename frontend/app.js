@@ -2988,110 +2988,774 @@ function lineageNodeInnerHtml(run) {
       `;
 }
 
+// Layered layout of the lineage DAG, as plain data (no DOM) so it can be
+// tested on its own. Rows come from computeLineageRows, with two changes
+// that keep a big project readable:
+//   * a job with no parents (an import, a mask made on its own) is moved down
+//     to sit directly above its first child, instead of at the top with a
+//     line running the whole height of the graph;
+//   * an edge that spans more than one row gets an invisible "lane" entry in
+//     each row it passes through, so it takes its own column between the
+//     boxes instead of running behind them.
+// Order within a row is then improved by barycenter sweeps (each entry goes
+// to the average position of its neighbours in the adjacent row, down then
+// up), keeping the ordering with the fewest edge crossings.
+let lineageLayoutMemo = { key: null, layout: null };
+function computeLineageLayout(runs) {
+  // The layout only depends on which jobs exist and how they link, and this is
+  // re-run on every refresh of the jobs list: keep the last one.
+  const key = runs.map((r) => `${r.run_id}:${r.job_number || 0}:${(r.input_links || []).map((l) => l.run_id).join(",")}`).join("|");
+  if (lineageLayoutMemo.key === key) return lineageLayoutMemo.layout;
+  const layout = computeLineageLayoutUncached(runs);
+  lineageLayoutMemo = { key, layout };
+  return layout;
+}
+
+// Jobs that share no lineage (separate tilt series, an unrelated side project)
+// are laid out on their own and then set side by side, oldest first, so each
+// stays compact and none gets stranded far from the rest.
+function computeLineageLayoutUncached(runs) {
+  const { byId, parentsOf } = buildLineageGraph(runs);
+  const childrenOf = new Map();
+  runs.forEach((r) => childrenOf.set(r.run_id, []));
+  runs.forEach((r) => parentsOf.get(r.run_id).forEach((pid) => childrenOf.get(pid).push(r.run_id)));
+  const seen = new Set();
+  const groups = [];
+  runs.forEach((r) => {
+    if (seen.has(r.run_id)) return;
+    const group = [];
+    const stack = [r.run_id];
+    seen.add(r.run_id);
+    while (stack.length) {
+      const id = stack.pop();
+      group.push(id);
+      for (const next of [...parentsOf.get(id), ...childrenOf.get(id)]) {
+        if (!seen.has(next)) { seen.add(next); stack.push(next); }
+      }
+    }
+    groups.push(new Set(group));
+  });
+  const jobNo = (g) => Math.min(...runs.filter((r) => g.has(r.run_id)).map((r) => r.job_number || 0));
+  groups.sort((a, b) => jobNo(a) - jobNo(b));
+  const parts = groups.map((g) => computeComponentLayout(runs.filter((r) => g.has(r.run_id))));
+  const rows = [];
+  parts.forEach((part) => part.rows.forEach((row, i) => { (rows[i] = rows[i] || []).push(...row); }));
+  const merge = (key) => new Map(parts.flatMap((part) => Array.from(part[key])));
+  return {
+    rows,
+    chains: parts.flatMap((part) => part.chains),
+    up: merge("up"),
+    down: merge("down"),
+    components: parts,
+    crossings: parts.reduce((n, part) => n + part.crossings, 0),
+    initialCrossings: parts.reduce((n, part) => n + part.initialCrossings, 0),
+    parentsOf, childrenOf, byId,
+  };
+}
+
+function computeComponentLayout(runs) {
+  const { byId, parentsOf } = buildLineageGraph(runs);
+  const rowIndex = computeLineageRows(runs, parentsOf);
+  const childrenOf = new Map();
+  runs.forEach((r) => childrenOf.set(r.run_id, []));
+  runs.forEach((r) => parentsOf.get(r.run_id).forEach((pid) => childrenOf.get(pid).push(r.run_id)));
+  runs.forEach((r) => {
+    const kids = childrenOf.get(r.run_id);
+    if (!parentsOf.get(r.run_id).size && kids.length) {
+      rowIndex.set(r.run_id, Math.max(rowIndex.get(r.run_id), Math.min(...kids.map((k) => rowIndex.get(k))) - 1));
+    }
+  });
+
+  // One chain per edge: [parent, lane, lane, ..., child], one entry per row.
+  const chains = [];
+  const layerOf = new Map();
+  runs.forEach((r) => layerOf.set(r.run_id, rowIndex.get(r.run_id)));
+  runs.forEach((child) => {
+    parentsOf.get(child.run_id).forEach((pid) => {
+      const ids = [pid];
+      for (let row = rowIndex.get(pid) + 1; row < rowIndex.get(child.run_id); row++) {
+        const lane = `lane:${pid}>${child.run_id}:${row}`;
+        layerOf.set(lane, row);
+        ids.push(lane);
+      }
+      ids.push(child.run_id);
+      chains.push({ parent: pid, child: child.run_id, ids });
+    });
+  });
+
+  const up = new Map();   // entry id -> neighbours in the row above
+  const down = new Map(); // entry id -> neighbours in the row below
+  layerOf.forEach((_, id) => { up.set(id, []); down.set(id, []); });
+  chains.forEach(({ ids }) => {
+    for (let i = 0; i + 1 < ids.length; i++) { down.get(ids[i]).push(ids[i + 1]); up.get(ids[i + 1]).push(ids[i]); }
+  });
+
+  const maxRow = Math.max(...Array.from(layerOf.values()));
+  const rows = [];
+  for (let i = 0; i <= maxRow; i++) rows.push([]);
+  const jobNo = (id) => (byId.has(id) ? (byId.get(id).job_number || 0) : -1);
+  layerOf.forEach((row, id) => rows[row].push(id));
+  rows.forEach((row) => row.sort((a, b) => jobNo(a) - jobNo(b) || (a < b ? -1 : 1)));
+
+  const pos = new Map();
+  const reindex = () => rows.forEach((row) => row.forEach((id, i) => pos.set(id, i)));
+  const crossings = () => {
+    let n = 0;
+    for (let r = 0; r < maxRow; r++) {
+      const segs = [];
+      rows[r].forEach((id) => down.get(id).forEach((to) => segs.push([pos.get(id), pos.get(to)])));
+      for (let i = 0; i < segs.length; i++) {
+        for (let j = i + 1; j < segs.length; j++) {
+          if ((segs[i][0] - segs[j][0]) * (segs[i][1] - segs[j][1]) < 0) n++;
+        }
+      }
+    }
+    return n;
+  };
+  const sweep = (r, neighbours) => {
+    const key = (id) => {
+      const ns = neighbours.get(id);
+      return ns.length ? ns.reduce((sum, n) => sum + pos.get(n), 0) / ns.length : pos.get(id);
+    };
+    const keys = new Map(rows[r].map((id) => [id, key(id)]));
+    rows[r].sort((a, b) => keys.get(a) - keys.get(b) || pos.get(a) - pos.get(b));
+    rows[r].forEach((id, i) => pos.set(id, i));
+  };
+
+  reindex();
+  for (let r = 1; r <= maxRow; r++) sweep(r, up);
+  let best = rows.map((row) => row.slice());
+  let bestCrossings = crossings();
+  const initialCrossings = bestCrossings; // after the first top-down pass, before refining
+  for (let pass = 0; pass < 12 && bestCrossings > 0; pass++) {
+    for (let r = 1; r <= maxRow; r++) sweep(r, up);
+    for (let r = maxRow - 1; r >= 0; r--) sweep(r, down);
+    const n = crossings();
+    if (n < bestCrossings) { bestCrossings = n; best = rows.map((row) => row.slice()); }
+  }
+  return { rows: best, chains, up, down, crossings: bestCrossings, initialCrossings, parentsOf, childrenOf, byId };
+}
+
+// Horizontal position (box centre) for every entry of every row. Rows used to
+// be centred one by one, so a line passing through a short row and a long row
+// landed in different columns and jogged hundreds of pixels sideways. Instead
+// each row is pulled toward the average position of its neighbours in the
+// adjacent row (a lane has exactly one neighbour each way, so it is pulled
+// straight), alternating down and up, and then spaced so nothing overlaps
+// while staying as close to those wishes as possible (isotonic regression on
+// the gaps). `widthOf(id)` is the entry's width; `gapOf(a, b)` the clear space
+// wanted between two neighbours. The lanes of one connection (`laneGroups`)
+// all want the same column and count for more than a box when space is
+// short, so a long line stays vertical and the boxes make room around it.
+function assignLineageX(rows, up, down, widthOf, gapOf, laneGroups = []) {
+  const x = new Map();
+  const sepOf = (row) => row.slice(1).map((id, i) => (widthOf(row[i]) + widthOf(id)) / 2 + gapOf(row[i], id));
+  // Lay a row out so each entry is as near its wish as order and spacing allow.
+  let laneWeight = 8;
+  const groupOf = new Map();
+  laneGroups.forEach(({ lanes }) => lanes.forEach((id) => groupOf.set(id, lanes)));
+  const heavy = new Set(groupOf.keys()); // entries that hold their column against their neighbours
+  const place = (row, wish) => {
+    const sep = sepOf(row);
+    const off = [0];
+    sep.forEach((d, i) => off.push(off[i] + d));
+    const blocks = []; // pooled runs of entries that have to move together
+    row.forEach((_, i) => {
+      const w = heavy.has(row[i]) ? laneWeight : 1;
+      blocks.push({ sum: (wish[i] - off[i]) * w, n: w, count: 1 });
+      while (blocks.length > 1) {
+        const b = blocks[blocks.length - 1], a = blocks[blocks.length - 2];
+        if (a.sum / a.n <= b.sum / b.n) break;
+        a.sum += b.sum; a.n += b.n; a.count += b.count; blocks.pop();
+      }
+    });
+    let i = 0;
+    blocks.forEach((b) => { for (let k = 0; k < b.count; k++, i++) x.set(row[i], b.sum / b.n + off[i]); });
+  };
+  rows.forEach((row) => {
+    const sep = sepOf(row);
+    const total = sep.reduce((a, b) => a + b, 0);
+    let at = -total / 2;
+    row.forEach((id, i) => { x.set(id, at); at += sep[i] || 0; });
+  });
+  const pull = (row, neighbours) => place(row, row.map((id) => {
+    const group = groupOf.get(id);
+    if (group) return group.reduce((sum, lane) => sum + x.get(lane), 0) / group.length;
+    const ns = neighbours.get(id);
+    return ns.length ? ns.reduce((sum, n) => sum + x.get(n), 0) / ns.length : x.get(id);
+  }));
+  for (let pass = 0; pass < 6; pass++) {
+    for (let r = 1; r < rows.length; r++) pull(rows[r], up);
+    for (let r = rows.length - 2; r >= 0; r--) pull(rows[r], down);
+  }
+  for (let r = 1; r < rows.length; r++) pull(rows[r], up);
+  // Last word. Entries that should share a column are tied into groups, and
+  // the groups (not the individual boxes) are then spaced apart together, so
+  // nothing that is meant to be straight is nudged out of line by a neighbour:
+  //   * the lanes of one connection -- one column, no further out than the two
+  //     jobs it joins (any column between them has the same total sideways
+  //     travel; outside them it only gets longer);
+  //   * linked boxes in neighbouring rows that ended up closer than SNAP apart,
+  //     which read as a staircase when a few pixels out of line.
+  const SNAP = 40;
+  const rowOf = new Map();
+  rows.forEach((row, r) => row.forEach((id) => rowOf.set(id, r)));
+  const settle = () => {
+    const gid = new Map();
+    const members = [];
+    const wish = [];
+    const newGroup = (ids, at) => { ids.forEach((id) => gid.set(id, members.length)); members.push(ids); wish.push(at); };
+    const meanX = (ids) => ids.reduce((sum, id) => sum + x.get(id), 0) / ids.length;
+    laneGroups.forEach(({ lanes, ends }) => {
+      const lo = Math.min(...ends.map((id) => x.get(id))), hi = Math.max(...ends.map((id) => x.get(id)));
+      newGroup(lanes, Math.min(hi, Math.max(lo, meanX(lanes))));
+    });
+    const root = new Map();
+    const rowsIn = new Map();
+    const find = (id) => { while ((root.get(id) ?? id) !== id) id = root.get(id); return id; };
+    rows.forEach((row) => row.forEach((id) => { if (!gid.has(id)) rowsIn.set(id, new Set([rowOf.get(id)])); }));
+    rows.forEach((row) => row.forEach((id) => {
+      if (gid.has(id)) return;
+      (down.get(id) || []).forEach((n) => {
+        if (gid.has(n) || Math.abs(x.get(id) - x.get(n)) >= SNAP) return;
+        const ra = find(id), rb = find(n);
+        if (ra === rb || Array.from(rowsIn.get(ra)).some((r) => rowsIn.get(rb).has(r))) return; // two in one row can't share a column
+        root.set(rb, ra);
+        rowsIn.get(rb).forEach((r) => rowsIn.get(ra).add(r));
+      });
+    }));
+    const byRoot = new Map();
+    rows.forEach((row) => row.forEach((id) => {
+      if (gid.has(id)) return;
+      const r = find(id);
+      if (!byRoot.has(r)) byRoot.set(r, []);
+      byRoot.get(r).push(id);
+    }));
+    byRoot.forEach((ids) => newGroup(ids, meanX(ids)));
+
+    // spacing between neighbours in a row, as constraints between their groups
+    const pairs = [];
+    rows.forEach((row) => row.slice(1).forEach((id, i) => {
+      pairs.push([gid.get(row[i]), gid.get(id), (widthOf(row[i]) + widthOf(id)) / 2 + gapOf(row[i], id)]);
+    }));
+    const col = wish.slice();
+    const size = members.map((m) => m.length);
+    const separate = () => pairs.forEach(([a, b, sep]) => {
+      const v = sep - (col[b] - col[a]);
+      if (v <= 0) return;
+      col[a] -= v * size[b] / (size[a] + size[b]);
+      col[b] += v * size[a] / (size[a] + size[b]);
+    });
+    for (let round = 0; round < 40; round++) {
+      separate();
+      col.forEach((c, g) => { col[g] = c + 0.1 * (wish[g] - c); }); // drift back toward where each group wants to be
+    }
+    for (let round = 0; round < 200; round++) separate(); // spacing wins
+    members.forEach((ids, g) => ids.forEach((id) => x.set(id, col[g])));
+    // anything still touching (a very crowded row) is pushed apart one by one
+    rows.forEach((row) => row.slice(1).forEach((id, i) => {
+      const need = x.get(row[i]) + (widthOf(row[i]) + widthOf(id)) / 2 + gapOf(row[i], id);
+      if (x.get(id) < need - 0.01) x.set(id, need);
+    }));
+  };
+  // Each round can bring more boxes within reach of each other, so repeat.
+  for (let round = 0; round < 6; round++) settle();
+  return x;
+}
+
+// Everything reachable from a job along one direction of the graph: pass
+// parentsOf for its ancestors (everything it came from), childrenOf for its
+// descendants (everything made from it). The job itself is not included.
+function lineageReach(id, nextOf) {
+  const seen = new Set();
+  const stack = [id];
+  while (stack.length) {
+    for (const next of nextOf.get(stack.pop()) || []) {
+      if (!seen.has(next)) { seen.add(next); stack.push(next); }
+    }
+  }
+  return seen;
+}
+
+let lineageMarkerSeq = 0;
+
 // The row/column/edge layout below is shared by Command Center's Network
 // view and the Analyze popup's Pipeline tab (see openAnalyzePopup) -- both
 // draw the same lineage DAG, just into different containers with different
 // per-node markup and a different node-click action, hence nodeRenderer/
 // onNodeClick being passed in rather than hardcoded here.
-function renderLineageGraph(runs, { rowsEl, svgEl, emptyEl, direction, onNodeClick, nodeRenderer }) {
+// Returns a small controller ({setSelected, setMatcher, nodeFor, matchCount})
+// so a selection or a search can restyle the existing boxes without laying the
+// whole graph out again. With `onSelect` (Command Center) a click selects a
+// job and a double-click opens it; without it (Analyze) a click opens it.
+function renderLineageGraph(runs, { rowsEl, svgEl, emptyEl, direction, onNodeClick, onSelect, selectedId = null, matchFn = null, hoverTrace = () => true, nodeRenderer }) {
   rowsEl.innerHTML = "";
   svgEl.innerHTML = "";
   if (emptyEl) emptyEl.classList.toggle("hidden", runs.length > 0);
-  if (!runs.length) return;
+  if (!runs.length) return null;
 
-  const { parentsOf } = buildLineageGraph(runs);
-  const rowIndex = computeLineageRows(runs, parentsOf);
+  const layout = computeLineageLayout(runs);
+  const { chains, parentsOf, childrenOf } = layout;
+  // current job records (status etc.), not the ones the cached layout saw
+  const byId = new Map(runs.map((r) => [r.run_id, r]));
 
-  const maxRow = Math.max(...Array.from(rowIndex.values()));
-  const rows = [];
-  for (let i = 0; i <= maxRow; i++) rows.push([]);
-  runs.forEach((r) => rows[rowIndex.get(r.run_id)].push(r));
+  // Row 0 is oldest, by construction. That's also this view's default
+  // top-to-bottom order; `direction` flips which end sits on top, same as the
+  // Timeline direction button, without touching the layout above -- only the
+  // DOM order rows are appended in.
+  const visualRows = direction === "desc" ? layout.rows.slice().reverse() : layout.rows;
 
-  // Column position (a plain array index) per run, filled in row order so
-  // later rows can average their parents' already-known columns.
-  const colOf = new Map();
-  rows.forEach((rowRuns, r) => {
-    rowRuns.sort((a, b) => {
-      if (r > 0) {
-        const avg = (run) => {
-          const parents = Array.from(parentsOf.get(run.run_id) || []);
-          const cols = parents.map((pid) => colOf.get(pid)).filter((c) => c !== undefined);
-          return cols.length ? cols.reduce((s, c) => s + c, 0) / cols.length : Infinity;
-        };
-        const d = avg(a) - avg(b);
-        if (d) return d;
-      }
-      return (a.job_number || 0) - (b.job_number || 0);
-    });
-    rowRuns.forEach((run, i) => colOf.set(run.run_id, i));
-  });
-
-  // Row 0 (the roots) is oldest, by construction (computeLineageRows). That's
-  // also this view's default top-to-bottom order; `direction` flips which
-  // end sits on top, same as the Timeline direction button, without
-  // touching the row/column math above -- only the DOM order rows are
-  // appended in.
-  const visualRows = direction === "desc" ? rows.slice().reverse() : rows;
-
-  visualRows.forEach((rowRuns) => {
+  const els = new Map();
+  visualRows.forEach((rowIds) => {
     const rowEl = document.createElement("div");
     rowEl.className = "cc-network-row";
-    rowRuns.forEach((run) => {
-      const node = document.createElement("div");
-      node.className = "cc-network-node";
-      node.dataset.runId = run.run_id;
-      node.innerHTML = nodeRenderer(run);
-      node.addEventListener("click", () => onNodeClick(run));
-      rowEl.appendChild(node);
+    rowIds.forEach((id) => {
+      const el = document.createElement("div");
+      if (byId.has(id)) {
+        const run = byId.get(id);
+        el.className = "cc-network-node";
+        el.dataset.runId = run.run_id;
+        el.innerHTML = nodeRenderer(run);
+        if (onSelect) {
+          el.addEventListener("click", () => onSelect(run.run_id));
+          el.addEventListener("dblclick", () => onNodeClick(run));
+        } else {
+          el.addEventListener("click", () => onNodeClick(run));
+        }
+      } else {
+        el.className = "cc-network-lane";
+      }
+      els.set(id, el);
+      rowEl.appendChild(el);
     });
     rowsEl.appendChild(rowEl);
   });
 
-  // Edges, read back from the laid-out DOM. rowsEl is the SVG's positioned
-  // ancestor (see style.css), so offsetLeft/Top on a node give coordinates
-  // directly in the SVG's own coordinate space.
-  //
-  // Attachment is by which node is visually higher, not by which is the
-  // "parent" -- `direction` can put the newest job on top, and the line
-  // should still run from the upper node's bottom edge to the lower node's
-  // top edge either way, rather than from a "parent" edge that might now be
-  // pointing the wrong way.
-  const svgNS = "http://www.w3.org/2000/svg";
-  const nodeEls = new Map();
-  rowsEl.querySelectorAll(".cc-network-node").forEach((el) => nodeEls.set(el.dataset.runId, el));
-  const centerX = (el) => el.offsetLeft + el.offsetWidth / 2;
-  const top = (el) => ({ x: centerX(el), y: el.offsetTop });
-  const bottom = (el) => ({ x: centerX(el), y: el.offsetTop + el.offsetHeight });
-  runs.forEach((run) => {
-    const childEl = nodeEls.get(run.run_id);
-    if (!childEl) return;
-    (parentsOf.get(run.run_id) || new Set()).forEach((parentId) => {
-      const parentEl = nodeEls.get(parentId);
-      if (!parentEl) return;
-      const parentIsHigher = parentEl.offsetTop <= childEl.offsetTop;
-      const upperEl = parentIsHigher ? parentEl : childEl;
-      const lowerEl = parentIsHigher ? childEl : parentEl;
-      const p = bottom(upperEl);
-      const c = top(lowerEl);
-      const midY = (p.y + c.y) / 2;
-      const path = document.createElementNS(svgNS, "path");
-      path.setAttribute("d", `M ${p.x} ${p.y} C ${p.x} ${midY}, ${c.x} ${midY}, ${c.x} ${c.y}`);
-      path.setAttribute("class", "cc-network-edge");
-      svgEl.appendChild(path);
+  // Columns: spaced by the measured box width (a hidden container measures 0,
+  // so fall back to the stylesheet's), then each row's entries are given the
+  // left margin that puts their centres at the assigned x.
+  const sampleNode = rowsEl.querySelector(".cc-network-node");
+  const NODE_W = (sampleNode && sampleNode.offsetWidth) || 176;
+  const LANE_W = 4;
+  const widthOf = (id) => (byId.has(id) ? NODE_W : LANE_W);
+  const gapOf = (a, b) => (byId.has(a) && byId.has(b) ? 28 : byId.has(a) || byId.has(b) ? 14 : 4);
+  // Each unconnected group gets its own column assignment, then they are set
+  // side by side with a small gap.
+  const xs = new Map();
+  const contour = []; // right edge of everything placed so far, per row
+  layout.components.forEach((part) => {
+    const laneGroups = part.chains.filter((c) => c.ids.length > 2)
+      .map((c) => ({ lanes: c.ids.slice(1, -1), ends: [c.ids[0], c.ids[c.ids.length - 1]] }));
+    const local = assignLineageX(part.rows, part.up, part.down, widthOf, gapOf, laneGroups);
+    const left = [], right = [];
+    part.rows.forEach((row, r) => row.forEach((id) => {
+      left[r] = Math.min(left[r] ?? Infinity, local.get(id) - widthOf(id) / 2);
+      right[r] = Math.max(right[r] ?? -Infinity, local.get(id) + widthOf(id) / 2);
+    }));
+    // as far left as it can go without touching what is already there, row by
+    // row, so a short track tucks in beside a tall one instead of beyond it
+    let shift = -Infinity;
+    left.forEach((l, r) => { if (contour[r] !== undefined) shift = Math.max(shift, contour[r] + 36 - l); });
+    if (shift === -Infinity) shift = contour.reduce((m, v) => Math.max(m, v ?? -Infinity), -36) + 36 - Math.min(...left.filter((v) => v !== undefined));
+    local.forEach((cx, id) => xs.set(id, cx + shift));
+    right.forEach((rt, r) => { contour[r] = Math.max(contour[r] ?? -Infinity, rt + shift); });
+  });
+  let lowest = Infinity;
+  xs.forEach((cx, id) => { lowest = Math.min(lowest, cx - widthOf(id) / 2); });
+  xs.forEach((cx, id) => xs.set(id, cx - lowest));
+  const minLeft = 0;
+  layout.rows.forEach((row) => {
+    let edge = 0;
+    row.forEach((id) => {
+      const left = xs.get(id) - widthOf(id) / 2 - minLeft;
+      els.get(id).style.marginLeft = `${left - edge}px`;
+      edge = left + widthOf(id);
     });
   });
+
+  // Edges, read back from the laid-out DOM. rowsEl is the SVG's positioned
+  // ancestor (see style.css), so offsetLeft/Top on an entry give coordinates
+  // directly in the SVG's own coordinate space.
+  //
+  // Each chain is walked top to bottom as laid out, whichever end is the
+  // parent -- `direction` can put the newest job on top, and the line should
+  // still run from the upper box's bottom edge to the lower box's top edge.
+  const svgNS = "http://www.w3.org/2000/svg";
+  const isLane = (el) => el.classList.contains("cc-network-lane");
+  const centerX = (el) => el.offsetLeft + el.offsetWidth / 2;
+  const segments = []; // one per hop of a chain: {upper, lower, chain, hop}
+  const walks = chains.map((chain) => {
+    const ids = direction === "desc" ? chain.ids.slice().reverse() : chain.ids;
+    const hops = [];
+    for (let i = 0; i + 1 < ids.length; i++) {
+      const seg = { upper: els.get(ids[i]), lower: els.get(ids[i + 1]), chain, hop: i };
+      hops.push(seg);
+      segments.push(seg);
+    }
+    return { chain, hops };
+  });
+
+  // Where on a box's edge each line attaches: spread along it in the order of
+  // where the other end is, so lines leave a box side by side instead of all
+  // stacking on its centre point (the tangle with a wide fan-out).
+  const spread = (el, list, otherEnd, assign) => {
+    list.sort((a, b) => centerX(otherEnd(a)) - centerX(otherEnd(b)) || a.chain.child.localeCompare(b.chain.child));
+    const n = list.length;
+    list.forEach((seg, i) => {
+      const x = isLane(el) || n === 1
+        ? centerX(el)
+        : el.offsetLeft + el.offsetWidth * (0.15 + 0.7 * (i + 0.5) / n);
+      assign(seg, x);
+    });
+  };
+  const exitX = new Map();
+  const entryX = new Map();
+  const byUpper = new Map();
+  const byLower = new Map();
+  segments.forEach((seg) => {
+    if (!byUpper.has(seg.upper)) byUpper.set(seg.upper, []);
+    if (!byLower.has(seg.lower)) byLower.set(seg.lower, []);
+    byUpper.get(seg.upper).push(seg);
+    byLower.get(seg.lower).push(seg);
+  });
+  byUpper.forEach((list, el) => spread(el, list, (s) => s.lower, (seg, x) => exitX.set(seg, x)));
+  byLower.forEach((list, el) => spread(el, list, (s) => s.upper, (seg, x) => entryX.set(seg, x)));
+
+  // Arrowheads point at the child: the end of the line when the parent is on
+  // top, the start of it when the newest job is.
+  const markerId = `lineage-arrow-${++lineageMarkerSeq}`;
+  const defs = document.createElementNS(svgNS, "defs");
+  defs.innerHTML = `<marker id="${markerId}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" class="cc-network-arrow"/></marker>`;
+  svgEl.appendChild(defs);
+
+  const bottomOf = (el) => el.offsetTop + el.offsetHeight;
+
+  // Lines run straight down and change column in one short sideways jog, with
+  // small rounded corners (an S-curve across the whole gap is what made long
+  // connections look wavy). Jogs in the same gap are put at different heights
+  // wherever their sideways runs would overlap, so they stay distinguishable.
+  const geom = new Map();
+  const gaps = new Map();
+  segments.forEach((seg) => {
+    const g = { x1: exitX.get(seg), y1: bottomOf(seg.upper), x2: entryX.get(seg), y2: seg.lower.offsetTop };
+    geom.set(seg, g);
+    if (Math.abs(g.x1 - g.x2) < 3) return;
+    const key = `${g.y1}|${g.y2}`;
+    if (!gaps.has(key)) gaps.set(key, []);
+    gaps.get(key).push(g);
+  });
+  gaps.forEach((list) => {
+    const ends = []; // right end of the last jog placed on each level
+    list.sort((p, q) => Math.min(p.x1, p.x2) - Math.min(q.x1, q.x2));
+    list.forEach((g) => {
+      const left = Math.min(g.x1, g.x2), right = Math.max(g.x1, g.x2);
+      let level = ends.findIndex((end) => end + 4 < left);
+      if (level < 0) level = ends.length;
+      ends[level] = right;
+      g.level = level;
+    });
+    list.forEach((g) => { g.jogY = g.y1 + (g.y2 - g.y1) * (g.level + 1) / (ends.length + 1); });
+  });
+  const hopPath = (g) => {
+    if (Math.abs(g.x1 - g.x2) < 3) return ` L ${g.x2} ${g.y2}`; // a pixel or two of drift is not worth a jog
+    const dir = g.x2 > g.x1 ? 1 : -1;
+    const r = Math.max(0, Math.min(6, Math.abs(g.x2 - g.x1) / 2, g.jogY - g.y1, g.y2 - g.jogY));
+    return ` L ${g.x1} ${g.jogY - r} Q ${g.x1} ${g.jogY} ${g.x1 + dir * r} ${g.jogY}`
+      + ` L ${g.x2 - dir * r} ${g.jogY} Q ${g.x2} ${g.jogY} ${g.x2} ${g.jogY + r} L ${g.x2} ${g.y2}`;
+  };
+  walks.forEach(({ chain, hops }) => {
+    const first = geom.get(hops[0]);
+    let d = `M ${first.x1} ${first.y1}`;
+    hops.forEach((seg, i) => {
+      d += hopPath(geom.get(seg));
+      if (i + 1 < hops.length) { const next = geom.get(hops[i + 1]); d += ` L ${next.x1} ${next.y1}`; }
+    });
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("class", "cc-network-edge");
+    path.dataset.parent = chain.parent;
+    path.dataset.child = chain.child;
+    const marker = `url(#${markerId})`;
+    path.setAttribute(direction === "desc" ? "marker-start" : "marker-end", marker);
+    svgEl.appendChild(path);
+  });
+
+  // Selecting (or, with nothing selected, hovering) a job colours its
+  // lineage -- ancestors one colour, descendants another -- and fades the
+  // rest, so one job's path through a big graph can be followed without
+  // tracing lines.
+  const canvasEl = rowsEl.parentElement;
+  const nodeEls = Array.from(rowsEl.querySelectorAll(".cc-network-node"));
+  const edgeEls = Array.from(svgEl.querySelectorAll(".cc-network-edge"));
+  const FOCUS_CLASSES = ["is-sel", "is-anc", "is-desc", "is-up", "is-down", "is-related"];
+  const clearFocus = () => {
+    canvasEl.classList.remove("cc-focus");
+    nodeEls.concat(edgeEls).forEach((el) => el.classList.remove(...FOCUS_CLASSES));
+  };
+  const applyFocus = (id) => {
+    clearFocus();
+    if (!id || !byId.has(id)) return;
+    const anc = lineageReach(id, parentsOf);
+    const desc = lineageReach(id, childrenOf);
+    canvasEl.classList.add("cc-focus");
+    nodeEls.forEach((n) => {
+      const nid = n.dataset.runId;
+      const cls = nid === id ? "is-sel" : anc.has(nid) ? "is-anc" : desc.has(nid) ? "is-desc" : null;
+      if (cls) n.classList.add(cls, "is-related");
+    });
+    edgeEls.forEach((e) => {
+      const { parent, child } = e.dataset;
+      const up = (anc.has(parent) || parent === id) && (anc.has(child) || child === id);
+      const down = (desc.has(parent) || parent === id) && (desc.has(child) || child === id);
+      if (up) e.classList.add("is-up", "is-related");
+      else if (down) e.classList.add("is-down", "is-related");
+    });
+  };
+  const applyMatch = (fn) => {
+    let n = 0;
+    nodeEls.forEach((el) => {
+      const hit = !fn || fn(byId.get(el.dataset.runId));
+      el.classList.toggle("cc-network-nomatch", !hit);
+      if (hit) n++;
+    });
+    return n;
+  };
+  let pinned = selectedId && byId.has(selectedId) ? selectedId : null;
+  nodeEls.forEach((el) => {
+    el.addEventListener("mouseenter", () => { if (!pinned && hoverTrace()) applyFocus(el.dataset.runId); });
+    el.addEventListener("mouseleave", () => { if (!pinned) applyFocus(null); });
+  });
+  applyFocus(pinned);
+  applyMatch(matchFn);
+  return {
+    setSelected(id) { pinned = id && byId.has(id) ? id : null; applyFocus(pinned); },
+    setMatcher: applyMatch,
+    nodeFor: (id) => nodeEls.find((el) => el.dataset.runId === id) || null,
+    runs: () => nodeEls.map((el) => byId.get(el.dataset.runId)),
+  };
+}
+
+// --- Network view: selection, search, pan and zoom ---------------------
+//
+// A project can have hundreds of jobs, so the view is a canvas you move around
+// (drag to pan, Alt/Ctrl + scroll to zoom, Fit) rather than a page you scroll:
+// click a job to trace it (ancestors and descendants coloured, the rest
+// faded), double-click to open it, Esc to let go; "Only lineage" lays out just
+// that job's relatives; the find box dims non-matching jobs where they stand.
+let ccNetworkSelected = null;
+let ccNetworkOnly = false;
+let ccNetworkQuery = "";
+let ccNetworkScale = 1;
+let ccNetworkUserZoomed = false;
+let ccNetworkGraph = null;
+// Whether merely hovering a job traces it. On by default; off for people who
+// find the fading distracting while moving the mouse over the graph.
+const CC_NETWORK_HOVER_KEY = "relion_us_cc_network_hover";
+let ccNetworkHover = true;
+try { ccNetworkHover = localStorage.getItem(CC_NETWORK_HOVER_KEY) !== "off"; } catch (e) { /* noop */ }
+const NETWORK_MIN_SCALE = 0.1;
+const NETWORK_MAX_SCALE = 2;
+
+function networkMatcher() {
+  const q = ccNetworkQuery.trim().toLowerCase();
+  if (!q) return null;
+  return (run) => [run.job_name, run.display_name, run.internal_name, run.status, run.alias]
+    .some((v) => v && String(v).toLowerCase().includes(q));
+}
+
+function networkRunsToShow() {
+  if (!(ccNetworkOnly && ccNetworkSelected)) return ccRuns;
+  const { parentsOf, childrenOf } = computeLineageLayout(ccRuns);
+  if (!parentsOf.has(ccNetworkSelected)) return ccRuns;
+  const keep = new Set([ccNetworkSelected, ...lineageReach(ccNetworkSelected, parentsOf), ...lineageReach(ccNetworkSelected, childrenOf)]);
+  return ccRuns.filter((r) => keep.has(r.run_id));
+}
+
+function applyNetworkZoom() {
+  const canvas = document.getElementById("ccNetworkCanvas");
+  const zoomEl = document.getElementById("ccNetworkZoom");
+  canvas.style.transform = ccNetworkScale === 1 ? "" : `scale(${ccNetworkScale})`;
+  zoomEl.style.width = `${canvas.offsetWidth * ccNetworkScale}px`;
+  zoomEl.style.height = `${canvas.offsetHeight * ccNetworkScale}px`;
+  document.getElementById("ccNetworkZoomPct").textContent = `${Math.round(ccNetworkScale * 100)}%`;
+}
+
+// Zoom keeping the point under (clientX, clientY) -- the cursor, or the middle
+// of the view -- where it is on screen.
+function setNetworkScale(next, clientX = null, clientY = null) {
+  const view = document.getElementById("ccNetworkView");
+  const zoomEl = document.getElementById("ccNetworkZoom");
+  next = Math.min(NETWORK_MAX_SCALE, Math.max(NETWORK_MIN_SCALE, next));
+  if (next === ccNetworkScale) return;
+  const vr = view.getBoundingClientRect();
+  const ax = clientX ?? vr.left + vr.width / 2;
+  const ay = clientY ?? vr.top + vr.height / 2;
+  const before = zoomEl.getBoundingClientRect();
+  const u = (ax - before.left) / ccNetworkScale; // the anchor, in unscaled canvas px
+  const v = (ay - before.top) / ccNetworkScale;
+  ccNetworkScale = next;
+  ccNetworkUserZoomed = true;
+  applyNetworkZoom();
+  const after = zoomEl.getBoundingClientRect();
+  view.scrollLeft += after.left + u * next - ax;
+  view.scrollTop += after.top + v * next - ay;
+}
+
+function fitNetwork(whole = false) {
+  const view = document.getElementById("ccNetworkView");
+  const canvas = document.getElementById("ccNetworkCanvas");
+  if (!canvas.offsetWidth) return;
+  const cs = getComputedStyle(view);
+  const availW = view.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const availH = view.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 40;
+  let next = availW / canvas.offsetWidth;
+  if (whole) next = Math.min(next, availH / canvas.offsetHeight);
+  ccNetworkScale = 0; // force setNetworkScale to apply even when the value matches
+  setNetworkScale(Math.min(1, next));
+  view.scrollLeft = 0;
+  if (whole) view.scrollTop = 0;
+}
+
+function centerNetworkOn(id) {
+  const el = ccNetworkGraph && ccNetworkGraph.nodeFor(id);
+  if (!el) return;
+  const view = document.getElementById("ccNetworkView");
+  const vr = view.getBoundingClientRect();
+  const er = el.getBoundingClientRect();
+  view.scrollLeft += er.left + er.width / 2 - (vr.left + vr.width / 2);
+  view.scrollTop += er.top + er.height / 2 - (vr.top + vr.height / 2);
+}
+
+function updateNetworkTools() {
+  const total = ccRuns.length;
+  const info = document.getElementById("ccNetworkInfo");
+  const matcher = networkMatcher();
+  const hits = matcher ? ccRuns.filter(matcher).length : total;
+  info.textContent = !total ? "" : matcher ? `${hits} of ${total} match` : `${total} job${total === 1 ? "" : "s"}`;
+  const sel = ccNetworkSelected && ccRuns.find((r) => r.run_id === ccNetworkSelected);
+  document.getElementById("ccNetworkOnlyBtn").disabled = !sel;
+  document.getElementById("ccNetworkOnlyBtn").classList.toggle("active", ccNetworkOnly && !!sel);
+  const selEl = document.getElementById("ccNetworkSelected");
+  selEl.classList.toggle("hidden", !sel);
+  if (sel) selEl.querySelector("span").textContent = sel.job_name || "job";
+}
+
+function selectNetworkJob(id) {
+  ccNetworkSelected = id;
+  if (!id) ccNetworkOnly = false;
+  if (ccNetworkGraph && !(ccNetworkOnly && id)) ccNetworkGraph.setSelected(id);
+  updateNetworkTools();
 }
 
 function renderNetwork() {
-  renderLineageGraph(ccRuns, {
+  if (ccNetworkSelected && !ccRuns.some((r) => r.run_id === ccNetworkSelected)) {
+    ccNetworkSelected = null;
+    ccNetworkOnly = false;
+  }
+  ccNetworkGraph = renderLineageGraph(networkRunsToShow(), {
     rowsEl: document.getElementById("ccNetworkRows"),
     svgEl: document.getElementById("ccNetworkEdges"),
     emptyEl: document.getElementById("ccNetworkEmpty"),
     direction: ccNetworkDirection,
     onNodeClick: reopenRun,
+    onSelect: selectNetworkJob,
+    hoverTrace: () => ccNetworkHover,
+    selectedId: ccNetworkSelected,
+    matchFn: networkMatcher(),
     nodeRenderer: lineageNodeInnerHtml,
   });
+  // A big graph opens zoomed out to its full width rather than off the edge of
+  // the screen; once the user has zoomed themselves, that is left alone.
+  if (!ccNetworkUserZoomed && ccNetworkGraph && ccRuns.length > 30) {
+    const canvas = document.getElementById("ccNetworkCanvas");
+    const view = document.getElementById("ccNetworkView");
+    if (canvas.offsetWidth > view.clientWidth) {
+      fitNetwork();
+      ccNetworkUserZoomed = false;
+    }
+  }
+  applyNetworkZoom();
+  updateNetworkTools();
 }
+
+(function wireNetworkControls() {
+  const view = document.getElementById("ccNetworkView");
+  const search = document.getElementById("ccNetworkSearch");
+  search.addEventListener("input", () => {
+    ccNetworkQuery = search.value;
+    if (ccNetworkGraph) ccNetworkGraph.setMatcher(networkMatcher());
+    updateNetworkTools();
+  });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const m = networkMatcher();
+      const first = m && (ccNetworkGraph ? ccNetworkGraph.runs() : []).find(m);
+      if (first) { selectNetworkJob(first.run_id); centerNetworkOn(first.run_id); }
+    } else if (e.key === "Escape") {
+      search.value = ""; ccNetworkQuery = "";
+      if (ccNetworkGraph) ccNetworkGraph.setMatcher(null);
+      updateNetworkTools();
+      e.stopPropagation();
+    }
+  });
+  const hoverBox = document.getElementById("ccNetworkHover");
+  hoverBox.checked = ccNetworkHover;
+  hoverBox.addEventListener("change", () => {
+    ccNetworkHover = hoverBox.checked;
+    try { localStorage.setItem(CC_NETWORK_HOVER_KEY, ccNetworkHover ? "on" : "off"); } catch (e) { /* noop */ }
+    // turning it off while a hover trace is showing (nothing selected) clears it
+    if (!ccNetworkHover && ccNetworkGraph && !ccNetworkSelected) ccNetworkGraph.setSelected(null);
+  });
+  document.getElementById("ccNetworkOnlyBtn").addEventListener("click", () => {
+    ccNetworkOnly = !ccNetworkOnly;
+    renderNetwork();
+    if (ccNetworkSelected) centerNetworkOn(ccNetworkSelected);
+  });
+  document.getElementById("ccNetworkClearBtn").addEventListener("click", () => {
+    const wasOnly = ccNetworkOnly;
+    selectNetworkJob(null);
+    if (wasOnly) renderNetwork();
+  });
+  document.getElementById("ccNetworkZoomIn").addEventListener("click", () => setNetworkScale(ccNetworkScale * 1.25));
+  document.getElementById("ccNetworkZoomOut").addEventListener("click", () => setNetworkScale(ccNetworkScale / 1.25));
+  document.getElementById("ccNetworkFitBtn").addEventListener("click", () => fitNetwork(true));
+  document.getElementById("ccNetworkResetBtn").addEventListener("click", () => setNetworkScale(1));
+
+  // Alt/Ctrl + scroll zooms about the cursor (plain scroll still scrolls).
+  view.addEventListener("wheel", (e) => {
+    if (!(e.altKey || e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    setNetworkScale(ccNetworkScale * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Drag the background to pan; a click on it (no drag) lets go of the selection.
+  let drag = null;
+  view.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || e.target.closest(".cc-network-node, #ccNetworkTools")) return;
+    drag = { x: e.clientX, y: e.clientY, left: view.scrollLeft, top: view.scrollTop, moved: false };
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    view.classList.add("panning");
+    view.scrollLeft = drag.left - dx;
+    view.scrollTop = drag.top - dy;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    const wasClick = !drag.moved;
+    drag = null;
+    view.classList.remove("panning");
+    if (wasClick && ccNetworkSelected) document.getElementById("ccNetworkClearBtn").click();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || view.classList.contains("hidden") || !ccNetworkSelected) return;
+    if (document.querySelector(".mini-dialog-overlay, .modal-overlay:not(.hidden)")) return;
+    document.getElementById("ccNetworkClearBtn").click();
+  });
+})();
 
 // Edges are computed from live DOM positions, so anything that moves the
 // job boxes without changing what data is shown (opening/closing the Jobs

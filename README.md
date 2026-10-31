@@ -890,7 +890,28 @@ views:
   the jobs its inputs came from.
 - **Network** — a lineage graph, oldest jobs at top, with every job that used
   another job's output drawn beneath it and connected by a branch line. A job
-  whose output fed two later jobs shows two branches side by side.
+  whose output fed two later jobs shows two branches side by side. Built for
+  projects with hundreds of jobs:
+  - **Trace a job.** Pointing at a job traces it too (the **Trace on hover**
+    box turns that off, and is remembered); click one to colour its ancestors (blue) and descendants
+    (amber) and fade everything else; Esc, the ✕, or a click on the background
+    lets go. Double-click opens the job. **Only lineage** lays out just the
+    traced job's relatives.
+  - **Find.** The search box dims every job whose name, type or status doesn't
+    match, leaving it where it is as a dotted outline; Enter selects the first
+    match and scrolls to it.
+  - **Pan and zoom.** Drag the background to pan, Alt (or Ctrl) + scroll to
+    zoom about the cursor, **Fit** for the whole graph; a large graph opens
+    zoomed out to its full width.
+  - **Readable lines.** Lines run straight and change column in one short
+    jog with rounded corners, jogs sharing a gap are staggered so they don't
+    overlap, a connection that skips several rows runs in a narrow lane beside
+    the boxes rather than behind them (and stays in one column from top to
+    bottom, with the boxes in each row making room), boxes sit under the jobs
+    they connect to instead of each row being centred on its own (linked boxes
+    that are nearly in line are snapped into exactly the same column, so there
+    are no staircases), lines fan out
+    along a box's edge, and arrowheads point at the job that used the output.
 
 For a project built in RELION's own GUI, that lineage isn't guessed from file
 paths — it's read straight from `default_pipeline.star`'s own

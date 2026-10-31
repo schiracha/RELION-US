@@ -152,13 +152,14 @@ def main():
 
         # Edges are read back from the DOM, so anything that moves the boxes
         # without changing the data (closing/reopening the Jobs sidebar) has
-        # to trigger a recompute -- see app.js's ensureNetworkResizeObserver
-        # and the toggleSidebarBtn listener -- or the lines stay drawn at
-        # their old coordinates while the boxes move out from under them.
-        first_node_x_before = page.locator(".cc-network-node").first.evaluate("el => el.offsetLeft")
+        # to keep the lines with them. The drawing is centred as one piece, so
+        # the lines (which live in the same box as the nodes) move with it.
+        # On-screen position is what moves; offsetLeft is relative to the
+        # drawing and stays put.
+        first_node_x_before = page.locator(".cc-network-node").first.evaluate("el => el.getBoundingClientRect().left")
         page.locator("#toggleSidebarBtn").click()
         page.wait_for_timeout(400)  # .15s CSS transition on #sidebar + a margin
-        first_node_x_after = page.locator(".cc-network-node").first.evaluate("el => el.offsetLeft")
+        first_node_x_after = page.locator(".cc-network-node").first.evaluate("el => el.getBoundingClientRect().left")
         check(f"Closing the sidebar actually moves the network's boxes "
               f"({first_node_x_before} -> {first_node_x_after})",
               first_node_x_before != first_node_x_after)

@@ -87,9 +87,25 @@
           <div id="ccTimelineEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
         </div>
         <div id="ccNetworkView" class="cc-view hidden">
-          <div id="ccNetworkCanvas">
-            <div id="ccNetworkRows"></div>
-            <svg id="ccNetworkEdges" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="ccNetworkTools">
+            <input id="ccNetworkSearch" type="search" placeholder="Find a job…" title="Dims every job that doesn't match its name, type or status (Enter selects the first match, Esc clears)" autocomplete="off">
+            <span id="ccNetworkInfo" class="cc-network-info"></span>
+            <span id="ccNetworkSelected" class="cc-network-selected hidden">Tracing <span></span>
+              <button type="button" id="ccNetworkClearBtn" class="btn btn-icon" title="Stop tracing (Esc)">✕</button>
+            </span>
+            <label class="cc-network-check" title="Trace a job's lineage just by pointing at it. Off: only a click traces."><input type="checkbox" id="ccNetworkHover" checked> Trace on hover</label>
+            <button type="button" id="ccNetworkOnlyBtn" class="btn" disabled title="Lay out only the selected job's ancestors and descendants">Only lineage</button>
+            <span class="cc-network-tools-spacer"></span>
+            <button type="button" id="ccNetworkZoomOut" class="btn btn-icon" title="Zoom out">−</button>
+            <button type="button" id="ccNetworkResetBtn" class="btn" title="Back to 100%"><span id="ccNetworkZoomPct">100%</span></button>
+            <button type="button" id="ccNetworkZoomIn" class="btn btn-icon" title="Zoom in">+</button>
+            <button type="button" id="ccNetworkFitBtn" class="btn" title="Fit the whole graph in view">Fit</button>
+          </div>
+          <div id="ccNetworkZoom">
+            <div id="ccNetworkCanvas">
+              <div id="ccNetworkRows"></div>
+              <svg id="ccNetworkEdges" xmlns="http://www.w3.org/2000/svg"></svg>
+            </div>
           </div>
           <div id="ccNetworkEmpty" class="cc-empty hidden">No jobs run yet in this project.</div>
         </div>
