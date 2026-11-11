@@ -889,6 +889,88 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   standardForm.appendChild(advancedSection);
   let advancedLoaded = false;
 
+  // The checked options: flag -> value ("" for a bare switch). Kept with the
+  // job -- recorded in field_values.advanced_args, so a saved draft, a reopened
+  // run and a Clone all have them again -- and turned into command-line text by
+  // the draft (backend job_registry.advanced_arg_tokens), not typed into the
+  // command box. Restored from the form's prefill values before any row exists.
+  const advancedState = new Map();
+  (Array.isArray(prefillValues.advanced_args) ? prefillValues.advanced_args : []).forEach((a) => {
+    if (a && a.flag) advancedState.set(String(a.flag), String(a.value ?? ""));
+  });
+  let advancedTotal = null;       // how many options the program offers, once asked
+  let advancedChipsHost = null;   // the "Set:" strip at the top of the opened section
+
+  function advancedArgsList() {
+    return Array.from(advancedState, ([flag, value]) => ({ flag, value }));
+  }
+
+  function updateAdvancedSummary() {
+    advancedSummary.innerHTML =
+      `<span class="opt-section-name">Advanced</span>` +
+      (advancedTotal === null ? "" : `<span class="opt-section-count">${advancedTotal}</span>`) +
+      (advancedState.size ? `<span class="opt-section-set">${advancedState.size} set</span>` : "");
+  }
+  updateAdvancedSummary();
+
+  // A change to the checked options redraws the command when it is still the one
+  // the form drew (it never overwrites a command edited by hand -- that stays
+  // until Recompute is pressed, and says so).
+  let advancedRecomputeTimer = null;
+  function advancedChanged() {
+    updateAdvancedSummary();
+    renderAdvancedChips();
+    clearTimeout(advancedRecomputeTimer);
+    advancedRecomputeTimer = setTimeout(() => {
+      const recomputeBtn = body.querySelector('[data-role="recompute-btn"]');
+      const box = body.querySelector('[data-role="command-box"]');
+      if (!recomputeBtn || !box) return;
+      if (!inheritedEdited && box.value.trim() === autoCommand.trim()) {
+        recomputeBtn.click();
+      } else if (advancedChipsHost) {
+        advancedChipsHost.dataset.stale = "1";
+        renderAdvancedChips();
+      }
+    }, 250);
+  }
+
+  function renderAdvancedChips() {
+    if (!advancedChipsHost) return;
+    advancedChipsHost.innerHTML = "";
+    if (!advancedState.size) return;
+    const label = document.createElement("span");
+    label.className = "cli-chips-label";
+    label.textContent = "Set:";
+    advancedChipsHost.appendChild(label);
+    advancedState.forEach((value, flag) => {
+      const chip = document.createElement("span");
+      chip.className = "cli-chip";
+      chip.innerHTML = `<code>${escapeHtml(flag)}${value ? " " + escapeHtml(value) : ""}</code>`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "cli-chip-remove";
+      remove.title = `Stop passing ${flag}`;
+      remove.textContent = "✕";
+      remove.addEventListener("click", () => {
+        advancedState.delete(flag);
+        const row = advancedContent.querySelector(`.cli-option[data-flag="${CSS.escape(flag)}"]`);
+        if (row) {
+          row.querySelector('[data-role="cli-check"]').checked = false;
+          row.classList.remove("is-set");
+        }
+        advancedChanged();
+      });
+      chip.appendChild(remove);
+      advancedChipsHost.appendChild(chip);
+    });
+    if (advancedChipsHost.dataset.stale) {
+      const note = document.createElement("div");
+      note.className = "cli-note";
+      note.textContent = "The command box was edited by hand, so it was left alone — press Recompute draft to include these.";
+      advancedChipsHost.appendChild(note);
+    }
+  }
+
   function renderAdvancedRows(host, options) {
     const list = document.createElement("div");
     list.className = "cli-option-list";
@@ -897,30 +979,63 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       row.className = "cli-option";
       row.dataset.flag = opt.flag;
       row.dataset.search = (opt.flag + " " + (opt.help || "")).toLowerCase();
-      const value = opt.takes_value
-        ? `<input type="text" class="cli-option-value" placeholder="${escapeHtml(opt.default || "value")}" />`
-        : "";
+      const kind = opt.value_kind || (opt.takes_value ? "text" : "none");
       row.innerHTML = `
-        <div class="cli-option-main">
+        <label class="cli-option-main">
+          <input type="checkbox" data-role="cli-check" title="Pass this option to the program" />
           <code class="cli-option-flag">${escapeHtml(opt.flag)}</code>
           ${opt.default ? `<span class="cli-option-default">(${escapeHtml(opt.default)})</span>` : ""}
           ${opt.section ? `<span class="cli-option-section">${escapeHtml(opt.section)}</span>` : ""}
-        </div>
+        </label>
         <div class="cli-option-help">${escapeHtml(opt.help || "")}</div>
-        <div class="cli-option-actions">${value}
-          <button type="button" class="btn btn-sm" data-role="cli-add">Add</button>
-        </div>`;
-      row.querySelector('[data-role="cli-add"]').addEventListener("click", () => {
-        const box = body.querySelector('[data-role="command-box"]');
-        if (!box) return;
-        const input = row.querySelector(".cli-option-value");
-        const val = input ? input.value.trim() : "";
-        // Appended to the command box rather than applied invisibly: the box
-        // is what runs, and every other field in this app works the same way.
-        box.value = box.value.trimEnd() + " " + opt.flag + (val ? " " + val : "");
-        box.focus();
-        box.setSelectionRange(box.value.length, box.value.length);
-      });
+        <div class="cli-option-actions"></div>`;
+      const check = row.querySelector('[data-role="cli-check"]');
+      const actions = row.querySelector(".cli-option-actions");
+      let input = null;
+      if (opt.takes_value) {
+        input = document.createElement("input");
+        input.type = "text";
+        input.className = "cli-option-value" + (kind === "file" || kind === "folder" ? " cli-option-path" : "");
+        input.placeholder = opt.default || (kind === "folder" ? "/path/to/folder" : kind === "file" ? "/path/to/file" : "value");
+        actions.appendChild(input);
+        if (kind === "file" || kind === "folder") {
+          const browse = document.createElement("button");
+          browse.type = "button";
+          browse.className = "btn btn-icon";
+          browse.textContent = kind === "folder" ? "📁" : "…";
+          browse.title = kind === "folder"
+            ? "Browse for a folder on the machine running the backend"
+            : "Browse for a file on the machine running the backend";
+          browse.addEventListener("click", async () => {
+            const picked = await pickFileDialog(kind === "folder"
+              ? { title: opt.flag, mode: "directory", startPath: startFolderOf(input.value) }
+              : { title: opt.flag, startPath: currentDirOf(input.value) });
+            if (picked) {
+              input.value = picked;
+              commit(true);
+            }
+          });
+          actions.appendChild(browse);
+        }
+      }
+      function commit(valueTouched) {
+        // typing (or browsing to) a value means the option is wanted
+        if (valueTouched && input && input.value.trim() && !check.checked) check.checked = true;
+        if (check.checked) advancedState.set(opt.flag, input ? input.value.trim() : "");
+        else advancedState.delete(opt.flag);
+        row.classList.toggle("is-set", check.checked);
+        const missing = check.checked && opt.takes_value && !input.value.trim();
+        if (input) input.classList.toggle("invalid", !!missing);
+        if (input) input.title = missing ? "This option needs a value" : "";
+        advancedChanged();
+      }
+      check.addEventListener("change", () => commit(false));
+      if (input) input.addEventListener("input", () => commit(true));
+      if (advancedState.has(opt.flag)) {
+        check.checked = true;
+        row.classList.add("is-set");
+        if (input) input.value = advancedState.get(opt.flag);
+      }
       list.appendChild(row);
     });
     host.appendChild(list);
@@ -943,6 +1058,10 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     }
 
     advancedContent.innerHTML = "";
+    advancedChipsHost = document.createElement("div");
+    advancedChipsHost.className = "cli-chips";
+    advancedContent.appendChild(advancedChipsHost);
+    renderAdvancedChips();
     const intro = document.createElement("div");
     intro.className = "cli-note";
     if (!data.available) {
@@ -959,12 +1078,11 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       `with <code>--help</code>. ` +
       `<strong>${data.options.length}</strong> of ${data.total_program_options} ` +
       `(${data.hidden_by_gui} are already fields above). ` +
-      `Adding one appends it to the command box, where you can still edit it.`;
+      `Tick an option to pass it with this job; it is saved with the job and the command updates.`;
     advancedContent.appendChild(intro);
     // Matches the count badge every other section shows.
-    advancedSummary.innerHTML =
-      `<span class="opt-section-name">Advanced</span>` +
-      `<span class="opt-section-count">${data.options.length}</span>`;
+    advancedTotal = data.options.length;
+    updateAdvancedSummary();
 
     if (!data.parsed) {
       const pre = document.createElement("pre");
@@ -1039,6 +1157,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
       const opt = optionsByKey[key];
       if (opt) values[key] = getFieldValue(wrap, opt);
     });
+    if (advancedState.size) values.advanced_args = advancedArgsList();
     return values;
   }
 

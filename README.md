@@ -772,8 +772,17 @@ The Advanced section at the bottom of the Inputs tab does that for you. The
 first time you open it, it runs the job's program with `--help`, parses
 RELION's own usage format, subtracts every flag the form above already covers,
 and lists what's left with its default, section, and help text. Filter the
-list, fill in a value, and **Add** appends it to the command box, where you can
-still edit or delete it.
+list and tick the options you want, filling in a value where one is needed
+(typing a value ticks the box). Options whose help says they take a file or a
+folder get a **Browse** button. The command redraws as you tick, unless you
+have edited the command box by hand — then it is left alone until you press
+**Recompute draft**.
+
+Ticked options are part of the job's values, not text typed into the command
+box: they are listed in a **Set:** strip at the top of the section (✕ removes
+one) and counted on its heading, and they are saved with a draft, brought back
+when you reopen or Clone the job, and written into the job's "Additional
+arguments" in its `job.star` so a re-run from RELION's own GUI has them too.
 
 Three things worth knowing:
 

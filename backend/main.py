@@ -533,7 +533,14 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
             "options": [],
         }
     try:
-        payload = program_help.extra_options_for_job(raw, program)
+        # Flags the form covers that the extracted definition does not pair with
+        # a field: the verified per-job overrides (e.g. Class3D's "Input
+        # tomogram set" -> --tomograms) and the fields this app adds on top of
+        # RELION's own (e.g. Class2D's tomogram set).
+        base_name, _ = job_registry._resolve_tomo_variant(internal_name)
+        covered = job_catalog.override_flags(base_name) | {
+            o["flag"] for o in job_catalog.synthetic_options(internal_name) if o.get("flag")}
+        payload = program_help.extra_options_for_job(raw, program, covered)
     except program_help.ProgramHelpError as exc:
         return {"available": False, "reason": "not_runnable", "message": str(exc),
                 "program": program, "options": []}

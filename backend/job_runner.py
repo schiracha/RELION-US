@@ -992,6 +992,19 @@ class JobRunManager:
         except Exception:
             options_by_key = {}
         field_values = dict(field_values or {})
+        # The Advanced section's checked options are not a RELION job option;
+        # job.star carries them where RELION itself would, in "Additional
+        # arguments", so a re-run from RELION's own GUI has them too.
+        advanced = field_values.pop("advanced_args", None)
+        try:
+            import job_registry as _jr
+
+            extra = _jr.advanced_arg_tokens(advanced)
+        except Exception:
+            extra = []
+        if extra:
+            field_values["other_args"] = " ".join(
+                part for part in (str(field_values.get("other_args") or "").strip(), *extra) if part)
         for key in stand_in.get("unregistered_fields", ()):
             field_values.pop(key, None)
         field_values.update(stand_in.get("registered_values", {}))

@@ -204,6 +204,63 @@ def test_extra_options_exclude_what_the_form_already_offers(relion_stub):
     assert payload["hidden_by_gui"] == payload["total_program_options"] - len(flags)
 
 
+def test_flags_of_fields_the_app_adds_are_not_offered_again(relion_stub):
+    """A field this app puts in the form on top of RELION's own (Class2D's
+    "Input tomogram set", job_catalog.SYNTHETIC_OPTIONS) covers its flag."""
+    job_def = {"flags_used": [], "option_flags": {}}
+    before = [o["flag"] for o in program_help.extra_options_for_job(job_def, "`which relion_refine`")["options"]]
+    after = [o["flag"] for o in program_help.extra_options_for_job(
+        job_def, "`which relion_refine`", {"--onlyflipphases"})["options"]]
+    assert "--onlyflipphases" in before and "--onlyflipphases" not in after
+
+
+def test_verified_override_flags_count_as_covered():
+    """Class3D's "Input tomogram set" has no extracted flag pairing (its flag
+    comes from a verified override), so it used to be offered again under
+    Advanced as a raw --tomograms option."""
+    import job_catalog
+
+    for job in ("Class3D", "Autorefine", "Inimodel"):
+        flags = job_catalog.override_flags(job)
+        assert {"--tomograms", "--ios", "--trajectories"} <= flags, (job, flags)
+    # multi-token override flags are split, and bare words are not flags
+    assert "--pad" in job_catalog.override_flags("Class3D")
+    assert "1" not in job_catalog.override_flags("Class3D")
+    assert job_catalog.override_flags("NoSuchJob") == set()
+
+
+def test_class2d_synthetic_tomograms_flag_is_declared():
+    import job_catalog
+
+    flags = {o.get("flag") for o in job_catalog.synthetic_options("Class2D")}
+    assert "--tomograms" in flags
+
+
+def test_value_kind_tells_files_and_folders_from_numbers():
+    """Drives the Browse button next to an Advanced option's value box."""
+    kind = program_help.value_kind
+    assert kind("--tomograms", "", "Star file with the tomograms, in case subtomos are handled as 2D stacks", True) == "file"
+    assert kind("--solvent_mask", "", "User-provided mask for the references", True) == "file"
+    assert kind("--scratch_dir", "", "Directory where temporary data should be written", True) == "folder"
+    assert kind("--odir", "", "Output directory for coordinate files", True) == "folder"
+    # numbers and names that merely mention files
+    assert kind("--particle_diameter", "", "Diameter of the circular mask that will be applied to the images", True) == "text"
+    assert kind("--lowpass", "0", "User-provided cutoff for region specified above", True) == "text"
+    assert kind("--selection_type", "0", "Only extract particles with this selection type in the coordinate files", True) == "text"
+    assert kind("--coord_suffix", "", 'The suffix for the coordinate files, e.g. "_picked.star"', True) == "text"
+    assert kind("--sym", "C1", "Symmetry point group for a 3D reference", True) == "text"
+    assert kind("--local_symmetry", "", "Local symmetry description file containing list of masks", True) == "file"
+    # a bare switch has no value at all
+    assert kind("--ctf", "false", "Perform CTF correction", False) == "none"
+
+
+def test_parsed_options_carry_their_value_kind(relion_stub):
+    info = program_help.program_options("`which relion_refine`")
+    kinds = {o["flag"]: o["value_kind"] for o in info["options"]}
+    assert kinds["--onlyflipphases"] == "none"
+    assert kinds["--verb"] == "text"
+
+
 def test_gui_exposed_flags_reads_both_extraction_sources():
     flags = program_help.gui_exposed_flags({
         "flags_used": ["--ctf"],

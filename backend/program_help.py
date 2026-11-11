@@ -109,6 +109,44 @@ def _run_help(path: str, extra_argv: list[str]) -> str:
     return (proc.stdout or "") + (proc.stderr or "")
 
 
+_FOLDER_WORDS = re.compile(r"\b(directory|folder)\b", re.I)
+_FOLDER_FLAG = re.compile(r"(_dir|_directory|_folder|dir)$", re.I)
+_FILE_STRONG = re.compile(
+    r"\b(star[- ]?file|file|files|stack|rootname|filename)\b|\.(star|mrcs?)\b|^image, stack", re.I)
+_NOT_A_PATH = re.compile(r"\b(suffix|point group|b-factor|cutoff)\b", re.I)
+_FILE_WEAK = re.compile(r"\b(mask|map|reference|volume|image|images)\b", re.I)
+_MEASURE = re.compile(
+    r"\b(diameter|width|radius|size|angstroms?|pixels?|degrees?|number|threshold|fraction|resolution|"
+    r"sampling|range|step|iterations?|offset|sigma|tau|percentage|value|limit)\b", re.I)
+
+
+def _number_like(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def value_kind(flag: str, default: str, help_text: str, takes_value: bool) -> str:
+    """What a flag's value looks like, so the form can offer a Browse button:
+    "folder", "file", "text", or "none" for a bare switch. Read from the help
+    text (RELION's usage lines say "star file", "directory", "rootname", ...),
+    so it is a hint, not a guarantee -- the value box stays a plain text box
+    whatever it says, and a wrong guess costs one unneeded button."""
+    if not takes_value:
+        return "none"
+    if _number_like(default) or _NOT_A_PATH.search(help_text):
+        return "text"      # a numeric default means a number, whatever the help says
+    if _FOLDER_WORDS.search(help_text) or _FOLDER_FLAG.search(flag):
+        return "folder"
+    if _FILE_STRONG.search(help_text):
+        return "file"
+    if _FILE_WEAK.search(help_text) and not _MEASURE.search(help_text):
+        return "file"
+    return "text"
+
+
 def parse_relion_help(text: str) -> list[dict[str, Any]]:
     """Parse IOParser usage output into a flat, ordered option list.
 
@@ -146,6 +184,8 @@ def parse_relion_help(text: str) -> list[dict[str, Any]]:
             # or just adds the bare flag; it is a hint, not a guarantee, so the
             # value box stays available either way.
             "takes_value": default.lower() not in ("false", "true"),
+            "value_kind": value_kind(
+                flag, default, help_text, default.lower() not in ("false", "true")),
             "help": help_text,
         })
     return options
@@ -215,11 +255,12 @@ def gui_exposed_flags(job_def: dict) -> set[str]:
     return flags
 
 
-def extra_options_for_job(job_def: dict, program: str) -> dict[str, Any]:
+def extra_options_for_job(job_def: dict, program: str, also_exposed: set[str] | None = None) -> dict[str, Any]:
     """The Advanced section's payload: options the program accepts that the job's
-    form does not already offer."""
+    form does not already offer. `also_exposed`: flags of fields this app adds
+    to the form on top of RELION's own (job_catalog.SYNTHETIC_OPTIONS)."""
     info = program_options(program)
-    exposed = gui_exposed_flags(job_def)
+    exposed = gui_exposed_flags(job_def) | (also_exposed or set())
     extras = [o for o in info["options"] if o["flag"] not in exposed]
     return {
         **info,

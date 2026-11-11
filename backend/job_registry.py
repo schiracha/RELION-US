@@ -143,6 +143,32 @@ def _field_default_value(option: dict) -> Any:
 DEFAULT_MPIRUN = "mpirun"
 
 
+_ADVANCED_FLAG_RE = re.compile(r"^--?[A-Za-z][A-Za-z0-9_\-]*$")
+
+
+def advanced_arg_tokens(advanced_args: Any) -> list[str]:
+    """Command-line tokens for the Advanced section's checked options.
+
+    `advanced_args` is what the form records in field_values: a list of
+    {"flag": "--x", "value": "..."} (value empty for a bare switch). It is how
+    options the RELION form does not offer are kept with the job -- saved with
+    a draft, restored on Clone/reopen -- instead of being typed into the
+    command box. A flag that is not shaped like one is dropped rather than
+    passed to a shell; values are quoted like every other field's."""
+    tokens: list[str] = []
+    for item in advanced_args if isinstance(advanced_args, list) else []:
+        if not isinstance(item, dict):
+            continue
+        flag = str(item.get("flag") or "").strip()
+        if not _ADVANCED_FLAG_RE.match(flag):
+            continue
+        tokens.append(flag)
+        value = str(item.get("value") if item.get("value") is not None else "").strip()
+        if value:
+            tokens.append(shlex.quote(value))
+    return tokens
+
+
 def _mpirun_prefix(nr_mpi: int) -> list[str]:
     mpirun = os.environ.get("RELION_MPIRUN") or DEFAULT_MPIRUN
     return [mpirun, "-n", str(int(nr_mpi))]
@@ -771,6 +797,10 @@ def _build_draft_command(
     # job_catalog.JobDraftOverride.extra_flags.
     parts.extend(draft_extra_flags(base_name, field_values, output_subdir))
 
+    # The Advanced section's checked options, just ahead of other_args so a
+    # hand-typed argument still gets the last word.
+    parts.extend(advanced_arg_tokens(field_values.get("advanced_args")))
+
     # RELION appends this verbatim at the end of the command
     # (`command += " " + joboptions["other_args"].getString();`) -- deliberately
     # unquoted, since the whole point is to pass raw extra arguments.
@@ -845,12 +875,16 @@ def build_job_definition(internal_name: str, output_subdir: str = "") -> dict:
         raw_with_synthetic["options"] = [*raw.get("options", []), *synthetic]
         layout = raw.get("tab_layout")
         if layout and layout.get("tab_fields", {}).get("I/O"):
+            io_fields = list(layout["tab_fields"]["I/O"])
+            for opt in synthetic:
+                # next to the field it belongs with when it names one (`after`),
+                # else at the end of I/O
+                anchor = opt.get("after")
+                at = io_fields.index(anchor) + 1 if anchor in io_fields else len(io_fields)
+                io_fields.insert(at, opt["key"])
             raw_with_synthetic["tab_layout"] = {
                 **layout,
-                "tab_fields": {
-                    **layout["tab_fields"],
-                    "I/O": [*layout["tab_fields"]["I/O"], *(o["key"] for o in synthetic)],
-                },
+                "tab_fields": {**layout["tab_fields"], "I/O": io_fields},
             }
 
     standard_groups = _standard_groups(raw_with_synthetic)

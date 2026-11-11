@@ -1574,6 +1574,148 @@ def test_helical_fields_are_omitted_when_the_checkbox_is_unchecked():
     assert not unmapped, unmapped
 
 
+HELICAL_FLAG_PREFIXES = ("--helical", "--helix", "--ignore_helical")
+
+
+def _helical_flags(cmd: str) -> list:
+    return [t for t in cmd.split() if t.startswith(HELICAL_FLAG_PREFIXES)]
+
+
+def test_default_refinement_drafts_carry_no_helical_flags():
+    """The real user report, reproduced against the FULL default field set (the
+    test above passes only a handful of fields, which is how --helical_z_
+    percentage slipped through: it is nested under do_helix AND
+    do_apply_helical_symmetry, read into a local before use, and so never got
+    a flag/condition pair from the extractor)."""
+    for internal_name in ("Class3D", "Autorefine"):
+        d = job_registry.build_job_definition(internal_name, "X/job001/")
+        assert not d["default_values"]["do_helix"]
+        assert _helical_flags(d["draft_command"]) == [], (internal_name, d["draft_command"])
+
+
+def test_every_job_draft_is_free_of_helical_flags_with_helical_unchecked():
+    for internal_name in JOB_CATALOG:
+        try:
+            d = job_registry.build_job_definition(internal_name, "X/job001/")
+        except KeyError:
+            continue
+        cmd = d["draft_command"]
+        # Extract's helical flags hang off do_extract_helix, Autopick's off
+        # do_pick_helical_segments -- both default off like do_helix
+        assert _helical_flags(cmd) == [], (internal_name, cmd)
+
+
+def test_helical_z_percentage_is_gated_and_converted_to_a_fraction():
+    """`float myz = helical_z_percentage / 100.;` inside do_helix's
+    do_apply_helical_symmetry branch (pipeline_jobs.cpp, Class3D and
+    Autorefine alike)."""
+    for internal_name in ("Class3D", "Autorefine"):
+        raw = job_registry.raw_job(internal_name)
+
+        def build(**fields):
+            values = {k: job_registry._field_default_value(o)
+                      for k, o in {o["key"]: o for o in raw["options"]}.items()}
+            values.update(fields)
+            return job_registry._build_draft_command(raw, values, internal_name, "X/job001/")[0].split()
+
+        on = build(do_helix=True, do_apply_helical_symmetry=True, helical_z_percentage=30)
+        assert on[on.index("--helical_z_percentage") + 1] == "0.3", on
+        assert "--helical_z_percentage" not in build(do_helix=True, do_apply_helical_symmetry=False)
+        assert "--helical_z_percentage" not in build(do_helix=False, do_apply_helical_symmetry=True)
+
+
+def test_helical_literal_flags_follow_the_helical_checkboxes():
+    """--helix, --helical_symmetry_search and --ignore_helical_symmetry are bare
+    literals in RELION's builder (no JobOption of their own) -- present only
+    with "Do helical reconstruction?" checked."""
+    for internal_name in ("Class3D", "Autorefine"):
+        raw = job_registry.raw_job(internal_name)
+
+        def build(**fields):
+            values = {k: job_registry._field_default_value(o)
+                      for k, o in {o["key"]: o for o in raw["options"]}.items()}
+            values.update(fields)
+            return job_registry._build_draft_command(raw, values, internal_name, "X/job001/")[0].split()
+
+        plain = build(do_helix=True, do_apply_helical_symmetry=True, do_local_search_helical_symmetry=False)
+        assert "--helix" in plain
+        assert "--helical_symmetry_search" not in plain and "--ignore_helical_symmetry" not in plain
+        assert "--helical_symmetry_search" in build(
+            do_helix=True, do_apply_helical_symmetry=True, do_local_search_helical_symmetry=True)
+        no_sym = build(do_helix=True, do_apply_helical_symmetry=False)
+        assert "--ignore_helical_symmetry" in no_sym and "--helical_nr_asu" not in no_sym
+        off = build(do_helix=False)
+        assert not any(t in off for t in ("--helix", "--ignore_helical_symmetry", "--helical_symmetry_search"))
+
+
+def test_class2d_offers_the_tomogram_set_as_a_normal_io_field():
+    """Tomography 2D classification needs --tomograms; it used to be reachable
+    only as an Advanced command-line option."""
+    d = job_registry.build_job_definition("Class2D", "X/job001/")
+    io = next(g for g in d["standard_groups"] if g["name"] == "I/O")["fields"]
+    assert io.index("in_tomograms") == io.index("fn_img") + 1, io
+    assert any(o["key"] == "in_tomograms" for o in d["options"])
+    raw = job_registry.raw_job("Class2D")
+    values = dict(d["default_values"])
+    assert "--tomograms" not in job_registry._build_draft_command(raw, values, "Class2D", "X/job001/")[0]
+    values["in_tomograms"] = "Tomograms/job010/tomograms.star"
+    cmd = job_registry._build_draft_command(raw, values, "Class2D", "X/job001/")[0]
+    assert "--tomograms Tomograms/job010/tomograms.star" in cmd, cmd
+
+
+def test_advanced_args_become_command_tokens_ahead_of_other_args():
+    """The Advanced section's ticked options are recorded as field_values
+    ["advanced_args"] and drawn into the command by the draft -- quoted, and
+    before Additional arguments, which keep the last word."""
+    raw = job_registry.raw_job("Class2D")
+    cmd, _ = job_registry._build_draft_command(
+        raw,
+        {"advanced_args": [{"flag": "--verb", "value": "2"},
+                           {"flag": "--dont_check_norm", "value": ""},
+                           {"flag": "--work_dir", "value": "/data/my scratch"}],
+         "other_args": "--hand_typed 1"},
+        "Class2D", "")
+    assert cmd.endswith("--verb 2 --dont_check_norm --work_dir '/data/my scratch' --hand_typed 1"), cmd
+
+
+def test_advanced_args_drop_anything_that_is_not_a_flag():
+    """Only flag-shaped names reach the command line, so a hand-built request
+    cannot smuggle shell text in through the flag."""
+    tokens = job_registry.advanced_arg_tokens([
+        {"flag": "--ok", "value": "1"},
+        {"flag": "--x; rm -rf /", "value": ""},
+        {"flag": "$(evil)", "value": ""},
+        {"flag": "", "value": "orphan"},
+        "not a dict",
+        {"flag": "--v", "value": "a; b"},
+    ])
+    assert tokens == ["--ok", "1", "--v", "'a; b'"], tokens
+    assert job_registry.advanced_arg_tokens(None) == []
+    assert job_registry.advanced_arg_tokens("--verb 3") == []
+
+
+def test_advanced_args_are_folded_into_other_args_for_the_registered_job_star(tmp_path, monkeypatch):
+    """job.star has no Advanced section: RELION's own "Additional arguments"
+    carries them, so a re-run from RELION's GUI has them too."""
+    import job_runner
+    import pipeline_bridge
+
+    captured = {}
+
+    def fake_register(project_dir, type_label, values, options_by_key=None, **kwargs):
+        captured["values"] = dict(values)
+        return {"job_dir": "Class2D/job001/"}
+
+    monkeypatch.setattr(pipeline_bridge, "register_job", fake_register)
+    manager = job_runner.JobRunManager(tmp_path)
+    manager._register_in_relion_pipeline(
+        tmp_path, "Class2D",
+        {"other_args": "--mine", "advanced_args": [{"flag": "--verb", "value": "2"}]})
+    values = captured["values"]
+    assert "advanced_args" not in values
+    assert values["other_args"] == "--mine --verb 2"
+
+
 def test_class3d_range_fields_are_clamped_to_0_90_before_dividing_by_3():
     """RELION clamps range_tilt/psi/rot to [0, 90] degrees before dividing
     by 3 to get the sigma passed to relion_refine (pipeline_jobs.cpp

@@ -904,7 +904,20 @@ html, body {
 }
 .cli-option[hidden] { display: none; }
 .cli-option:last-child { border-bottom: none; }
-.cli-option-main { grid-area: main; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.cli-option-main { grid-area: main; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; cursor: pointer; }
+.cli-option-main input[type="checkbox"] { align-self: center; margin: 0; }
+.cli-option.is-set { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.cli-option-value.invalid { border-color: var(--err); }
+.cli-option-path { width: 200px; }
+.opt-section-set { margin-left: 8px; font-size: 10px; color: var(--accent); }
+.cli-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-bottom: 8px; }
+.cli-chips:empty { display: none; }
+.cli-chips-label { font-size: 11px; color: var(--text-dim); }
+.cli-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; font-size: 11px;
+  border: 1px solid var(--accent); border-radius: 10px; }
+.cli-chip-remove { border: none; background: none; color: var(--text-dim); cursor: pointer; padding: 0; font-size: 10px; }
+.cli-chip-remove:hover { color: var(--err); }
+.cli-chips .cli-note { flex-basis: 100%; margin: 0; }
 .cli-option-flag { color: var(--accent); font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 .cli-option-default { color: var(--text-dim); }
 .cli-option-section { color: var(--text-dim); font-size: 10px; margin-left: auto; }

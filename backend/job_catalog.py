@@ -872,6 +872,32 @@ def _div_by_3(value: float) -> float:
     return value / 3.0
 
 
+def _div_by_100(value: float) -> float:
+    """A percentage field -> the fraction RELION's own command line takes
+    (Class3D/Autorefine's helical_z_percentage -> --helical_z_percentage,
+    `float myz = joboptions["helical_z_percentage"].getNumber(...) / 100.;
+    command += " --helical_z_percentage " + floatToString(myz);`)."""
+    return value / 100.0
+
+
+def _helical_literal_flags(field_values: dict, output_subdir: str = "") -> list:
+    """The bare literal helical flags Class3D/Autorefine's builders add with no
+    JobOption of their own (pipeline_jobs.cpp `if (do_helix) { command += "
+    --helix"; ... if (do_apply_helical_symmetry) { ... if (do_local_search_
+    helical_symmetry) command += " --helical_symmetry_search"; ... } else
+    command += " --ignore_helical_symmetry"; }`) -- only with "Do helical
+    reconstruction?" checked, so a non-helical draft carries none of them."""
+    if not field_values.get("do_helix"):
+        return []
+    flags = ["--helix"]
+    if field_values.get("do_apply_helical_symmetry"):
+        if field_values.get("do_local_search_helical_symmetry"):
+            flags.append("--helical_symmetry_search")
+    else:
+        flags.append("--ignore_helical_symmetry")
+    return flags
+
+
 def _clamp_0_90_then_third(value: float) -> float:
     """Class3D/Autorefine's range_tilt/range_psi/range_rot ->
     --sigma_tilt/--sigma_psi/--sigma_rot (pipeline_jobs.cpp ~4077-4098,
@@ -2290,6 +2316,15 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # self-guarded boolean, only ever reached inside do_helix's
             # branch (is_continue is always false in this app).
             "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+            # `if (do_helix) { ... if (do_apply_helical_symmetry) { ...
+            # float myz = helical_z_percentage / 100.; command += "
+            # --helical_z_percentage " + floatToString(myz); ... } }` -- two
+            # gates deep, and a value read into a local first, which is why
+            # the extractor never paired it with a flag at all: it used to be
+            # emitted unconditionally, with the raw percentage, even with
+            # "Do helical reconstruction?" off.
+            "helical_z_percentage": FlagOverride(
+                "--helical_z_percentage", condition="do_helix && do_apply_helical_symmetry"),
             # Same shape as Inimodel's own sigma_tilt (see that entry's own
             # citation) -- a DIFFERENT field from range_tilt above, which
             # also happens to map to the same real "--sigma_tilt" flag text
@@ -2308,8 +2343,10 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             "range_psi": _clamp_0_90_then_third,
             "range_rot": _clamp_0_90_then_third,
             "helical_range_distance": _third_if_positive,
+            "helical_z_percentage": _div_by_100,
             "sigma_tilt": _emit_if_positive,
         },
+        extra_flags=_helical_literal_flags,
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
             "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",
@@ -2352,6 +2389,15 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             # plain do_helix boolean gate here (~4580-4586).
             "helical_range_distance": FlagOverride("--helical_sigma_distance", condition="do_helix"),
             "keep_tilt_prior_fixed": FlagOverride("--helical_keep_tilt_prior_fixed", condition="do_helix"),
+            # `if (do_helix) { ... if (do_apply_helical_symmetry) { ...
+            # float myz = helical_z_percentage / 100.; command += "
+            # --helical_z_percentage " + floatToString(myz); ... } }` -- two
+            # gates deep, and a value read into a local first, which is why
+            # the extractor never paired it with a flag at all: it used to be
+            # emitted unconditionally, with the raw percentage, even with
+            # "Do helical reconstruction?" off.
+            "helical_z_percentage": FlagOverride(
+                "--helical_z_percentage", condition="do_helix && do_apply_helical_symmetry"),
             # Same shape as Inimodel/Class3D's own sigma_tilt (see
             # Inimodel's entry for the full citation).
             "sigma_tilt": FlagOverride("--sigma_tilt", condition="is_tomo"),
@@ -2371,6 +2417,7 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         },
         numeric_transforms={
             "helical_range_distance": _third_if_positive,
+            "helical_z_percentage": _div_by_100,
             "sigma_tilt": _emit_if_positive,
         },
         # `if (!is_continue) { command += " --auto_refine --split_random_
@@ -2383,7 +2430,8 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
         # the one thing distinguishing this job type from Class3D with
         # --K 1. Confirmed missing for real while stress-testing the SPA
         # tutorial's Refine3D step.
-        extra_flags=lambda field_values, output_subdir: ["--auto_refine", "--split_random_halves"],
+        extra_flags=lambda field_values, output_subdir: [
+            "--auto_refine", "--split_random_halves", *_helical_literal_flags(field_values)],
         suppress=frozenset({
             "use_direct_entries", "use_gpu",
             "do_helix", "do_apply_helical_symmetry", "do_local_search_helical_symmetry",
@@ -2530,6 +2578,10 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
             ["--grad", "--class_inactivity_threshold", "0.1", "--grad_write_iter", "10"]
             if field_values.get("do_grad") and not field_values.get("do_em")
             else []
+        ) + (
+            # the synthetic "Input tomogram set" field (see SYNTHETIC_OPTIONS)
+            ["--tomograms", shlex.quote(str(field_values["in_tomograms"]))]
+            if field_values.get("in_tomograms") else []
         ),
         flags={
             "do_parallel_discio": FlagOverride("--no_parallel_disc_io", negated=True),
@@ -3114,6 +3166,28 @@ DRAFT_OVERRIDES: dict[str, JobDraftOverride] = {
 # ModelAngelo is marked "(beta)" in JOB_CATALOG above: it's the one job in
 # this app that goes beyond faithfully reproducing RELION itself.
 SYNTHETIC_OPTIONS: dict[str, list[dict]] = {
+    # Tomography 2D classification. relion_refine takes --tomograms (the
+    # tomogram set the pseudo-subtomogram particles came from), the same flag
+    # Class3D/Autorefine/Inimodel expose as "Input tomogram set"; RELION's own
+    # Class2D window has no such field (`flag` is what the Advanced section
+    # uses to know the form already offers it, `after` where it sits in I/O).
+    # Optional: left empty for single-particle data, and nothing is emitted.
+    "Class2D": [{
+        "key": "in_tomograms",
+        "label": "Input tomogram set (tomography only): ",
+        "field_type": "inputnode",
+        "nodetype": "LABEL_TOMOGRAMS_CPIPE",
+        "node_type_depth": "1",
+        "default": "",
+        "pattern": "Tomogram set STAR file (*.star)",
+        "help": (
+            "Tomogram set STAR file, passed as --tomograms. Needed when classifying "
+            "pseudo-subtomograms in 2D, so relion_refine can find the tomograms the "
+            "particles came from. Leave empty for single-particle data."
+        ),
+        "flag": "--tomograms",
+        "after": "fn_img",
+    }],
     "ModelAngelo": [{
         "key": "mask_path",
         "label": "Mask (optional; not in RELION's own GUI):",
@@ -3189,6 +3263,22 @@ def draft_numeric_value_for(internal_name: str, option_key: str, raw_value: floa
         return None
     fn = override.numeric_transforms.get(option_key)
     return fn(raw_value) if fn is not None else None
+
+
+def override_flags(internal_name: str) -> set[str]:
+    """Every `--flag` this job's verified flag overrides (JobDraftOverride.flags)
+    emit -- fields the form offers whose flag the extractor could not pair
+    with them (RELION-5's in_tomograms -> --tomograms, in_optimisation --> --ios,
+    ...). The Advanced section must not offer these again. A FlagOverride's
+    flag may be several tokens ("--pad 1"); only the `--` ones are flags."""
+    override = _override(internal_name)
+    if override is None:
+        return set()
+    flags: set[str] = set()
+    for entry in override.flags.values():
+        for text in (entry.flag, entry.flag_if_condition_false):
+            flags.update(t for t in (text or "").split() if t.startswith("--"))
+    return flags
 
 
 def draft_flag_for(internal_name: str, option_key: str) -> Optional[str]:

@@ -192,14 +192,89 @@ def main():
         adv.locator(".cli-search").fill("")
         page.wait_for_timeout(250)
 
-        # adding appends to the command box rather than applying invisibly
-        before_cmd = win.locator(".command-box").input_value()
+        # A checkbox, not an Add button: ticking an option passes it with the job.
+        check("Advanced rows have a checkbox, not an Add button",
+              row_val.locator('[data-role="cli-check"]').count() == 1
+              and adv.locator('[data-role="cli-add"]').count() == 0)
         row_val.locator(".cli-option-value").fill("3")
-        row_val.locator('[data-role="cli-add"]').click()
+        page.wait_for_timeout(700)      # the command redraws on its own, after a short pause
+        check("Typing a value ticks the option", row_val.locator('[data-role="cli-check"]').is_checked())
+        cmd_adv = win.locator(".command-box").input_value()
+        check(f"The command is redrawn with it, ahead of Additional arguments (…{cmd_adv[-40:]!r})",
+              "--verb 3" in cmd_adv and cmd_adv.index("--verb 3") < cmd_adv.index("--dont_check_norm --verb 2"))
+        chips_text = adv.locator(".cli-chips").inner_text()
+        head_text = adv.locator(".opt-section-head").inner_text()
+        check(f"It is listed in a Set strip and counted on the section head ({chips_text!r}, {head_text!r})",
+              "--verb 3" in chips_text and "1 set" in head_text.lower())
+        check("The form did not mark the command as hand-edited",
+              win.locator('[data-role="edited-note"]').is_hidden())
+
+        # a boolean switch is just the checkbox
+        row_bool.locator('[data-role="cli-check"]').check()
+        page.wait_for_timeout(700)
+        cmd_sw = win.locator(".command-box").input_value()
+        check(f"Ticking a switch adds the bare flag (…{cmd_sw[-60:]!r})",
+              "--verb 3 --dont_check_norm" in cmd_sw)
+        check("The count follows", "2 set" in adv.locator(".opt-section-head").inner_text().lower())
+
+        # file and folder options offer Browse; numbers and switches do not
+        row_mask = adv.locator(".cli-option[data-flag='--solvent_mask']")
+        row_dir = adv.locator(".cli-option[data-flag='--work_dir']")
+        check("A file option has a Browse button", row_mask.locator(".cli-option-actions button").count() == 1)
+        check("A folder option has a Browse button", row_dir.locator(".cli-option-actions button").count() == 1)
+        check("A number option does not", row_val.locator(".cli-option-actions button").count() == 0)
+        row_dir.locator(".cli-option-actions button").click()
+        page.wait_for_selector(".file-picker .project-browser:not([aria-busy])", timeout=5000)
+        check("The folder button opens the folder picker",
+              page.locator('[data-role="pick-select-folder"]').count() == 1)
+        page.locator('[data-role="pick-select-folder"]').click()
+        page.wait_for_timeout(900)
+        picked_dir = row_dir.locator(".cli-option-value").input_value()
+        check(f"Picking a folder fills the value and ticks the option ({picked_dir})",
+              picked_dir.startswith("/") and row_dir.locator('[data-role="cli-check"]').is_checked())
+        check("...and it reaches the command", f"--work_dir {picked_dir}" in win.locator(".command-box").input_value())
+
+        # unticking removes it; the chip's ✕ does the same
+        row_bool.locator('[data-role="cli-check"]').uncheck()
+        adv.locator(".cli-chip", has_text="--work_dir").locator(".cli-chip-remove").click()
+        page.wait_for_timeout(700)
+        cmd_after = win.locator(".command-box").input_value()
+        check("Unticking drops the flag from the command",
+              "--work_dir" not in cmd_after and cmd_after.index("--verb 3") >= 0
+              and "--dont_check_norm" not in cmd_after.split("--verb 3")[0])
+        check("The chip's ✕ unticks the row", not row_dir.locator('[data-role="cli-check"]').is_checked())
+
+        # a command edited by hand is left alone
+        win.locator(".command-box").fill(cmd_after + " --my_hand_edit")
+        row_bool.locator('[data-role="cli-check"]').check()
+        page.wait_for_timeout(700)
+        check("A command edited by hand is not overwritten",
+              "--my_hand_edit" in win.locator(".command-box").input_value())
+        check("...and the strip says to press Recompute",
+              "Recompute" in adv.locator(".cli-chips").inner_text())
+        row_bool.locator('[data-role="cli-check"]').uncheck()
+        win.locator('[data-role="recompute-btn"]').click()
+        page.wait_for_timeout(700)
+
+        # The ticked options are part of the job's values: a saved draft brings them back.
+        win.locator('[data-role="save-draft-btn"]').click()
+        page.wait_for_timeout(700)
+        page.evaluate("document.getElementById('draftsBtn').click()")
         page.wait_for_timeout(300)
-        after_cmd = win.locator(".command-box").input_value()
-        check(f"Adding an advanced option appends it to the command box (…{after_cmd[-12:]!r})",
-              after_cmd == before_cmd.rstrip() + " --verb 3")
+        page.evaluate("document.querySelector('.drafts-row-label').click()")
+        page.wait_for_timeout(1500)
+        win_d = page.locator(".winbox").last
+        adv_d = win_d.locator('[data-role="advanced-section"]')
+        check("A reopened draft counts the ticked option on the Advanced head",
+              "1 set" in adv_d.locator(".opt-section-head").inner_text().lower())
+        adv_d.locator(".opt-section-head").click()
+        page.wait_for_timeout(900)
+        check("...shows it ticked, with its value",
+              adv_d.locator(".cli-option[data-flag='--verb'] [data-role='cli-check']").is_checked()
+              and adv_d.locator(".cli-option[data-flag='--verb'] .cli-option-value").input_value() == "3")
+        check("...and the redrawn command has it", "--verb 3" in win_d.locator(".command-box").input_value())
+        win_d.locator('[data-action="close"]').click()
+        page.wait_for_timeout(300)
 
         # ---- a job with no MPI variant, and a custom job ----
         win2 = open_job(page, "Import", "Import")

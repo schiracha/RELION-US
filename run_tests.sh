@@ -172,6 +172,8 @@ print("""+++ RELION: command line arguments (with defaults for optional ones bet
                          --verb (1) : Verbosity (1=normal, 0=silent)
            --onlyflipphases (false) : Only flip phases, do not correct amplitudes
                           --pad (2) : Oversampling factor for the Fourier transforms
+                    --solvent_mask : User-provided mask for the references
+                         --work_dir : Directory for temporary data
                           --version : Print RELION version and exit""")
 STUB
   chmod +x "$dir/relion_refine"
