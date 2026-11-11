@@ -185,18 +185,21 @@ from isonet_jobs import ISONET_JOB_DEFINITIONS, build_isonet_command, validate_i
 from deepetpicker_jobs import (
     DEEPETPICKER_JOB_DEFINITIONS, build_deepetpicker_command, validate_deepetpicker_fields,
 )
+from aretomo_jobs import ARETOMO_JOB_DEFINITIONS, build_aretomo_command, validate_aretomo_fields
 
 # Job types that run an external deep-learning command line as a real
 # subprocess (local or SLURM) through start_subprocess_job, with an editable
-# draft command: IsoNet2 and DeepETPicker. Everything below that used to be
-# keyed on ISONET_JOB_DEFINITIONS alone is keyed on this.
-EXTERNAL_COMMAND_JOBS = {**ISONET_JOB_DEFINITIONS, **DEEPETPICKER_JOB_DEFINITIONS}
+# draft command: IsoNet2, DeepETPicker and AreTomo2. Everything below that used
+# to be keyed on ISONET_JOB_DEFINITIONS alone is keyed on this.
+EXTERNAL_COMMAND_JOBS = {**ISONET_JOB_DEFINITIONS, **DEEPETPICKER_JOB_DEFINITIONS, **ARETOMO_JOB_DEFINITIONS}
 
 
 def build_external_command(internal_name: str, field_values: dict, output_subdir: str,
                            project_dir=None) -> str:
     if internal_name in DEEPETPICKER_JOB_DEFINITIONS:
         return build_deepetpicker_command(internal_name, field_values, output_subdir, project_dir)
+    if internal_name in ARETOMO_JOB_DEFINITIONS:
+        return build_aretomo_command(internal_name, field_values, output_subdir, project_dir)
     return build_isonet_command(internal_name, field_values, output_subdir, project_dir)
 from job_runner import (
     MANUALLY_SETTABLE_STATUSES, STATUS_PENDING, STATUS_QUEUED, STATUS_RUNNING, WAIT_MODES,
@@ -513,7 +516,8 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
     if internal_name in EXTERNAL_COMMAND_JOBS:
         return {
             "available": False,
-            "reason": "isonet_job" if internal_name in ISONET_JOB_DEFINITIONS else "deepetpicker_job",
+            "reason": ("isonet_job" if internal_name in ISONET_JOB_DEFINITIONS
+                       else "aretomo_job" if internal_name in ARETOMO_JOB_DEFINITIONS else "deepetpicker_job"),
             "message": "Every command-line flag for this job is already exposed as a field above "
                        "— there's no separate Advanced section to discover here.",
             "options": [],
@@ -636,7 +640,7 @@ async def start_run(req: StartRunRequest):
         ):
             raise HTTPException(
                 status_code=400,
-                detail="Only RELION, IsoNet and DeepETPicker command jobs can wait for another job; "
+                detail="Only RELION, IsoNet, DeepETPicker and AreTomo2 command jobs can wait for another job; "
                        "in-app converters and pickers start immediately.")
 
     if req.overwrite_run_id and not run_manager.pipeline_sync_enabled():
@@ -731,13 +735,14 @@ async def start_run(req: StartRunRequest):
                    build_external_command(req.internal_name, {}, draft_subdir)}
         if not req.command or req.command in drafted:
             validate = (validate_deepetpicker_fields if req.internal_name in DEEPETPICKER_JOB_DEFINITIONS
+                        else validate_aretomo_fields if req.internal_name in ARETOMO_JOB_DEFINITIONS
                         else validate_isonet_fields)
             problems = validate(req.internal_name, req.field_values or {}, run_manager.project_dir)
             if problems:
                 raise HTTPException(status_code=400, detail=" ".join(problems))
 
     if req.internal_name in EXTERNAL_COMMAND_JOBS:
-        # An IsoNet2 / DeepETPicker job runs through the SAME execution primitive a real
+        # An IsoNet2 / DeepETPicker / AreTomo2 job runs through the SAME execution primitive a real
         # RELION job does (start_subprocess_job -- local or SLURM,
         # identically), just with isonet_jobs.build_isonet_command in place
         # of job_registry._build_draft_command. req.command is the user's
