@@ -315,19 +315,6 @@ CUSTOM_JOBS = {
         "category": "IsoNet (Beta)",
         "description": "Apply a trained IsoNet2 model to tomograms (missing-wedge correction / denoising)",
     },
-    # AreTomo2 (github.com/czimaginginstitute/AreTomo2) -- one job type that
-    # runs the AreTomo2 command on a stack or a folder of stacks, as a real
-    # subprocess like IsoNet2 (local + SLURM), command-building in
-    # aretomo_jobs.py. Not to be confused with AreTomoImport above, which only
-    # converts an .aln someone already has. Fabricated custom.* label (no
-    # RELION class), same as IsoNet2's.
-    "AreTomo2": {
-        "label_new": "custom.aretomo2",
-        "display_name": "AreTomo2 – Align & Reconstruct",
-        "category": "Tilt Series / Tomogram Reconstruction",
-        "description": "Marker-free tilt-series alignment, optional CTF estimation and dose weighting, and "
-                       "tomogram reconstruction with AreTomo2 (one stack or a folder of stacks)",
-    },
     # DeepETPicker (github.com/cbmi-group/DeepETPicker) -- three job types, one
     # per `deepetpicker` command, run as real subprocesses like IsoNet2 (so
     # local + SLURM), command-building in deepetpicker_jobs.py. Not to be
@@ -416,7 +403,7 @@ PIPELINE_TOMO_ONLY = {
     "TomoAlignTiltSeries", "TomoMotioncorr", "TomoCtffind",
     "TomoReconstructTomograms", "TomoDenoiseTomograms", "TomoExcludeTiltImages",
     "TomoSubtomo", "TomoAlign", "TomoReconPart",
-    "ImodImport", "WarpImport", "DeepETPickerImport", "AreTomoImport", "AreTomo2",
+    "ImodImport", "WarpImport", "DeepETPickerImport", "AreTomoImport",
     "IsonetPrepareStar", "IsonetDeconv", "IsonetMakeMask",
     "IsonetDenoise", "IsonetRefine", "IsonetPredict",
     "DeepETPickerPrepare", "DeepETPickerTrain", "DeepETPickerPredict",
@@ -505,7 +492,6 @@ JOB_DIRNAME = {
     # its own unambiguous prefix instead (not a real RELION directory name,
     # so no collision risk with the real ones above).
     "AreTomoImport": "AreTomoImport",
-    "AreTomo2": "AreTomo2",
     # Filter Picks is RELION's Select job in its select-on-value mode, so it
     # numbers and registers as one (Select/jobNNN, relion.select.onvalue).
     "PickFilter": "Select",

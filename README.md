@@ -412,8 +412,7 @@ out** item appears under **☰ Menu** once you're in.
 
 Every RELION job type grouped by RELION's own categories, with the import
 bridges tagged `(custom)`, IsoNet2 under its own **IsoNet (Beta)** category
-and DeepETPicker under **DeepETPicker (Beta)**; AreTomo2 sits with the other tilt-series and
-tomogram-reconstruction jobs. An **All / SPA / Tomo** toggle filters the list; the app guesses
+and DeepETPicker under **DeepETPicker (Beta)**. An **All / SPA / Tomo** toggle filters the list; the app guesses
 which to preselect from the job types the project has actually run, but never
 gates what you can run.
 
@@ -624,30 +623,6 @@ separate from **Import from DeepETPicker**, which only converts a `.coords` file
 made elsewhere. The Prepare job's tomogram-file column default
 (`rlnTomoReconstructedTomogram`) has not been checked against every RELION-5
 release; if it is wrong the job stops and lists the columns the file has.
-
-**AreTomo2 – Align & Reconstruct** runs [AreTomo2](https://github.com/czimaginginstitute/AreTomo2)
-(marker-free alignment, optional local-motion patches, CTF estimation, dose
-weighting and SART/WBP reconstruction in one command) on a tilt-series stack or
-a whole folder of them. It is separate from **Import from AreTomo2 (.aln)**,
-which only converts an alignment you already have, and from RELION-5's own Align
-Tilt Series job, which can call AreTomo2 from a tilt-series STAR file; this one is
-for plain `.mrc`/`.st` stacks when you want AreTomo2's own outputs (tomogram,
-`.aln`, the `_Imod/` folder for RELION 4/5 or Warp, CTF spectra).
-
-The command is `AreTomo -InMrc <stack> -OutMrc <JobDir>/jobNNN/<stack name>.mrc ...`
-(the field is `AreTomo` by default: a link to the AreTomo2 binary on `PATH`; put
-a full path if yours is named differently). AreTomo2 takes one stack per run, so a
-folder becomes a visible `for` loop in the command box. It carries on past a
-failed stack and ends non-zero if any failed. The command also tests that the
-output file exists, because AreTomo2 exits 0 after errors such as "tilt angles
-cannot be found". Tilt angles come from the stack's MRC header, a tilt range, or
-an angle file (per stack in folder mode: `<stack name>.rawtlt` beside it by
-default). Only options that differ from AreTomo2's own defaults appear in the
-command, except volume thickness, binning, alignment thickness, GPU and
-`-OutImod`. Binning defaults to 4 and `-OutImod` to 1 (RELION 4/5), which are
-not AreTomo2's defaults. In my test of the AreTomo2 build installed here, `-OutImod 2`
-and `3` crashed with a segmentation fault on a synthetic series, and `0` and `1`
-ran; if that happens to you, use 1.
 
 ### In-browser replacements for RELION's desktop-only steps
 

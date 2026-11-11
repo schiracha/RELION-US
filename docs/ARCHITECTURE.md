@@ -1111,14 +1111,14 @@ github.com/cbmi-group/DeepETPicker `main.py` / `utils/utils.py`, read
 Endpoints: `POST /api/viz/inspect`, `GET /api/viz/volume-info`,
 `GET /api/viz/slice` (`?transpose`), `POST /api/viz/picks`. New deps: `mrcfile`, `pillow`.
 
-## External command-line jobs (IsoNet2, DeepETPicker, AreTomo2)
+## External command-line jobs (IsoNet2, DeepETPicker)
 
 Tools that are neither RELION programs nor fast converters run through the same
 primitive as RELION jobs, `job_runner.start_subprocess_job`, so they get local
 and SLURM execution, an editable command box, abort-by-process-group and the
 Outputs/Clean/Delete machinery for free. `isonet_jobs.py` and
-`deepetpicker_jobs.py` and `aretomo_jobs.py` each hold a table of field
-definitions and a command builder; `main.py` treats all three through `EXTERNAL_COMMAND_JOBS` and
+`deepetpicker_jobs.py` each hold a table of field definitions and a command
+builder; `main.py` treats both through `EXTERNAL_COMMAND_JOBS` and
 `build_external_command`, and `job_catalog.CUSTOM_JOBS` gives them menu entries
 with fabricated `custom.*` labels (no RELION class exists, so
 `relion_pipeliner` is not asked to register them).
@@ -1218,18 +1218,6 @@ Because the popup always sends its command box content along with the fields,
 For DeepETPicker it validates when the command still equals a draft this app
 would build (for the current fields, or for the untouched defaults) and leaves a
 hand-edited command alone, as for every other job type.
-
-`aretomo_jobs.py` differs from the other two in that the tool is not a Python
-package with a CLI of ours: it is AreTomo2's own command, whose parser takes
-`-Flag value ...` with no `=` form, one stack per run, and which exits 0 after
-printing `Error: ...` (verified on the installed build for missing tilt angles).
-So the builder (a) writes a POSIX-`sh` loop for a folder of stacks, because the
-runner executes the command under `/bin/sh`, and (b) ends every form of the command
-with `&& [ -s <output> ] || ...`, so a stack that produced nothing fails the job
-instead of being reported as completed. Flags equal to AreTomo2's own default are
-left out of the command, except the handful that define the job. The flag list in
-`tests/test_aretomo_jobs.py` is copied from `CInput.cpp`, and one test runs the
-real binary on a small synthetic series when AreTomo2 and a GPU are present.
 
 ## Invariants worth preserving
 
