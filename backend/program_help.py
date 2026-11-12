@@ -84,7 +84,15 @@ def resolve_program(program: str) -> tuple[str | None, list[str]]:
     argv = program_argv(program)
     if not argv:
         return None, []
-    return shutil.which(argv[0]), argv[1:]
+    # Ask the serial binary even when handed the MPI one: relion_refine_mpi
+    # accepts exactly the same options but, run bare, waits on MPI start-up
+    # and never prints its help. relion_refine --help answers at once.
+    name = argv[0]
+    if name.endswith("_mpi"):
+        serial = shutil.which(name[:-len("_mpi")])
+        if serial:
+            return serial, argv[1:]
+    return shutil.which(name), argv[1:]
 
 
 def _run_help(path: str, extra_argv: list[str]) -> str:

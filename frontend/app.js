@@ -1479,7 +1479,9 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     enabled: true,          // "Live progress" — on by default for supported jobs
     // Spacing of the iterations offered in the picker (1 = every). Settings'
     // "Images every N iterations (default)" overrides the built-in 1, when set.
-    everyN: globalSettings["progress.images_every_n_default"] || 1,
+    // Last value typed into the "Every N it" box wins over that default, and
+    // is remembered across popups (reopening used to snap back to the default).
+    everyN: storedProgressEveryN() || globalSettings["progress.images_every_n_default"] || 1,
     data: null,               // latest GET /progress response (iteration summaries + latest)
     selectedIteration: "latest",   // "latest" (auto-follows new polls) or a specific number
     iterationCache: {},      // iteration number -> its full {iteration, resolution_A, classes}
@@ -1489,6 +1491,27 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
                              // of loss_full.png/loss_top.png/loss_bottom.png exist right now
   };
 
+
+  function storedProgressEveryN() {
+    try {
+      const n = parseInt(localStorage.getItem(PROGRESS_EVERY_N_KEY), 10);
+      return n >= 1 ? n : 0;
+    } catch (e) { return 0; }
+  }
+
+  // "Latest" with an Every-N spacing means the newest iteration on that grid
+  // (5, 10, 15 …), so images and charts advance only every N iterations --
+  // not the raw newest one. Falls back to the true latest while nothing on
+  // the grid exists yet, and once the run has finished (so the final result
+  // is never hidden behind the spacing).
+  function effectiveLatestIteration(d) {
+    const trueLatest = d.latest.iteration;
+    const n = progressState.everyN;
+    const finished = currentRun && ["completed", "failed", "aborted"].includes(currentRun.status);
+    if (n <= 1 || finished) return trueLatest;
+    const onGrid = d.iterations.map((p) => p.iteration).filter((it) => it % n === 0);
+    return onGrid.length ? Math.max(...onGrid) : trueLatest;
+  }
 
   function refreshNoteRow() {
     const note = (currentRun && currentRun.note) || "";
@@ -2167,6 +2190,7 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     progressContent.querySelector('[data-role="prog-every"]').addEventListener("change", (e) => {
       progressState.everyN = Math.max(1, parseInt(e.target.value, 10) || 1);
       e.target.value = progressState.everyN;
+      try { localStorage.setItem(PROGRESS_EVERY_N_KEY, String(progressState.everyN)); } catch (err) { /* noop */ }
       renderProgressBody();
     });
     progressContent.querySelector('[data-role="prog-iter-select"]').addEventListener("change", (e) => {
@@ -2183,10 +2207,10 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
   function renderIterationOptions(d) {
     const select = progressContent.querySelector('[data-role="prog-iter-select"]');
     if (!select) return;
-    const latestIt = d.latest.iteration;
+    const latestIt = effectiveLatestIteration(d);
     const shown = d.iterations
       .map((p) => p.iteration)
-      .filter((it) => it === latestIt || it % progressState.everyN === 0)
+      .filter((it) => it === latestIt || (it % progressState.everyN === 0 && it <= latestIt))
       .sort((a, b) => b - a);
     select.innerHTML = [`<option value="latest">Latest (iteration ${latestIt})</option>`]
       .concat(shown.filter((it) => it !== latestIt).map((it) => `<option value="${it}">iteration ${it}</option>`))
@@ -2306,12 +2330,16 @@ async function openJobPopup(internalName, displayName, existingRun, opts = {}) {
     renderIterationOptions(d);
 
     const targetIteration = progressState.selectedIteration === "latest"
-      ? d.latest.iteration : progressState.selectedIteration;
+      ? effectiveLatestIteration(d) : progressState.selectedIteration;
     let shown;
     if (targetIteration === d.latest.iteration) {
       shown = d.latest;
     } else {
-      host.innerHTML = '<div class="progress-empty">Loading iteration…</div>';
+      // Only flash "Loading…" for an iteration not fetched yet; a cached one
+      // (the usual case while polling an Every-N grid) swaps in instantly.
+      if (!progressState.iterationCache[targetIteration]) {
+        host.innerHTML = '<div class="progress-empty">Loading iteration…</div>';
+      }
       try {
         shown = await fetchIterationClasses(targetIteration);
       } catch (err) {
@@ -6443,6 +6471,7 @@ document.getElementById("volume3dBtn").addEventListener("click", () => openVolum
 // data, so it survives reloads but starts every NEW user at the original
 // 64px default rather than forcing a size on them.
 const XT_THUMB_SIZE_KEY = "relion_us_xt_thumb_size";
+const PROGRESS_EVERY_N_KEY = "relion_us_progress_every_n";
 
 async function openExcludeTiltsEditor({ runId, sourcePath }) {
   const body = document.createElement("div");

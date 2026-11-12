@@ -279,3 +279,23 @@ def test_real_job_definitions_expose_flags(relion_stub):
     assert "--pad" in exposed        # emitted by Class2D's own builder
     assert "--j" in exposed          # nr_threads, from option_flags
     assert len(exposed) > 20
+
+
+def test_mpi_program_is_helped_through_the_serial_binary(tmp_path, monkeypatch):
+    """relion_refine_mpi --help hangs waiting on MPI; ask relion_refine instead."""
+    bindir = _make_stub(tmp_path, "relion_refine", RELION_HELP)
+    hang = bindir / "relion_refine_mpi"
+    hang.write_text("#!/bin/sh\nsleep 600\n")
+    hang.chmod(hang.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    program_help._cached_help.cache_clear()
+    path, _ = program_help.resolve_program("`which relion_refine_mpi`")
+    assert Path(path).name == "relion_refine"
+    assert program_help.program_options("relion_refine_mpi")["parsed"]
+
+
+def test_mpi_program_without_a_serial_twin_is_left_alone(tmp_path, monkeypatch):
+    bindir = _make_stub(tmp_path, "relion_only_mpi", RELION_HELP)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    path, _ = program_help.resolve_program("relion_only_mpi")
+    assert Path(path).name == "relion_only_mpi"

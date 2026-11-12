@@ -499,8 +499,8 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
     subset of what the program accepts, and the extra ones are precisely the
     flags you would otherwise hunt for in `--help` output or the source.
 
-    nr_mpi picks which binary to ask, since RELION's parallel variant can
-    accept flags the serial one doesn't.
+    Always asks the serial binary (nr_mpi is accepted but ignored): the _mpi
+    build takes the same options, and `relion_refine_mpi --help` hangs.
     """
     if internal_name in CUSTOM_JOB_DEFINITIONS:
         return {
@@ -523,7 +523,9 @@ def job_cli_options(internal_name: str, nr_mpi: int = Query(1)):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job type: {internal_name}")
 
-    program = raw.get("program_mpi") if (nr_mpi > 1 and raw.get("program_mpi")) else raw.get("program_guess")
+    # Always the serial program: its options are the same as the _mpi build's,
+    # and `<program>_mpi --help` hangs waiting on MPI instead of printing them.
+    program = raw.get("program_guess") or raw.get("program_mpi")
     if not program:
         return {
             "available": False,

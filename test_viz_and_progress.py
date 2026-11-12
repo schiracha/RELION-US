@@ -431,6 +431,29 @@ def main():
               f"iteration {earlier_value}" in status_after_pick)
         check("Thumbnails still render for the picked iteration", win.locator(".thumb img").count() >= 1)
 
+        # "Every N it" is remembered (it used to snap back to the default on
+        # reopen) and thins the picker to that spacing.
+        win.locator('[data-role="prog-iter-select"]').select_option("latest")
+        win.locator('[data-role="prog-every"]').fill("2")
+        win.locator('[data-role="prog-every"]').dispatch_event("change")
+        page.wait_for_timeout(700)
+        check("Every-N value is stored for the next popup",
+              page.evaluate("localStorage.getItem('relion_us_progress_every_n')") == "2")
+        thinned = [v for v in win.locator('[data-role="prog-iter-select"] option').evaluate_all(
+            "els => els.map(e => e.value)") if v != "latest"]
+        check(f"Picker only lists every 2nd iteration ({thinned})",
+              all(int(v) % 2 == 0 for v in thinned))
+        # Grid-following (Latest = newest multiple of N) is covered in the page
+        # itself below; here the job may already have finished, in which case the
+        # true last iteration is shown on purpose.
+        latest_it = page.evaluate("""() => {
+            const o = document.querySelector('.winbox [data-role="prog-iter-select"] option');
+            const m = o && o.textContent.match(/iteration (\\d+)/);
+            return m ? parseInt(m[1], 10) : null;
+        }""")
+        check(f"Latest option names an iteration ({latest_it})", latest_it is not None)
+        page.evaluate("localStorage.removeItem('relion_us_progress_every_n')")
+
         win.locator('[data-action="close"]').click()
         page.wait_for_timeout(300)
 
